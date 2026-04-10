@@ -1,0 +1,25 @@
+# Copy this file to /etc/systemd/system/crypto-bot-runtime.service
+# Adjust User, WorkingDirectory, EnvironmentFile, and ExecStart if your deployment path differs.
+
+[Unit]
+Description=Crypto Bot V1 Trading Runtime
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/crypto-bot-v1
+EnvironmentFile=/opt/crypto-bot-v1/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/crypto-bot-v1/.venv-3/bin/python /opt/crypto-bot-v1/main.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "quote_asset": "THB",
+  "min_quote_balance_thb": 100.0,
+  "require_supported_market": true,
+  "include_assets_with_balance": true,
+  "assets": [
+    {
+      "symbol": "BTC",
+      "enabled": true
+    },
+    {
+      "symbol": "POL",
+      "enabled": true
+    },
+    {
+      "symbol": "ETH",
+      "enabled": true
+    },
+    {
+      "symbol": "DOGE",
+      "enabled": true
+    }
+  ]
+}

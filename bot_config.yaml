@@ -1,0 +1,313 @@
+# Crypto Trading Bot Configuration
+# =================================
+
+# API Keys (REPLACE WITH YOUR ACTUAL KEYS)
+api_keys:
+  binance_api_key: "YOUR_BINANCE_API_KEY"
+  binance_secret_key: "YOUR_BINANCE_SECRET_KEY"
+  bitkub_api_key: "YOUR_BITKUB_API_KEY"
+  bitkub_secret_key: "YOUR_BITKUB_SECRET_KEY"
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+
+# Trading Settings
+simulate_only: false                 # false = live trading, true = paper trading only
+trading:
+  trading_pair: ""                  # Runtime will set this from current Bitkub holdings
+  # Multi-pair support: bot will iterate through all pairs in data.pairs
+  # trading_pairs list can be added for specific pairs to trade
+  interval_seconds: 60               # Main loop interval in seconds
+  timeframe: "15m"                    # Primary data timeframe for analysis
+  mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
+
+# Multi-Timeframe Analysis Settings
+multi_timeframe:
+  enabled: true                      # Enable multi-timeframe analysis
+  # Timeframes to analyze (in order of priority for storage/collection)
+  # NOTE: higher_timeframes MUST be a subset of this list so data is actually collected
+  timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]
+  # Minimum timeframe alignment for trade (0.0-1.0)
+  alignment_threshold: 0.4
+  # Require higher timeframe (1h+) confirmation before trade
+  require_htf_confirmation: false
+  # Higher timeframes for trend bias
+  higher_timeframes: ["1h", "4h", "1d"]
+  # Risk parameters based on ATR
+  atr_multiplier: 1.0               # ADJUSTED v2.1 - loosened for signal generation
+  stop_loss_pct: 2.0                 # Fallback SL if no ATR (%)
+  take_profit_pct: 3.0               # Fallback TP if no ATR (%)
+  # Timeframe weights for signal aggregation
+  tf_weights:
+    "1m": 0.10
+    "5m": 0.15
+    "15m": 0.20
+    "1h": 0.25
+    "4h": 0.20
+    "1d": 0.10
+  # Signal source: technical strategy engine only
+  signal_source: "strategy"
+
+# Risk Management
+risk:
+  max_risk_per_trade_pct: 4.0        # Max risk per trade for high-volatility crypto profile
+  max_daily_loss_pct: 10.0           # Higher daily drawdown budget for crypto volatility
+  max_position_per_trade_pct: 10.0   # Max position size (% of portfolio)
+  max_open_positions: 4              # Maximum open positions (adjust based on active pairs)
+  max_daily_trades: 50               # Maximum trades per day
+  stop_loss_pct: 4.5                 # Wider stop loss to survive deep wick noise
+  take_profit_pct: 10.0              # Target larger moves during momentum expansions
+  cool_down_minutes: 5               # Cooldown between trades
+  use_dynamic_sl_tp: true            # Enable pair-specific SL/TP percentages
+  atr_multiplier: 3.0               # 3x ATR for wider SL/TP in high-vol regimes
+  atr_period: 14                     # ATR lookback period
+
+# Strategies
+strategies:
+  enabled:
+    - "trend_following"
+    - "mean_reversion"
+    - "breakout"
+    - "scalping"
+  min_confidence: 0.35               # Minimum confidence to act (lowered from 0.40)
+  min_strategies_agree: 2            # Minimum strategies that must agree (increased from 1)
+
+# Trading Strategy Parameters (NEW - Easy to edit)
+# All trading decisions use these parameters
+trading_strategy:
+  # Signal Generation
+  MIN_SIGNAL_CONFIDENCE: 0.35       # Technical confidence threshold (35%)
+  MIN_INDICATORS_SCORE: 0.35        # Min technical indicators score (0-1) - lowered
+  
+  # Risk Management  
+  STOP_LOSS_PCT: 0.03               # 3% stop loss - wider for BTC volatility
+  TAKE_PROFIT_PCT: 0.05             # 5% take profit - wider R:R
+  MAX_POSITION_PCT: 0.10            # Max 10% of portfolio per trade
+  MAX_RISK_PER_TRADE: 0.015        # Max 1.5% risk per trade
+  
+  # Scoring Weights (for weighted signal system)
+  SCORING_WEIGHTS:
+    RSI: 0.20
+    MACD: 0.20
+    SMA: 0.20
+    STOCHASTIC: 0.15
+    REGIME: 0.25                    # Market regime/context contribution
+  
+  # Indicator Thresholds
+  INDICATOR_THRESHOLDS:
+    RSI_OVERSOLD: 35                # RSI < 35 = oversold (BUY) - adjusted
+    RSI_OVERBOUGHT: 65              # RSI > 65 = overbought (SELL) - adjusted
+    STOCHASTIC_OVERSOLD: 25        # Stochastic < 25 = oversold - adjusted
+    STOCHASTIC_OVERBOUGHT: 75      # Stochastic > 75 = overbought - adjusted
+
+# Auto Trader Settings (Full Auto Mode)
+auto_trader:
+  enabled: true                     # Set to true for full auto mode
+  # Auto position sizing
+  position_sizing:
+    mode: "risk_based"               # "risk_based", "fixed", "kelly"
+    fixed_amount: 100.0               # Fixed amount in THB (if mode=fixed)
+    risk_per_trade_pct: 1.5          # % of portfolio to risk per trade
+    max_position_pct: 10.0           # Maximum position as % of portfolio
+  # Auto stop loss / take profit
+  stop_loss:
+    mode: "atr"                      # "atr", "fixed_pct", "trailing"
+    atr_multiplier: 1.0              # ADJUSTED v2.1 - loosened for signal generation
+    fixed_pct: 5.0                   # Fixed % for SL (if mode=fixed)
+  take_profit:
+    mode: "risk_reward"              # "atr", "fixed_pct", "risk_reward"
+    risk_reward_ratio: 2.0           # TP distance = SL distance * this ratio
+    fixed_pct: 12.0                 # Fixed % for TP (if mode=fixed)
+  # Trailing stop (for trailing mode)
+  trailing:
+    activation_pct: 2.0             # Activate trailing after X% profit
+    step_pct: 0.5                    # Trail step %
+  # Auto exit conditions
+  auto_exit:
+    check_interval_seconds: 10       # How often to check positions for SL/TP
+    close_on_signal_opposite: true   # Auto close if opposite signal generated
+    max_hold_hours: 48              # Force close after X hours
+
+# Notifications
+notifications:
+  alert_channel: "telegram"          # "telegram" or "console"
+  telegram_chat_id: ""               # Telegram chat ID for alerts
+  telegram_command_polling_enabled: false  # Keep sendMessage alerts but disable long-poll command handling in service mode
+  send_alerts: true                  # Enable/disable alerts
+  notify_ml_signals: false           # Deprecated after AI purge
+  notify_position_updates: true      # Notify on SL/TP hits
+
+# Execution
+execution:
+  order_type: "limit"                # "limit" or "market"
+  retry_attempts: 3                  # Number of retry attempts for failed orders
+  retry_delay_seconds: 5             # Delay between retries
+  order_timeout_seconds: 30          # Timeout for order execution
+  allow_trailing_stop: false         # Fixed TP/SL mode: keep exit levels static once entered
+
+# Execution State Machine
+# Separate ML entry decisions from order lifecycle and exits.
+state_management:
+  enabled: true
+  entry_confidence_threshold: 0.35   # Must meet this confidence before confirmation counting starts
+  confirmations_required: 1          # Consecutive BUY confirmations needed before entering
+  confirmation_window_seconds: 180   # Reset confirmation if next signal arrives too late
+  pending_buy_timeout_seconds: 120   # Cancel unmatched BUY and return to IDLE after this timeout
+  pending_sell_timeout_seconds: 120  # Cancel unmatched SELL and restore IN_POSITION after this timeout
+  allow_sell_entries_from_idle: false # Conservative default: SELL signals close existing positions only unless explicitly enabled
+  allow_trailing_stop: false         # Use fixed TP/SL exits instead of dynamic trailing updates
+
+# Market data / trading pairs
+# Use data.pairs to enable multi-pair trading and collection.
+data:
+  auto_detect_held_pairs: true       # Use Hybrid Dynamic Coin Config to resolve runtime pairs
+  pairs: []                          # Optional runtime override / extra filter (leave empty to use JSON whitelist order)
+  collect_interval_seconds: 60       # Interval for data collector loop
+  hybrid_dynamic_coin_config:
+    whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON)
+    min_quote_balance_thb: 100.0     # THB available required to open a new BUY on a whitelisted asset
+    require_supported_market: true   # Drop whitelist entries not currently supported by Bitkub
+    include_assets_with_balance: true  # Keep whitelisted coins with real holdings even if THB quote balance is low
+    hot_reload_enabled: true         # Watch the JSON whitelist and refresh runtime pairs without restart
+    reload_interval_seconds: 30      # Polling interval for whitelist change detection
+
+# Portfolio
+portfolio:
+  initial_balance: 500.0            # Initial balance (for simulation)
+  min_balance_threshold: 100.0      # Minimum balance to continue trading
+  read_only: false                  # If true, no real orders placed (use env var BOT_READ_ONLY for override)
+  persist_path: "portfolio_state.json"  # Persist rebalancer state (cooldown survives restart)
+
+# Portfolio Rebalancing
+# ─────────────────────────────────────────────────────────────────────────────
+# Automatic portfolio rebalancing to maintain target allocation
+# ─────────────────────────────────────────────────────────────────────────────
+rebalance:
+  enabled: false                    # Permanently disabled in sniper mode
+  # Strategy: "threshold" | "calendar" | "risk" | "combined"
+  strategy: "threshold"
+  # Environment overrides supported:
+  #   REBALANCE_TARGET_ALLOCATION=THB:20,BTC:50,DOGE:30
+  #   REBALANCE_TARGET_<ASSET>=<percent>
+  #   REBALANCE_CASH_ASSETS=THB,USDT
+  #   REBALANCE_SIDEWAYS_EXPOSURE_FACTOR=0.5
+  
+  # How often to check for rebalance (every N main loop iterations)
+  check_interval: 5                 # Check every 5 iterations (at 60s interval = every 5 min)
+  cooldown_minutes: 60              # Minimum minutes between rebalance executions (anti-whipsaw)
+  trade_count_every: 5              # Trigger a rebalance review after every N successful entries (0 = disabled)
+  sideways_regime: true             # Trigger rebalance review when ML/strategy regime becomes sideways
+  cash_assets: ["THB"]             # Cash-like assets that absorb reduced exposure in sideways markets
+  sideways_exposure_factor: 0.5     # Keep only 50% of risk-asset exposure when regime is sideways
+  
+  # Threshold-based rebalancing
+  threshold:
+    threshold_pct: 10.0              # Rebalance if any asset drifts > 10% from target
+    min_rebalance_pct: 1.0           # Minimum drift to trigger (avoid noise)
+  
+  # Calendar-based rebalancing
+  calendar:
+    frequency: "weekly"              # "daily" | "weekly" | "monthly"
+    day_of_week: 0                   # 0=Monday, 6=Sunday (for weekly)
+    hour_of_day: 0                   # Hour in UTC to execute
+  
+  # Risk-based rebalancing (adjust allocation by volatility)
+  risk:
+    volatility_window: 20            # Candles for volatility calculation
+    risk_adjustment_factor: 0.5      # How aggressively to adjust (0-1)
+    min_allocation_pct: 5.0          # Minimum allocation floor
+    max_allocation_pct: 50.0         # Maximum allocation ceiling
+    volatility_threshold_pct: 30     # Rebalance if volatility changes > X%
+  
+  # Target allocation (must sum to ~100%)
+  # Adjust these to match your portfolio assets and risk tolerance
+  target_allocation:
+    THB: 20.0
+    BTC: 35.0
+    ETH: 20.0
+    POL: 15.0
+    DOGE: 10.0
+  
+  # Minimum trade value to execute (avoid tiny trades)
+  min_trade_value: 10.0             # Ignore rebalance orders < 10 THB (Bitkub minimum)
+  estimated_cost_pct: 0.5           # Estimated round-trip cost per rebalance % (Bitkub 0.25% x 2 sides)
+
+# Wallet Balance / Deposit / Withdrawal Monitor
+balance_monitor:
+  enabled: true                     # Poll Bitkub balances + wallet history in the background
+  poll_interval_seconds: 30         # Main polling interval
+  persist_path: "balance_monitor_state.json"  # Seen tx IDs / status cache
+  thb_min_threshold: 0.0            # Default THB critical threshold (or use THB_MIN_THRESHOLD env)
+  coin_min_threshold: 0.0           # Default per-coin critical threshold (or use COIN_MIN_THRESHOLD env)
+  coin_min_thresholds: {}           # Optional overrides, e.g. BTC: 0.0005
+  # Extra env overrides:
+  #   THB_MIN_THRESHOLD=500
+  #   COIN_MIN_THRESHOLD=0.0001
+  #   COIN_MIN_THRESHOLDS=BTC:0.0005,ETH:0.01
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health Check / Monitoring
+# ─────────────────────────────────────────────────────────────────────────────
+monitoring:
+  enabled: true                     # Enable monitoring service
+
+  # Health check HTTP server (for load balancer / uptime monitors)
+  health_check_port: 8080           # Port for /health endpoint (set to 0 to disable)
+  health_check_path: "/health"       # Endpoint path
+
+  # Telegram heartbeat
+  heartbeat_interval_minutes: 0    # Send heartbeat to Telegram every N minutes (0 = disabled)
+
+  # Still-alive logging
+  still_alive_interval_minutes: 5   # Log "still alive" every N minutes
+
+  # Reconciliation with Bitkub
+  reconciliation_interval_minutes: 10  # Check bot state vs Bitkub state every N minutes
+
+  # Auto-restart on crash
+  auto_restart_on_crash: true       # Enable auto-restart watchdog
+  restart_cooldown_seconds: 30       # Wait before restarting after crash
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dynamic Risk Parameters (merged into risk: section above)
+# ─────────────────────────────────────────────────────────────────────────────
+# Note: use_dynamic_sl_tp, atr_multiplier, atr_period are now in risk: section
+
+#                                                                              
+# WebSocket Real-time Prices
+#                                                                              
+# Connect to Bitkub WebSocket (wss://api.bitkub.com/websocket) for live prices.
+websocket:
+  enabled: true                      # Set to false to use REST polling only
+  reconnect_max_delay: 60.0          # Max seconds between reconnect attempts
+  reconnect_multiplier: 1.5          # Exponential backoff multiplier
+  ping_interval: 20                  # WebSocket ping interval (seconds)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging & Log Rotation
+# ─────────────────────────────────────────────────────────────────────────────
+logging:
+  log_level: "INFO"                  # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  enable_console: true               # Show coloured output in terminal
+  enable_files: true                 # Write structured JSON logs to logs/
+
+  # Rotation settings — size-based (error, trades, metrics)
+  max_log_size_mb: 100               # Max file size before rotation (MB)
+  backup_count: 10                   # Rotated copies to keep per file
+
+  # Retention — time-based (debug.log rotates daily)
+  debug_retention_days: 30           # Keep daily debug logs this many days
+
+  # Startup cleanup (delete rotated files beyond retention)
+  cleanup_on_startup: true           # Auto-purge old logs on bot start
+
+  # Metrics flush interval
+  metrics_flush_interval: 60         # Flush metrics snapshot every N seconds
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI Dashboard (Rich Live terminal UI)
+# ─────────────────────────────────────────────────────────────────────────────
+cli_ui:
+  enabled: true                      # Show Rich Live dashboard in terminal
+  refresh_interval_seconds: 2.0      # Dashboard refresh rate
+  bot_name: "Crypto Bot V1"          # Bot name shown in header
+  command_listener_enabled: true     # Enable typing commands in footer chat

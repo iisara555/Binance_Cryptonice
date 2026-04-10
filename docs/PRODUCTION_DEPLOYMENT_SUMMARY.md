@@ -1,0 +1,89 @@
+# Production Deployment Summary
+
+## Current Status
+
+โปรเจกต์นี้อยู่ในสถานะ runtime-only สำหรับบอทเทรด Bitkub แบบ standalone โดย entrypoint หลักคือ `main.py` และ launcher บน Windows คือ `run_bot.bat` หรือ `deploy/windows/run-runtime.ps1`
+
+เอกสารฉบับนี้แทนที่ summary รุ่นเก่าที่อ้าง dashboard, frontend, `start.py` และ AI/ML runtime ซึ่งไม่มีอยู่ใน repo ปัจจุบันแล้ว
+
+## Production Scope ที่ยังมีอยู่จริง
+
+- Strategy-based signal generation
+- Multi-timeframe analysis
+- Risk management และ state persistence
+- Trade execution และ position tracking
+- Portfolio rebalancing
+- Balance monitor
+- Telegram alerts และ command polling แบบเลือกเปิดได้
+- Rich terminal command center
+- Bot health endpoint
+- Windows NSSM runtime service
+- Linux systemd runtime service
+
+## Runtime Entry Points
+
+### Local / Standalone
+
+```powershell
+.\run_bot.bat
+```
+
+หรือ
+
+```powershell
+.\.venv-3\Scripts\python.exe main.py
+```
+
+### Windows Always-On
+
+```powershell
+.\deploy\windows\install-nssm-services.ps1 -NssmPath "C:\nssm\win64\nssm.exe"
+```
+
+### Linux / VPS
+
+ใช้ [deploy/systemd/crypto-bot-runtime.service](../deploy/systemd/crypto-bot-runtime.service)
+
+## Readiness Checks
+
+### Safe startup
+
+```powershell
+$env:BOT_STARTUP_TEST_MODE = "1"
+.\.venv-3\Scripts\python.exe main.py
+```
+
+### Strict preflight
+
+```powershell
+.\.venv-3\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --json
+```
+
+### Allow degraded mode temporarily
+
+```powershell
+.\.venv-3\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --allow-auth-degraded --json
+```
+
+## Go-Live Conditions
+
+- `.env` contains real Bitkub credentials
+- Bitkub IP allowlist is correct
+- `bot_config.yaml` is reviewed intentionally
+- bot health returns `healthy: true`
+- bot health does not report `status: degraded` for real live deployment
+- `LIVE_TRADING` is enabled intentionally, not by accident
+
+## Important Operational Notes
+
+- Runtime path resolution is now project-root based, so folder rename or drive move is supported for standalone usage
+- Windows service installs still need reinstall after moving the project, because Windows stores absolute paths in service registration
+- Historical references to dashboard, frontend, `start.py`, `ai_signals/`, `show_bitkub_coins.py`, and `validate_bitkub_config.py` are obsolete for this repo version
+
+## Recommended Docs
+
+- [README.md](../README.md)
+- [DAILY_QUICK_START_TH.md](DAILY_QUICK_START_TH.md)
+- [WINDOWS_ALWAYS_ON_SETUP_TH.md](WINDOWS_ALWAYS_ON_SETUP_TH.md)
+- [VPS_PREFLIGHT_CHECKLIST.md](VPS_PREFLIGHT_CHECKLIST.md)
+- [VPS_GO_LIVE_CHECKLIST_TH.md](VPS_GO_LIVE_CHECKLIST_TH.md)

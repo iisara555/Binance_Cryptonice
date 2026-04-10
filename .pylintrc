@@ -1,0 +1,40 @@
+[MAIN]
+ignore=CVS, __pycache__, .git, models_backup
+max-line-length=180
+
+[MESSAGES CONTROL]
+disable=missing-module-docstring,
+        missing-function-docstring,
+        missing-class-docstring,
+        too-few-public-methods,
+        too-many-arguments,
+        too-many-locals,
+        too-many-branches,
+        too-many-statements,
+        too-many-instance-attributes,
+        too-many-public-methods,
+        invalid-name,
+        line-too-long,
+        protected-access,
+        redefined-outer-name,
+        redefined-builtin,
+        broad-exception-caught,
+        bare-except,
+        fixme,
+        unused-argument,
+        consider-using-with,
+        too-many-return-statements,
+        import-error,
+        wrong-import-position,
+        wrong-import-order,
+        import-outside-toplevel,
+        too-many-positional-arguments,
+        too-many-nested-blocks,
+        no-else-return,
+        consider-using-f-string,
+        missing-final-newline,
+        f-string-without-interpolation,
+
+[REPORTS]
+reports=no
+score=no
