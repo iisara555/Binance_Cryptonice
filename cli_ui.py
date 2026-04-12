@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import re
 import math
 import threading
@@ -54,6 +55,7 @@ class CLICommandCenter:
         self._log_lines: deque[Dict[str, str]] = deque(maxlen=140)
         self._log_lock = threading.Lock()
         self._log_handler: Optional[_UILogBufferHandler] = None
+        self._muted_console_handlers: List[tuple[logging.Handler, int]] = []
 
     def start_log_capture(self) -> None:
         """Start mirroring runtime logs into an in-memory ring buffer for UI rendering."""
@@ -63,6 +65,7 @@ class CLICommandCenter:
         root = logging.getLogger()
         root.addHandler(handler)
         self._log_handler = handler
+        self._mute_console_handlers()
 
     def stop_log_capture(self) -> None:
         """Detach runtime log mirroring handler."""
@@ -75,6 +78,33 @@ class CLICommandCenter:
         except Exception:
             pass
         self._log_handler = None
+        self._restore_console_handlers()
+
+    @staticmethod
+    def _is_live_console_handler(handler: logging.Handler) -> bool:
+        if handler.__class__.__name__ == "RichHandler":
+            return True
+        return isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) in {sys.stdout, sys.stderr}
+
+    def _mute_console_handlers(self) -> None:
+        if self._muted_console_handlers:
+            return
+        root = logging.getLogger()
+        for handler in list(root.handlers):
+            if handler is self._log_handler:
+                continue
+            if not self._is_live_console_handler(handler):
+                continue
+            self._muted_console_handlers.append((handler, int(handler.level)))
+            handler.setLevel(logging.CRITICAL + 1)
+
+    def _restore_console_handlers(self) -> None:
+        for handler, original_level in self._muted_console_handlers:
+            try:
+                handler.setLevel(original_level)
+            except Exception:
+                continue
+        self._muted_console_handlers.clear()
 
     def _append_log_record(self, record: logging.LogRecord) -> None:
         if record.name == __name__:

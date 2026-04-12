@@ -626,6 +626,9 @@ class TradingBotApp:
         self._api_latency_ms: Optional[float] = None
         self._api_latency_checked_at = 0.0
         self._api_latency_cache_seconds = 15.0
+        self._cli_balance_summary_cache: Optional[Dict[str, Any]] = None
+        self._cli_balance_summary_cached_at = 0.0
+        self._cli_balance_summary_cache_seconds = 10.0
         self._cli_command_thread: Optional[threading.Thread] = None
         self._cli_chat_lock = threading.Lock()
         self._cli_chat_input = ""
@@ -1962,6 +1965,8 @@ class TradingBotApp:
         return format_bitkub_time(value)
 
     def _sample_api_latency(self, symbol: str) -> Optional[float]:
+        if getattr(self, "_live_dashboard_active", False):
+            return getattr(self, "_api_latency_ms", None)
         now = time.time()
         if now - self._api_latency_checked_at < self._api_latency_cache_seconds:
             return self._api_latency_ms
@@ -1977,13 +1982,19 @@ class TradingBotApp:
             self._api_latency_ms = None
         return self._api_latency_ms
 
-    def _get_cli_price(self, symbol: str) -> Optional[float]:
+    def _get_cli_price(self, symbol: str, allow_rest_fallback: bool = True) -> Optional[float]:
         now = time.time()
         cached = self._cli_price_cache.get(symbol)
         if cached and (now - cached[1]) < self._cli_price_cache_ttl:
             return cached[0]
         ws_client = getattr(self.bot, "_ws_client", None) if self.bot else None
-        price, _ = get_current_price(symbol=symbol, api_client=self.api_client, ws_client=ws_client)
+        price, _ = get_current_price(
+            symbol=symbol,
+            api_client=self.api_client if allow_rest_fallback else None,
+            ws_client=ws_client,
+        )
+        if price is None and cached:
+            return cached[0]
         self._cli_price_cache[symbol] = (price, now)
         return price
 
@@ -1996,15 +2007,31 @@ class TradingBotApp:
                 "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
             }
 
-        try:
-            balances = self.api_client.get_balances()
-        except Exception:
-            return {
-                "total_balance": fallback_balance,
-                "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
-            }
+        live_dashboard_active = bool(getattr(self, "_live_dashboard_active", False))
+        allow_rest_fallback = not live_dashboard_active
+
+        balance_state: Dict[str, Any] = {}
+        if live_dashboard_active and self.bot and getattr(self.bot, "_balance_monitor", None):
+            try:
+                balance_state = self.bot.get_balance_state() or {}
+            except Exception:
+                balance_state = {}
+
+        if balance_state:
+            balances = balance_state.get("balances") or {}
+        else:
+            try:
+                balances = self.api_client.get_balances()
+            except Exception:
+                balances = {}
 
         if not isinstance(balances, dict):
+            balances = {}
+
+        if not balances:
+            cached_summary = getattr(self, "_cli_balance_summary_cache", None)
+            if live_dashboard_active and cached_summary:
+                return cached_summary
             return {
                 "total_balance": fallback_balance,
                 "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
@@ -2033,23 +2060,33 @@ class TradingBotApp:
                 breakdown.append({"asset": symbol, "amount": amount, "value_thb": amount})
                 continue
 
-            current_price = self._get_cli_price(f"THB_{symbol}")
+            current_price = (
+                self._get_cli_price(f"THB_{symbol}")
+                if allow_rest_fallback
+                else self._get_cli_price(f"THB_{symbol}", False)
+            )
             if current_price and current_price > 0:
                 value_thb = amount * current_price
                 total_value += value_thb
                 breakdown.append({"asset": symbol, "amount": amount, "value_thb": value_thb})
 
         if total_value <= 0:
+            cached_summary = getattr(self, "_cli_balance_summary_cache", None)
+            if live_dashboard_active and cached_summary:
+                return cached_summary
             return {
                 "total_balance": fallback_balance,
                 "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
             }
 
         breakdown.sort(key=lambda item: float(item.get("value_thb") or 0.0), reverse=True)
-        return {
+        summary = {
             "total_balance": total_value,
             "breakdown": breakdown,
         }
+        self._cli_balance_summary_cache = summary
+        self._cli_balance_summary_cached_at = time.time()
+        return summary
 
     @staticmethod
     def _parse_reason_bool(reason: str, key: str) -> Optional[bool]:
@@ -2190,6 +2227,7 @@ class TradingBotApp:
         risk_level, risk_style = self._derive_risk_level()
         positions: List[Dict[str, Any]] = []
         open_orders = self.executor.get_open_orders() if self.executor else []
+        allow_rest_fallback = not bool(getattr(self, "_live_dashboard_active", False))
 
         # Pre-fetch state machine snapshots for SL/TP fallback
         _state_manager = getattr(self.bot, "_state_manager", None) if self.bot else None
@@ -2199,7 +2237,11 @@ class TradingBotApp:
             side_value = position.get("side")
             side = str(getattr(side_value, "value", side_value) or "")
             entry_price = float(position.get("entry_price") or 0.0)
-            current_price = self._get_cli_price(symbol) if symbol else None
+            current_price = (
+                self._get_cli_price(symbol)
+                if symbol and allow_rest_fallback
+                else self._get_cli_price(symbol, False) if symbol else None
+            )
             pnl_pct = 0.0
             if current_price and entry_price > 0:
                 if side.lower() == "sell":

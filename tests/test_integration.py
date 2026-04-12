@@ -5,9 +5,11 @@ Full end-to-end integration tests for the trading system.
 Tests signal → risk → execution flow with mocked API responses.
 """
 import asyncio
+import io
 import logging
 import json
 import requests
+import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -1456,6 +1458,59 @@ class TestCliSnapshot:
             {"asset": "BTC", "amount": 0.01, "value_thb": 20_000.0},
             {"asset": "THB", "amount": 1_750.0, "value_thb": 1_750.0},
         ]
+
+    def test_cli_balance_summary_avoids_rest_balance_calls_during_live_dashboard(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {"auth_degraded": False}
+        app._live_dashboard_active = True
+        app._cli_balance_summary_cache = None
+        app.api_client = Mock()
+        app.api_client.get_balances.side_effect = AssertionError("REST balances should not be used in live dashboard")
+        app.bot = Mock()
+        app.bot._balance_monitor = Mock()
+        app.bot.get_balance_state.return_value = {
+            "balances": {
+                "THB": {"available": 500.0, "reserved": 0.0},
+                "BTC": {"available": 0.01, "reserved": 0.0},
+            }
+        }
+        app._get_cli_price = Mock(side_effect=lambda symbol, allow_rest_fallback=True: {
+            "THB_BTC": 2_000_000.0,
+        }.get(symbol))
+
+        summary = TradingBotApp._get_cli_balance_summary(app, {"balance": 500.0})
+
+        assert summary["total_balance"] == pytest.approx(20_500.0)
+        app.api_client.get_balances.assert_not_called()
+
+    def test_cli_command_center_mutes_and_restores_console_handlers(self):
+        app = Mock()
+        command_center = CLICommandCenter(app)
+        root = logging.getLogger()
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler.setLevel(logging.INFO)
+        file_like_handler = logging.StreamHandler(io.StringIO())
+        file_like_handler.setLevel(logging.INFO)
+        original_console_level = console_handler.level
+        original_file_like_level = file_like_handler.level
+        root.addHandler(console_handler)
+        root.addHandler(file_like_handler)
+
+        try:
+            command_center.start_log_capture()
+
+            assert console_handler.level > logging.CRITICAL
+            assert file_like_handler.level == original_file_like_level
+
+            command_center.stop_log_capture()
+
+            assert console_handler.level == original_console_level
+            assert file_like_handler.level == original_file_like_level
+        finally:
+            root.removeHandler(console_handler)
+            root.removeHandler(file_like_handler)
+            if command_center._log_handler is not None:
+                command_center.stop_log_capture()
 
     def test_cli_snapshot_exposes_total_balance_field(self):
         app = TradingBotApp.__new__(TradingBotApp)
