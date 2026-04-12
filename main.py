@@ -630,7 +630,7 @@ class TradingBotApp:
         self._cli_chat_lock = threading.Lock()
         self._cli_chat_input = ""
         self._cli_chat_history: List[Dict[str, str]] = []
-        self._cli_chat_status = "Enter=send | Tab=autocomplete | Up/Down=history | Backspace=edit | Esc=clear"
+        self._cli_chat_status = self._get_default_cli_chat_status()
         self._cli_chat_max_lines = 4
         self._cli_command_history: List[str] = []
         self._cli_history_index: Optional[int] = None
@@ -644,6 +644,31 @@ class TradingBotApp:
         self._restart_lock = threading.Lock()
     
 
+    def _get_default_cli_chat_status(self) -> str:
+        if _termios is not None and self._live_dashboard_active:
+            return "Linux tmux: Enter=send | Tab=autocomplete | Backspace=edit | arrows ignored"
+        return "Enter=send | Tab=autocomplete | Up/Down=history | Backspace=edit | Esc=clear"
+
+
+    def _get_cli_footer_shortcuts_text(self) -> str:
+        lines = [
+            "Footer chat shortcuts:",
+            "  Enter send command",
+            "  Tab autocomplete",
+        ]
+        if _termios is not None and self._live_dashboard_active:
+            lines.extend([
+                "  Backspace edit current line",
+                "  Arrow keys ignored in Linux tmux",
+            ])
+        else:
+            lines.extend([
+                "  Up/Down recall history",
+                "  Esc clear current input",
+            ])
+        return "\n".join(lines)
+
+
     def _ensure_cli_chat_runtime_state(self) -> None:
         if getattr(self, "_cli_chat_lock", None) is None:
             self._cli_chat_lock = threading.Lock()
@@ -652,7 +677,7 @@ class TradingBotApp:
         if not hasattr(self, "_cli_chat_history"):
             self._cli_chat_history = []
         if not hasattr(self, "_cli_chat_status"):
-            self._cli_chat_status = "Enter=send | Tab=autocomplete | Up/Down=history | Backspace=edit | Esc=clear"
+            self._cli_chat_status = self._get_default_cli_chat_status()
         if not hasattr(self, "_cli_chat_max_lines"):
             self._cli_chat_max_lines = 4
         if not hasattr(self, "_cli_command_history"):
@@ -1554,11 +1579,7 @@ class TradingBotApp:
             "  pairs add <PAIR|ASSET> [MORE...]\n"
             "  pairs remove <PAIR|ASSET> [MORE...]\n"
             "  pairs reload\n\n"
-            "Footer chat shortcuts:\n"
-            "  Enter send command\n"
-            "  Tab autocomplete\n"
-            "  Up/Down recall history\n"
-            "  Esc clear current input"
+            f"{self._get_cli_footer_shortcuts_text()}"
         )
 
     def _execute_cli_command(self, command: str, args: List[str]) -> str:
@@ -2823,6 +2844,7 @@ class TradingBotApp:
         try:
             if command_center:
                 self._live_dashboard_active = True
+                self._set_cli_chat_status(self._get_default_cli_chat_status())
                 logger.info("CLI dashboard enabled — starting Rich Live display")
                 command_center.start_log_capture()
                 with command_center.create_live() as live:
