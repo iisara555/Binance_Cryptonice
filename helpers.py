@@ -12,9 +12,52 @@ duplication and improve consistency:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+BITKUB_TIMEZONE = timezone(timedelta(hours=7), name="ICT")
+
+
+def now_bitkub() -> datetime:
+    """Return the current time in Bitkub's Thailand timezone."""
+    return datetime.now(timezone.utc).astimezone(BITKUB_TIMEZONE)
+
+
+def parse_as_bitkub_time(value: Any) -> Optional[datetime]:
+    """Normalize a datetime-like value to Bitkub's Thailand timezone.
+
+    Naive runtime timestamps are treated as UTC so VPS-rendered CLI times stay
+    aligned with Bitkub time.
+    """
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BITKUB_TIMEZONE)
+
+
+def format_bitkub_time(value: Any, fmt: str = "%H:%M:%S") -> str:
+    """Format a datetime-like value in Bitkub's Thailand timezone."""
+    if not value:
+        return "-"
+    try:
+        dt = parse_as_bitkub_time(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if dt is None:
+        return "-"
+    return dt.strftime(fmt)
 
 
 # ── Price Fetching ──────────────────────────────────────────────────────────────

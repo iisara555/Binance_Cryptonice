@@ -83,7 +83,7 @@ VOLATILITY_CLASS = {
 BITKUB_FEE_PER_SIDE = 0.0025  # 0.25%
 BITKUB_FEE_ROUND_TRIP = 0.0050  # 0.50%
 
-MIN_ORDER_THB = 15.0      # Bitkub minimum
+DEFAULT_MIN_ORDER_THB = 15.0      # Bitkub minimum
 MIN_ORDER_BUFFER = 1.10   # 10% safety buffer
 
 # Default SL/TP percentages by volatility class
@@ -163,6 +163,10 @@ class RiskConfig:
     max_risk_per_trade_pct: float = 4.0       # % of portfolio per trade (crypto-aggressive profile)
     max_daily_loss_pct: float = 10.0          # % of portfolio per day
     max_position_per_trade_pct: float = 10.0  # % of portfolio per single order
+    max_drawdown_threshold_pct: float = 12.0  # hard block new BUY entries above this drawdown
+    drawdown_soft_reduce_start_pct: float = 5.0  # start reducing risk above this drawdown
+    min_drawdown_risk_multiplier: float = 0.35   # never reduce below this multiplier when soft-reducing
+    drawdown_block_new_entries: bool = True
     stop_loss_pct: float = -2.0               # % from entry price (deprecated/ignored)
     take_profit_pct: float = 3.0              # % from entry price (deprecated/ignored)
     initial_balance: float = 1000.0
@@ -170,6 +174,7 @@ class RiskConfig:
     max_open_positions: int = 5
     max_daily_trades: int = 10
     cool_down_minutes: int = 5
+    min_order_amount: float = DEFAULT_MIN_ORDER_THB
     # ATR-based SL settings
     atr_multiplier: float = 3.0               # SL distance = ATR * this
     atr_period: int = 14                      # ATR lookback period
@@ -199,6 +204,10 @@ class RiskConfig:
             max_risk_per_trade_pct=risk.get("max_risk_per_trade_pct", 4.0),
             max_daily_loss_pct=risk.get("max_daily_loss_pct", 10.0),
             max_position_per_trade_pct=risk.get("max_position_per_trade_pct", 10.0),
+            max_drawdown_threshold_pct=risk.get("max_drawdown_threshold_pct", 12.0),
+            drawdown_soft_reduce_start_pct=risk.get("drawdown_soft_reduce_start_pct", 5.0),
+            min_drawdown_risk_multiplier=risk.get("min_drawdown_risk_multiplier", 0.35),
+            drawdown_block_new_entries=risk.get("drawdown_block_new_entries", True),
             stop_loss_pct=risk.get("stop_loss_pct", -5.0),
             take_profit_pct=risk.get("take_profit_pct", 12.0),
             atr_multiplier=risk.get("atr_multiplier", 3.0),
@@ -209,6 +218,7 @@ class RiskConfig:
             max_open_positions=data.get("trading", {}).get("max_open_positions", 5),
             max_daily_trades=data.get("trading", {}).get("max_daily_trades", 10),
             cool_down_minutes=data.get("trading", {}).get("cool_down_minutes", 5),
+            min_order_amount=data.get("trading", {}).get("min_order_amount", DEFAULT_MIN_ORDER_THB),
         )
 
     def to_file(self, path: str):
@@ -217,6 +227,10 @@ class RiskConfig:
                 "max_risk_per_trade_pct": self.max_risk_per_trade_pct,
                 "max_daily_loss_pct": self.max_daily_loss_pct,
                 "max_position_per_trade_pct": self.max_position_per_trade_pct,
+                "max_drawdown_threshold_pct": self.max_drawdown_threshold_pct,
+                "drawdown_soft_reduce_start_pct": self.drawdown_soft_reduce_start_pct,
+                "min_drawdown_risk_multiplier": self.min_drawdown_risk_multiplier,
+                "drawdown_block_new_entries": self.drawdown_block_new_entries,
                 "stop_loss_pct": self.stop_loss_pct,
                 "take_profit_pct": self.take_profit_pct,
                 "atr_multiplier": self.atr_multiplier,
@@ -231,6 +245,7 @@ class RiskConfig:
                 "max_open_positions": self.max_open_positions,
                 "max_daily_trades": self.max_daily_trades,
                 "cool_down_minutes": self.cool_down_minutes,
+                "min_order_amount": self.min_order_amount,
             },
         }
         with open(path, "w") as f:
@@ -258,6 +273,7 @@ class RiskManager:
         self._trade_count_today: int = 0
         self._last_trade_time: Optional[datetime] = None
         self._cooling_down: bool = False
+        self._peak_portfolio_value: Optional[float] = None
         self._state_file = Path("risk_state.json")
         # M4 fix: serialise all file I/O through a lock so concurrent calls
         # from the OMS thread and main loop cannot interleave partial JSON writes.
@@ -280,6 +296,7 @@ class RiskManager:
             "trade_count_today": self._trade_count_today,
             "last_trade_time": self._last_trade_time.isoformat() if self._last_trade_time else None,
             "cooling_down": self._cooling_down,
+            "peak_portfolio_value": self._peak_portfolio_value,
         }
         try:
             with self._state_lock:
@@ -307,6 +324,7 @@ class RiskManager:
                 # Reset to safe defaults first (in case partial load happens)
                 self._cooling_down = False
                 self._trade_count_today = 0
+                self._peak_portfolio_value = None
 
                 # Load values
                 self._daily_loss_start = data.get("daily_loss_start")
@@ -316,6 +334,7 @@ class RiskManager:
                 last_time_str = data.get("last_trade_time")
                 self._last_trade_time = datetime.fromisoformat(last_time_str) if last_time_str else None
                 self._cooling_down = data.get("cooling_down", False)
+                self._peak_portfolio_value = data.get("peak_portfolio_value")
 
                 if self._daily_loss_date is None and self._last_trade_time is not None:
                     self._daily_loss_date = self._last_trade_time.date()
@@ -337,7 +356,36 @@ class RiskManager:
             self._trade_count_today = 0
             self._last_trade_time = None
             self._cooling_down = False  # SAFE DEFAULT
+            self._peak_portfolio_value = None
             return False
+
+    def _update_peak_portfolio_value(self, portfolio_value: float) -> None:
+        if portfolio_value <= 0:
+            return
+        if self._peak_portfolio_value is None or portfolio_value > self._peak_portfolio_value:
+            self._peak_portfolio_value = portfolio_value
+            self.save_state()
+
+    def _get_current_drawdown_pct(self, portfolio_value: float) -> float:
+        peak_value = float(self._peak_portfolio_value or 0.0)
+        if portfolio_value <= 0 or peak_value <= 0 or portfolio_value >= peak_value:
+            return 0.0
+        return max(0.0, ((peak_value - portfolio_value) / peak_value) * 100.0)
+
+    def _get_drawdown_risk_multiplier(self, portfolio_value: float) -> float:
+        drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
+        soft_start = max(float(self.config.drawdown_soft_reduce_start_pct or 0.0), 0.0)
+        hard_limit = max(float(self.config.max_drawdown_threshold_pct or 0.0), 0.0)
+        min_multiplier = min(max(float(self.config.min_drawdown_risk_multiplier or 0.0), 0.0), 1.0)
+
+        if drawdown_pct <= soft_start:
+            return 1.0
+        if hard_limit <= soft_start:
+            return min_multiplier
+
+        reduction_span = hard_limit - soft_start
+        reduction_progress = min(max((drawdown_pct - soft_start) / reduction_span, 0.0), 1.0)
+        return max(min_multiplier, 1.0 - ((1.0 - min_multiplier) * reduction_progress))
 
     # ── Position Sizing ────────────────────────────────────────────────
 
@@ -362,8 +410,10 @@ class RiskManager:
             _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", "Invalid portfolio value")
             return RiskCheckResult(False, "Invalid portfolio value")
 
-        # Ensure max_risk_per_trade_pct is strictly capped at 1.0 (institutional limit)
-        effective_risk_pct = min(self.config.max_risk_per_trade_pct, 1.0)
+        self._update_peak_portfolio_value(portfolio_value)
+
+        # Use the configured max risk
+        effective_risk_pct = self.config.max_risk_per_trade_pct
         
         # Apply Fractional Kelly if AI Confidence exists
         if confidence and confidence > 0 and stop_loss_price and take_profit_price:
@@ -397,6 +447,21 @@ class RiskManager:
                 logger.debug(f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%")
                 effective_risk_pct = dynamic_risk
 
+        drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
+        drawdown_multiplier = self._get_drawdown_risk_multiplier(portfolio_value)
+        if drawdown_multiplier < 1.0:
+            reduced_risk_pct = max(0.1, effective_risk_pct * drawdown_multiplier)
+            logger.info(
+                "[Drawdown Sizing] drawdown=%.2f%% peak=%.2f portfolio=%.2f multiplier=%.2f risk %.2f%% -> %.2f%%",
+                drawdown_pct,
+                float(self._peak_portfolio_value or 0.0),
+                portfolio_value,
+                drawdown_multiplier,
+                effective_risk_pct,
+                reduced_risk_pct,
+            )
+            effective_risk_pct = reduced_risk_pct
+
         # Hard cap: no single position > max_position_per_trade_pct
         hard_cap = portfolio_value * (self.config.max_position_per_trade_pct / 100)
 
@@ -427,8 +492,8 @@ class RiskManager:
                   f"No ATR/Stop Loss data (SL={stop_loss_price}, entry={entry_price})")
             return RiskCheckResult(False, "\u0e44\u0e21\u0e48\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e01\u0e32\u0e23\u0e40\u0e17\u0e23\u0e14 (\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 ATR/Stop Loss)")
 
-        if suggested < MIN_ORDER_THB:
-            min_viable = MIN_ORDER_THB * MIN_ORDER_BUFFER
+        if suggested < self.config.min_order_amount:
+            min_viable = self.config.min_order_amount * MIN_ORDER_BUFFER
             # Align with hard_cap / max_position_per_trade_pct (not a fixed 20%)
             if min_viable > hard_cap:
                 reason = (
@@ -608,11 +673,22 @@ class RiskManager:
             _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", reason)
             return RiskCheckResult(False, reason)
 
+        self._update_peak_portfolio_value(portfolio_value)
+
         # 2. Daily loss limit
         daily_check = self.check_daily_loss_limit(portfolio_value)
         if not daily_check.allowed:
             _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", f"Daily loss limit: {daily_check.reason}")
             return daily_check
+
+        drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
+        if self.config.drawdown_block_new_entries and drawdown_pct >= self.config.max_drawdown_threshold_pct:
+            reason = (
+                f"Drawdown limit reached: {drawdown_pct:.2f}% / "
+                f"{self.config.max_drawdown_threshold_pct:.2f}%"
+            )
+            _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", reason)
+            return RiskCheckResult(False, reason)
 
         # 3. Max open positions
         if open_positions_count >= self.config.max_open_positions:
@@ -632,7 +708,7 @@ class RiskManager:
             return RiskCheckResult(False, "Cooldown period active")
 
         _diag("GLOBAL", "RiskMgr:CanOpen", "PASS",
-              f"portfolio={portfolio_value:.2f}, positions={open_positions_count}/{self.config.max_open_positions}, "
+              f"portfolio={portfolio_value:.2f}, drawdown={drawdown_pct:.2f}%, positions={open_positions_count}/{self.config.max_open_positions}, "
               f"trades_today={self._trade_count_today}/{self.config.max_daily_trades}")
         return RiskCheckResult(True, "All checks passed")
 
@@ -651,6 +727,8 @@ class RiskManager:
 
         return {
             "portfolio_value": portfolio_value,
+            "peak_portfolio_value": round(float(self._peak_portfolio_value or portfolio_value), 2),
+            "current_drawdown_pct": round(self._get_current_drawdown_pct(portfolio_value), 2),
             "daily_loss": round(current_loss, 2),
             "daily_loss_max": round(max_loss, 2),
             "daily_loss_pct": round((current_loss / portfolio_value * 100) if portfolio_value else 0, 2),

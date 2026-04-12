@@ -362,6 +362,22 @@ class TestCanOpenPositionEnforcement:
         mock_executor.execute_entry.assert_not_called()
         mock_risk_manager.can_open_position.assert_called_once()
 
+
+def test_risk_manager_blocks_new_entries_when_drawdown_limit_reached():
+    rm = RiskManager(RiskConfig(
+        max_risk_per_trade_pct=1.0,
+        max_daily_loss_pct=50.0,
+        max_drawdown_threshold_pct=10.0,
+        drawdown_soft_reduce_start_pct=5.0,
+        drawdown_block_new_entries=True,
+    ))
+    rm._peak_portfolio_value = 100_000.0
+
+    result = rm.can_open_position(portfolio_value=89_000.0, open_positions_count=0)
+
+    assert result.allowed is False
+    assert "Drawdown limit reached" in result.reason
+
     def test_state_machine_sell_in_position_routes_to_managed_exit(
         self, mock_api_client, mock_signal_generator, mock_risk_manager,
         mock_executor, mock_db,

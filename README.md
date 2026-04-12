@@ -1,33 +1,41 @@
-# Crypto Bot V1
+# Crypto Bot V1 (Enterprise-Grade Bitkub Trading Runtime)
 
 Crypto Bot V1 คือบอทเทรด Bitkub แบบ standalone ที่โฟกัส runtime ฝั่ง terminal เป็นหลัก โดยมีระบบ strategy, risk management, execution, portfolio rebalance, balance monitoring, health endpoint, Telegram alerts และเครื่องมือ preflight สำหรับตรวจความพร้อมก่อนใช้งานจริง
 
-repo ปัจจุบันไม่มี dashboard, frontend, `start.py` หรือ AI/ML runtime เดิมแล้ว เอกสารฉบับนี้อ้างอิงเฉพาะไฟล์และ workflow ที่ยังมีอยู่จริงในโปรเจกต์
+> **หมายเหตุ:** โปรเจกต์ในเวอร์ชันปัจจุบันได้ตัดส่วน Frontend / Dashboard ออกทั้งหมด และปรับสถาปัตยกรรมให้เป็นแบบ Headless & Terminal-First เพื่อความรวดเร็ว เสถียรภาพ และประหยัดทรัพยากรสูงสุด เหมาะสำหรับการรันบน VPS หรือ Windows Server แบบ 24/7
 
 ถ้าต้องการคู่มือสั้นมากสำหรับใช้งานทุกวัน ให้ดู [docs/DAILY_QUICK_START_TH.md](docs/DAILY_QUICK_START_TH.md)
 
-## โปรเจกต์นี้มีอะไรบ้าง
+## จุดเด่นของระบบ (Core Features)
 
-- Bitkub trading bot ที่มี collector, execution, risk management และ reconciliation
-- รองรับหลายคู่เหรียญจาก holdings และ whitelist runtime
-- SQLite persistence สำหรับ positions, trades และ state ต่าง ๆ
-- ระบบ Telegram alerts และ command polling แบบเลือกเปิดได้
-- Balance monitor และ portfolio rebalancing
-- Health endpoint และ preflight script สำหรับ local, Windows always-on และ VPS
+*   **Advanced Trading Strategy:** กลยุทธ์ Dual EMA (50/200) + MACD Crossover ตัดสินใจแม่นยำ พร้อมวิเคราะห์แนวโน้มจากหลายกรอบเวลา (Multi-Timeframe Confluence)
+*   **Dynamic Risk Management:** คำนวณจุดตัดขาดทุน (SL) และทำกำไร (TP) อัตโนมัติด้วยค่าความผันผวน (ATR) พร้อมระบบเลื่อนจุดตัดขาดทุนเพื่อล็อกกำไร (Trailing Stop)
+*   **Position Sizing & Kelly Criterion:** คำนวณขนาดไม้การเทรดแบบ Fractional Kelly ตามความเสี่ยงสูงสุดต่อไม้ (เช่น 1.5% ของพอร์ต) ช่วยปกป้องเงินต้นได้อย่างมีประสิทธิภาพ
+*   **Smart Order Management System (OMS):**
+    *   ติดตามสถานะออเดอร์แบบ Real-time และแก้ปัญหาออเดอร์ค้าง (Reprice/Cancel) อัตโนมัติ
+    *   ทนทานต่อ API ล่มด้วยระบบ Circuit Breaker และ Token Bucket Rate Limiter (ไม่โดน Bitkub แบน)
+    *   กู้คืนสถานะออเดอร์เมื่อไฟดับหรือรีสตาร์ทบอท (DB-First Reconciliation)
+*   **Hybrid Dynamic Coin Selection:** สแกนหาคู่เหรียญที่ถือครองอยู่บนกระดาน Bitkub อัตโนมัติ ผสานกับระบบ Whitelist ที่ตั้งค่าเพิ่มเองได้
+*   **Rich CLI Dashboard:** หน้าปัดควบคุมผ่าน Terminal ที่สวยงาม แสดงพอร์ตโฟลิโอ สถานะระบบ ออเดอร์ที่เปิดอยู่ พร้อมช่องแชทสำหรับพิมพ์คำสั่ง (Buy/Sell/Close/Track) สดๆ
+*   **Complete Observability:** มีระบบแจ้งเตือนเข้า Telegram ทุกการเคลื่อนไหวสำคัญ พร้อม Endpoint ตรวจสุขภาพ (`/health`) และ Endpoint สำหรับ Grafana (`/metrics`)
 
 ## โครงสร้างโปรเจกต์
 
 ```text
 .
 |- main.py                          # Entry point หลักของ trading bot
+|- bot_config.yaml                  # Runtime configuration หลัก (ปรับแต่งทุกอย่างที่นี่)
+|- config.py                        # โหลด Environment Variables เชิงลึก
+|- cli_ui.py                        # UI หน้าจอ Dashboard บน Terminal (Rich)
+|- trading_bot.py                   # ตัวควบคุมลูปหลักของการเทรด (Orchestrator)
+|- trade_executor.py                # ระบบ OMS จัดการยิง/ยกเลิก/ติดตามคำสั่งซื้อขาย
+|- signal_generator.py              # ตัวสร้างและรวบรวมสัญญาณการเทรด (Sniper)
+|- risk_management.py               # ตัวจัดการความเสี่ยง (Position sizing, R:R)
+|- bitkub_websocket.py              # รับข้อมูลราคาแบบ Real-time (Fast-lane SL/TP)
+|- database.py                      # จัดการ SQLite (เขียนแบบ WAL-mode ป้องกัน DB Lock)
 |- run_bot.bat                      # Portable Windows launcher
 |- restart_bot.bat                  # Wrapper สำหรับ restart loop
 |- activate_env.ps1                 # Portable PowerShell venv activation
-|- activate_env.bat                 # Portable cmd venv activation
-|- bot_config.yaml                  # Runtime configuration หลัก
-|- config.py                        # Critical settings ที่โหลดจาก environment
-|- cli_ui.py                        # Rich terminal command center
-|- logger_setup.py                  # Shared logging stack
 |- deploy/windows/                  # Windows NSSM service scripts
 |- deploy/systemd/                  # Linux systemd templates
 |- scripts/vps_preflight.py         # ตัวตรวจ readiness ของระบบ
@@ -60,8 +68,8 @@ BITKUB_API_KEY=your_real_bitkub_key
 BITKUB_API_SECRET=your_real_bitkub_secret
 LIVE_TRADING=false
 LOG_LEVEL=INFO
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
 ```
 
 หมายเหตุ:
@@ -76,6 +84,7 @@ TELEGRAM_CHAT_ID=
 
 - `trading.mode`: `dry_run`, `semi_auto`, `full_auto`
 - `data.*`: การเลือก runtime pairs และ hybrid whitelist
+- `candle_retention.*`: retention ของ candle ใน SQLite และรอบ auto cleanup กันฐานข้อมูลบวม
 - `multi_timeframe.*`: การวิเคราะห์หลาย timeframe
 - `risk.*`: daily loss, max position, max open positions
 - `rebalance.*`: พฤติกรรม portfolio rebalance
@@ -83,6 +92,21 @@ TELEGRAM_CHAT_ID=
 - `notifications.telegram_command_polling_enabled`: ปิด long-poll command ได้โดยไม่ปิด outbound alerts
 
 ดูรายละเอียด field ทั้งหมดได้ที่ [docs/CONFIGURATION_SCHEMA.md](docs/CONFIGURATION_SCHEMA.md)
+
+### Candle retention
+
+runtime นี้เก็บ candle ลง SQLite ก่อน แล้วค่อยให้ strategy/MTF อ่านจากฐานข้อมูลท้องถิ่น ดังนั้นจึงมี section `candle_retention` ใน `bot_config.yaml` เพื่อกันตาราง `prices` โตไม่จำกัด
+
+ค่า default ที่ตั้งมาให้คือ:
+
+- `1m`: 7 วัน
+- `5m`: 14 วัน
+- `15m`: 30 วัน
+- `1h`: 60 วัน
+- `4h`: 90 วัน
+- `1d`: 180 วัน
+
+ระบบจะรัน cleanup ตอน startup และตามรอบ `cleanup_interval_hours` แบบ background-safe โดยจะลบเฉพาะ candle เก่าตาม timeframe เท่านั้น ส่วน `vacuum_after_cleanup` ปิดไว้ default เพราะอาจใช้เวลานานใน runtime จริง
 
 ## การติดตั้ง
 
@@ -162,7 +186,12 @@ Set-Location "C:\path\to\crypto-bot-v1"
 
 ### Linux / VPS service mode
 
-repo นี้มี systemd template สำหรับ runtime ที่ [deploy/systemd/crypto-bot-runtime.service](deploy/systemd/crypto-bot-runtime.service)
+repo นี้มี 2 ไฟล์สำหรับ VPS runtime ที่เก็บ Rich CLI ไว้ได้แม้หลัง reboot:
+
+- [deploy/systemd/crypto-bot-tmux.sh](deploy/systemd/crypto-bot-tmux.sh)
+- [deploy/systemd/crypto-bot-tmux.service](deploy/systemd/crypto-bot-tmux.service)
+
+แนวทางนี้ให้ `systemd` ทำหน้าที่ auto-start ตอน boot แล้วสร้าง `tmux` session ชื่อ `crypto` ขึ้นมาแทนการรัน bot ตรง ๆ ทำให้ attach กลับไปดู Rich CLI ได้ภายหลัง
 
 ตัวอย่างติดตั้งบน VPS:
 
@@ -173,10 +202,21 @@ cd /opt/crypto-bot-v1
 python3.10 -m venv .venv-3
 source .venv-3/bin/activate
 pip install -r requirements.txt
-sudo cp deploy/systemd/crypto-bot-runtime.service /etc/systemd/system/
+chmod +x deploy/systemd/crypto-bot-tmux.sh
+sudo cp deploy/systemd/crypto-bot-tmux.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable crypto-bot-runtime
-sudo systemctl start crypto-bot-runtime
+sudo systemctl enable crypto-bot-tmux
+sudo systemctl start crypto-bot-tmux
+tmux attach -t crypto
+```
+
+คำสั่งที่ใช้บ่อยบน VPS:
+
+```bash
+systemctl status crypto-bot-tmux --no-pager -l
+tmux list-sessions
+tmux attach -t crypto
+curl http://127.0.0.1:8080/health
 ```
 
 ## Runtime states

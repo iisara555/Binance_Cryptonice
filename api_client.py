@@ -919,6 +919,28 @@ class BitkubClient:
     _candle_cache_lock = threading.Lock()
 
     @staticmethod
+    def _prune_candle_cache(now: int) -> None:
+        expired_keys = [
+            key
+            for key, (cached_at, _) in BitkubClient._candle_cache.items()
+            if now - cached_at >= BitkubClient._candle_cache_ttl
+        ]
+        for key in expired_keys:
+            BitkubClient._candle_cache.pop(key, None)
+
+        overflow = len(BitkubClient._candle_cache) - BitkubClient._candle_cache_max_size
+        if overflow > 0:
+            oldest_keys = [
+                key
+                for key, _ in sorted(
+                    BitkubClient._candle_cache.items(),
+                    key=lambda item: item[1][0],
+                )[:overflow]
+            ]
+            for key in oldest_keys:
+                BitkubClient._candle_cache.pop(key, None)
+
+    @staticmethod
     def _get_candle_cached(symbol: str, resolution: str, from_time: int, to_time: int, url: str) -> Dict[str, Any]:
         """Cached candle lookup - TTL 60 seconds via custom cache.
         
@@ -931,6 +953,7 @@ class BitkubClient:
         
         # Check cache (thread-safe)
         with BitkubClient._candle_cache_lock:
+            BitkubClient._prune_candle_cache(now)
             if cache_key in BitkubClient._candle_cache:
                 cached_time, cached_result = BitkubClient._candle_cache[cache_key]
                 if now - cached_time < BitkubClient._candle_cache_ttl:
@@ -943,15 +966,10 @@ class BitkubClient:
                                            "to": to_time},
                               timeout=30)
             result = r.json()
-            # Cache the result (thread-safe) + evict stale entries
+            # Cache the result (thread-safe) + prune stale/overflow entries
             with BitkubClient._candle_cache_lock:
                 BitkubClient._candle_cache[cache_key] = (now, result)
-                # Evict expired entries if cache is too large
-                if len(BitkubClient._candle_cache) > BitkubClient._candle_cache_max_size:
-                    expired = [k for k, (ts, _) in BitkubClient._candle_cache.items()
-                               if now - ts >= BitkubClient._candle_cache_ttl]
-                    for k in expired:
-                        del BitkubClient._candle_cache[k]
+                BitkubClient._prune_candle_cache(now)
             return result
         except Exception as e:
             return {"error": 1, "message": str(e)}

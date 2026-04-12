@@ -39,6 +39,11 @@ class TokenBucketRateLimiter:
             capacity: Maximum number of tokens (burst size)
             name: Identifier for logging
         """
+        if float(rate) <= 0:
+            raise ValueError("rate must be > 0")
+        if int(capacity) <= 0:
+            raise ValueError("capacity must be > 0")
+
         self.rate = rate
         self.capacity = capacity
         self.name = name
@@ -73,6 +78,20 @@ class TokenBucketRateLimiter:
         Returns:
             True if tokens acquired, False if timeout expired
         """
+        if int(tokens) <= 0:
+            raise ValueError("tokens must be > 0")
+        if timeout is not None and float(timeout) < 0:
+            return False
+        if tokens > self.capacity:
+            # Cannot ever satisfy request larger than bucket capacity.
+            logger.warning(
+                "RateLimiter [%s] rejected acquire(tokens=%s): exceeds capacity=%s",
+                self.name,
+                tokens,
+                self.capacity,
+            )
+            return False
+
         start_time = time.time()
         
         while True:
@@ -154,17 +173,17 @@ class BitkubRateLimiter:
     def __init__(self):
         self.public = TokenBucketRateLimiter(
             rate=self.PUBLIC_RATE,
-            capacity=max(1, int(self.PUBLIC_RATE * 2)),
+            capacity=60,
             name="public"
         )
         self.authenticated = TokenBucketRateLimiter(
             rate=self.AUTH_RATE,
-            capacity=max(1, int(self.AUTH_RATE * 2)),
+            capacity=30,
             name="authenticated"
         )
         self.trading = TokenBucketRateLimiter(
             rate=self.TRADING_RATE,
-            capacity=max(1, int(self.TRADING_RATE * 2)),
+            capacity=15,
             name="trading"
         )
         

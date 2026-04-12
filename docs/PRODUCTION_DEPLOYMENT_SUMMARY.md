@@ -42,7 +42,9 @@
 
 ### Linux / VPS
 
-ใช้ [deploy/systemd/crypto-bot-runtime.service](../deploy/systemd/crypto-bot-runtime.service)
+ใช้ [deploy/systemd/crypto-bot-tmux.sh](../deploy/systemd/crypto-bot-tmux.sh) คู่กับ [deploy/systemd/crypto-bot-tmux.service](../deploy/systemd/crypto-bot-tmux.service)
+
+แนวทางนี้ให้ `systemd` auto-start ตอน boot และให้ `tmux` ถือ interactive terminal ของ bot ไว้เพื่อให้ Rich CLI attach กลับไปดูได้
 
 ## Readiness Checks
 
@@ -78,6 +80,7 @@ $env:BOT_STARTUP_TEST_MODE = "1"
 
 - Runtime path resolution is now project-root based, so folder rename or drive move is supported for standalone usage
 - Windows service installs still need reinstall after moving the project, because Windows stores absolute paths in service registration
+- Linux / VPS ที่ต้องการ Rich CLI ควรใช้ `tmux` session (`crypto`) และให้ `crypto-bot-tmux.service` เป็นคนสร้าง session ตอน boot แทนการรัน bot ตรงใต้ `systemd`
 - Historical references to dashboard, frontend, `start.py`, `ai_signals/`, `show_bitkub_coins.py`, and `validate_bitkub_config.py` are obsolete for this repo version
 
 ## Recommended Docs

@@ -29,7 +29,10 @@ import os
 
 from signal_generator import SignalGenerator, AggregatedSignal, SignalRiskCheck
 from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult, OrderStatus
-from risk_management import RiskManager, RiskConfig, calculate_atr, get_default_sl_tp, check_pair_correlation
+from risk_management import (
+    RiskManager, RiskConfig, calculate_atr, get_default_sl_tp, check_pair_correlation,
+    precise_multiply, precise_subtract, precise_add, precise_divide,
+)
 from api_client import BitkubClient
 from balance_monitor import BalanceEvent, BalanceMonitor
 from database import get_database
@@ -64,6 +67,17 @@ def _coerce_trade_float(val, default: float = 0.0) -> float:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_trade_datetime(val: Any) -> Optional[datetime]:
+    if isinstance(val, datetime):
+        return val
+    if not val:
+        return None
+    try:
+        return datetime.fromisoformat(str(val))
+    except (TypeError, ValueError):
+        return None
 
 # WebSocket real-time price support
 try:
@@ -127,18 +141,32 @@ class TradingBotOrchestrator:
         )
         
         # Trading settings
+        trading_cfg = config.get("trading", {})
         self.trading_pair = (
-            config.get("trading", {}).get("trading_pair")
+            trading_cfg.get("trading_pair")
             or config.get("trading_pair")
             or ""
         )
         self.trading_pairs = self._get_trading_pairs()
-        self.interval_seconds = config.get("interval_seconds", 60)
-        self.timeframe = config.get("timeframe", "1h")
+        self.interval_seconds = trading_cfg.get("interval_seconds", config.get("interval_seconds", 60))
+        self.timeframe = trading_cfg.get("timeframe", config.get("timeframe", "1h"))
         self.read_only = config.get("read_only", False) or os.environ.get("BOT_READ_ONLY", "").lower() in ("1", "true", "yes")
+        portfolio_guard_cfg = dict(config.get("data", {}).get("portfolio_guard", {}) or {})
+        self._held_coins_only = bool(portfolio_guard_cfg.get("held_coins_only", True))
         self._auth_degraded = bool(config.get("auth_degraded", False))
         self._auth_degraded_reason = str(config.get("auth_degraded_reason") or "")
         self._auth_degraded_logged = False
+        candle_retention_config = dict(config.get("candle_retention", {}) or {})
+        self._candle_retention_enabled = bool(candle_retention_config.get("enabled", False))
+        self._candle_retention_run_on_startup = bool(candle_retention_config.get("run_on_startup", True))
+        self._candle_retention_vacuum = bool(candle_retention_config.get("vacuum_after_cleanup", False))
+        self._candle_retention_policy = self._build_candle_retention_policy(candle_retention_config)
+        try:
+            cleanup_interval_hours = float(candle_retention_config.get("cleanup_interval_hours", 12) or 12)
+        except (TypeError, ValueError):
+            cleanup_interval_hours = 12.0
+        self._candle_retention_interval_seconds = max(int(cleanup_interval_hours * 3600), 3600)
+        self._last_candle_retention_cleanup_at = 0.0
         raw_min_trade_thb = config.get("min_trade_value")
         if raw_min_trade_thb is None:
             raw_min_trade_thb = 15.0
@@ -152,6 +180,10 @@ class TradingBotOrchestrator:
         self.enabled_strategies = self.strategies_config.get("enabled", [
             "trend_following", "mean_reversion", "breakout", "scalping"
         ])
+        self._active_strategy_mode = str(config.get("active_strategy_mode") or "standard").lower()
+        scalping_cfg = dict(self.strategies_config.get("scalping", {}) or {})
+        self._scalping_mode_enabled = self._active_strategy_mode == "scalping"
+        self._scalping_position_timeout_minutes = int(scalping_cfg.get("position_timeout_minutes", 30) or 30)
         
         # Notification config
         self.notif_config = config.get("notifications", {})
@@ -212,6 +244,7 @@ class TradingBotOrchestrator:
         self._pending_decisions: List[TradeDecision] = []
         self._pending_decisions_lock = threading.Lock()
         self._executed_today: List[Dict] = []
+        self._executed_today_max = 200
         self._last_loop_time: Optional[datetime] = None
         self._loop_count = 0
         self._last_state_gate_logged: Dict[str, str] = {}
@@ -222,6 +255,7 @@ class TradingBotOrchestrator:
         self._init_monitoring(config)
 
         # === Reconciliation pause flag ===
+        self._pause_state_lock = threading.Lock()
         self._trading_paused = False
         self._pause_reason = ""
         self._pause_reasons: Dict[str, str] = {}
@@ -338,28 +372,313 @@ class TradingBotOrchestrator:
 
     def _is_paused(self) -> tuple:
         """Return (is_paused, reason) checking both reconciliation and manual pause."""
-        if getattr(self, "_trading_paused", False):
-            return True, getattr(self, "_pause_reason", "")
+        with self._pause_state_lock:
+            is_paused = bool(getattr(self, "_trading_paused", False))
+            pause_reason = str(getattr(self, "_pause_reason", "") or "")
+        if is_paused:
+            return True, pause_reason
         monitoring = getattr(self, "_monitoring", None)
         if monitoring and hasattr(monitoring, "_reconciler"):
             return monitoring._reconciler.is_paused()
         return False, ""
 
     def _set_pause_reason(self, key: str, reason: str) -> None:
-        self._pause_reasons[str(key)] = str(reason)
-        self._trading_paused = True
-        self._pause_reason = " | ".join(self._pause_reasons.values())
-        logger.warning("Trading PAUSED: %s", self._pause_reason)
+        with self._pause_state_lock:
+            self._pause_reasons[str(key)] = str(reason)
+            self._trading_paused = True
+            self._pause_reason = " | ".join(self._pause_reasons.values())
+            pause_reason = self._pause_reason
+        logger.warning("Trading PAUSED: %s", pause_reason)
 
     def _clear_pause_reason(self, key: str) -> None:
-        self._pause_reasons.pop(str(key), None)
-        self._trading_paused = bool(self._pause_reasons)
-        self._pause_reason = " | ".join(self._pause_reasons.values())
-        if not self._trading_paused:
+        with self._pause_state_lock:
+            self._pause_reasons.pop(str(key), None)
+            self._trading_paused = bool(self._pause_reasons)
+            self._pause_reason = " | ".join(self._pause_reasons.values())
+            is_paused = self._trading_paused
+        if not is_paused:
             logger.info("Trading RESUMED - auto pause cleared")
 
     def _invalidate_portfolio_cache(self) -> None:
         self._portfolio_cache = {"data": None, "timestamp": 0.0}
+
+    def _find_tracked_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+        if not self.executor:
+            return None
+
+        target_symbol = str(symbol or "").upper()
+        for position in self.executor.get_open_orders() or []:
+            if str(position.get("symbol") or "").upper() != target_symbol:
+                continue
+
+            raw_side = position.get("side")
+            side = raw_side.value.lower() if isinstance(raw_side, Enum) else str(raw_side or "").lower()
+            if side == "buy":
+                return position
+
+        return None
+
+    @staticmethod
+    def _extract_total_balance(balance_state: Optional[Dict[str, Any]], asset: str) -> float:
+        balances = (balance_state or {}).get("balances") or {}
+        payload = balances.get(str(asset or "").upper()) or {}
+        if isinstance(payload, dict):
+            available = float(payload.get("available", 0.0) or 0.0)
+            reserved = float(payload.get("reserved", 0.0) or 0.0)
+            total = payload.get("total")
+            if total is not None:
+                return float(total or 0.0)
+            return available + reserved
+        return float(payload or 0.0)
+
+    def _reconcile_tracked_positions_with_balance_state(
+        self,
+        balance_state: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """Drop filled tracked positions whose base-asset balance is gone on Bitkub."""
+        if not self.executor:
+            return []
+
+        snapshot = balance_state or self.get_balance_state()
+        balances = (snapshot or {}).get("balances") or {}
+        if not balances:
+            return []
+
+        removed_symbols: List[str] = []
+        for position in self.executor.get_open_orders() or []:
+            symbol = str(position.get("symbol") or "").upper()
+            order_id = str(position.get("order_id") or "")
+            if not symbol or not order_id or "_" not in symbol:
+                continue
+
+            raw_side = position.get("side")
+            if isinstance(raw_side, Enum):
+                side = raw_side.value.lower()
+            else:
+                side = str(raw_side or "").lower()
+
+            filled_amount = float(position.get("filled_amount") or 0.0)
+            amount = float(position.get("amount") or 0.0)
+            remaining_amount = float(position.get("remaining_amount") or 0.0)
+            is_partial_fill = bool(position.get("is_partial_fill"))
+            is_filled = bool(position.get("filled"))
+
+            represents_live_coin = False
+            if side == "buy":
+                represents_live_coin = (
+                    is_filled
+                    or is_partial_fill
+                    or filled_amount > 0.0
+                    or (amount > 0.0 and remaining_amount <= 0.0)
+                )
+            elif side == "sell":
+                represents_live_coin = True
+            elif not side:
+                represents_live_coin = True
+
+            if not represents_live_coin:
+                continue
+
+            base_asset = symbol.split("_", 1)[1].upper()
+            balance_total = self._extract_total_balance(snapshot, base_asset)
+            tracked_amount = max(filled_amount, amount, remaining_amount, 0.0)
+            dust_threshold = min(max(tracked_amount * 0.01, 1e-8), 1e-6)
+            if balance_total > dust_threshold:
+                continue
+
+            self.executor.remove_tracked_position(order_id)
+            self.db.record_held_coin(symbol, 0.0)
+            removed_symbols.append(symbol)
+            logger.warning(
+                "[Balance Reconcile] Removed stale tracked position %s (%s) after balance dropped to %.8f",
+                symbol,
+                order_id,
+                balance_total,
+            )
+
+        if removed_symbols and self._state_machine_enabled:
+            self._state_manager.sync_in_position_states(self.executor.get_open_orders())
+
+        return removed_symbols
+
+    def _preserve_bootstrap_position_from_balances(
+        self,
+        order_id: str,
+        local_pos: Dict[str, Any],
+        balances: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if not self.executor or not self.db:
+            return False
+
+        bootstrap_id = str(order_id or "")
+        if not bootstrap_id.startswith("bootstrap_"):
+            return False
+
+        symbol = str(local_pos.get("symbol") or "").upper()
+        if "_" not in symbol:
+            return False
+
+        side_value = local_pos.get("side", OrderSide.BUY)
+        side_str = side_value.value if isinstance(side_value, Enum) else str(side_value or "").lower()
+        if side_str != "buy":
+            return False
+
+        base_asset = symbol.split("_", 1)[1].upper()
+        balance_payload = (balances or {}).get(base_asset, {}) if isinstance(balances, dict) else {}
+        balance_total = self._extract_total_balance({"balances": {base_asset: balance_payload}}, base_asset)
+        if balance_total <= 0:
+            return False
+
+        preserved = dict(local_pos)
+        tracked_amount = max(
+            float(local_pos.get("filled_amount") or 0.0),
+            float(local_pos.get("amount") or 0.0),
+            0.0,
+        )
+        preserved_amount = float(balance_total)
+        external_excess = 0.0
+        if tracked_amount > 0:
+            preserved_amount = min(float(balance_total), tracked_amount)
+            external_excess = max(float(balance_total) - tracked_amount, 0.0)
+
+        preserved_entry = float(local_pos.get("entry_price") or 0.0)
+        preserved_sl = local_pos.get("stop_loss")
+        preserved_tp = local_pos.get("take_profit")
+        if preserved_entry > 0 and (not preserved_sl or not preserved_tp):
+            fallback_sl, fallback_tp = self._build_bootstrap_position_sl_tp(symbol, preserved_entry)
+            preserved_sl = preserved_sl or fallback_sl
+            preserved_tp = preserved_tp or fallback_tp
+
+        preserved.update({
+            "amount": preserved_amount,
+            "remaining_amount": 0.0,
+            "filled": True,
+            "filled_amount": preserved_amount,
+            "stop_loss": preserved_sl,
+            "take_profit": preserved_tp,
+        })
+        if preserved_entry > 0:
+            preserved["total_entry_cost"] = preserved_amount * preserved_entry
+
+        with self.executor._orders_lock:
+            self.executor._open_orders[bootstrap_id] = preserved
+
+        try:
+            self.db.save_position(preserved)
+        except Exception as exc:
+            logger.warning(
+                "[Reconcile] Failed to persist preserved bootstrap position %s: %s",
+                bootstrap_id,
+                exc,
+            )
+
+        if external_excess > 1e-8:
+            logger.warning(
+                "[Reconcile] Live %s balance exceeds tracked bootstrap size by %.8f. "
+                "Keeping tracked entry/SL/TP unchanged and not averaging external coins into position %s.",
+                base_asset,
+                external_excess,
+                bootstrap_id,
+            )
+
+        logger.info(
+            "[Reconcile] Preserved bootstrap position %s using live %s balance %.8f, entry %.2f, SL=%s, TP=%s",
+            bootstrap_id,
+            base_asset,
+            preserved_amount,
+            preserved_entry,
+            f"{float(preserved_sl):.2f}" if preserved_sl else "n/a",
+            f"{float(preserved_tp):.2f}" if preserved_tp else "n/a",
+        )
+        return True
+
+    def _build_bootstrap_position_sl_tp(self, symbol: str, entry_price: float) -> tuple[Optional[float], Optional[float]]:
+        if entry_price <= 0:
+            return None, None
+
+        default_sl_pct, default_tp_pct = get_default_sl_tp(symbol)
+        risk_cfg = dict(self.config.get("risk", {}) or {})
+
+        try:
+            stop_loss_pct = float(risk_cfg.get("stop_loss_pct", default_sl_pct) or default_sl_pct)
+        except (TypeError, ValueError):
+            stop_loss_pct = float(default_sl_pct)
+        try:
+            take_profit_pct = float(risk_cfg.get("take_profit_pct", default_tp_pct) or default_tp_pct)
+        except (TypeError, ValueError):
+            take_profit_pct = float(default_tp_pct)
+
+        stop_loss_pct = -abs(stop_loss_pct) if stop_loss_pct else float(default_sl_pct)
+        take_profit_pct = abs(take_profit_pct) if take_profit_pct else float(default_tp_pct)
+
+        stop_loss = round(entry_price * (1 + (stop_loss_pct / 100.0)), 6)
+        take_profit = round(entry_price * (1 + (take_profit_pct / 100.0)), 6)
+        return stop_loss, take_profit
+
+    @staticmethod
+    def _default_candle_retention_policy() -> Dict[str, int]:
+        return {
+            "1m": 7,
+            "5m": 14,
+            "15m": 30,
+            "1h": 60,
+            "4h": 90,
+            "1d": 180,
+        }
+
+    def _build_candle_retention_policy(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+        policy = self._default_candle_retention_policy()
+        raw_policy = dict((config or {}).get("timeframes") or {})
+        for timeframe, raw_days in raw_policy.items():
+            normalized_timeframe = str(timeframe or "").strip()
+            if not normalized_timeframe:
+                continue
+            try:
+                days = int(raw_days)
+            except (TypeError, ValueError):
+                logger.warning("[Retention] Invalid retention value for %s: %r", normalized_timeframe, raw_days)
+                continue
+            if days <= 0:
+                logger.warning("[Retention] Ignoring non-positive retention for %s: %s", normalized_timeframe, days)
+                continue
+            policy[normalized_timeframe] = days
+        return policy
+
+    def _run_candle_retention_cleanup(self, reason: str) -> None:
+        if not self._candle_retention_enabled or not self._candle_retention_policy:
+            return
+
+        try:
+            deleted = self.db.cleanup_price_history_by_timeframe(self._candle_retention_policy)
+            self._last_candle_retention_cleanup_at = time.time()
+            total_deleted = int(deleted.get("total", 0) or 0)
+            detail = ", ".join(
+                f"{timeframe}={int(deleted.get(timeframe, 0) or 0)}"
+                for timeframe in self._candle_retention_policy.keys()
+            )
+            logger.info("[Retention] Candle cleanup (%s) removed %d row(s): %s", reason, total_deleted, detail)
+
+            if total_deleted > 0 and self._candle_retention_vacuum:
+                if self.db.vacuum():
+                    logger.info("[Retention] SQLite VACUUM completed after %s cleanup", reason)
+                else:
+                    logger.warning("[Retention] SQLite VACUUM skipped/failed after %s cleanup", reason)
+        except Exception as exc:
+            logger.warning("[Retention] Candle cleanup (%s) failed: %s", reason, exc)
+
+    def _maybe_run_candle_retention_cleanup(self) -> None:
+        if not self._candle_retention_enabled or not self._candle_retention_policy:
+            return
+
+        now_ts = time.time()
+        if self._last_candle_retention_cleanup_at <= 0:
+            self._last_candle_retention_cleanup_at = now_ts
+            return
+
+        if (now_ts - self._last_candle_retention_cleanup_at) < self._candle_retention_interval_seconds:
+            return
+
+        self._run_candle_retention_cleanup("scheduled")
 
     def _init_balance_monitor(self, config: Dict[str, Any]):
         """Initialize the balance monitor without starting it yet."""
@@ -390,6 +709,31 @@ class TradingBotOrchestrator:
     def _handle_balance_event(self, event: BalanceEvent, balance_state: Dict[str, Any]) -> None:
         """React to deposit and withdrawal events from the balance monitor."""
         self._invalidate_portfolio_cache()
+        self._reconcile_tracked_positions_with_balance_state(balance_state)
+
+        if event.source == "crypto" and event.event_type == "DEPOSIT":
+            asset = str(event.coin or "").upper()
+            pair = f"THB_{asset}" if asset else ""
+            tracked_position = self._find_tracked_position_by_symbol(pair)
+            wallet_balance = self._extract_total_balance(balance_state, asset)
+
+            if tracked_position:
+                entry_price = _coerce_trade_float(tracked_position.get("entry_price"), 0.0)
+                message = (
+                    f"External crypto deposit detected: {asset} +{event.amount:.8f} "
+                    f"(wallet {wallet_balance:.8f}). Tracked {pair} entry remains {entry_price:,.2f}; "
+                    f"bot will not average-in this deposit automatically."
+                )
+            else:
+                message = (
+                    f"External crypto deposit detected: {asset} +{event.amount:.8f} "
+                    f"(wallet {wallet_balance:.8f}). No tracked {pair} position exists, so the deposit "
+                    f"was not auto-converted into a managed bot position."
+                )
+
+            logger.warning(message)
+            if self.send_alerts:
+                self._send_alert(message, to_telegram=True)
 
         if event.coin == "THB":
             if event.event_type == "DEPOSIT":
@@ -440,6 +784,11 @@ class TradingBotOrchestrator:
             logger.warning("Bot is already running")
             return
 
+        if self._candle_retention_enabled and self._candle_retention_run_on_startup:
+            self._run_candle_retention_cleanup("startup")
+        else:
+            self._last_candle_retention_cleanup_at = time.time()
+
         # ── HOTFIX FATAL-01: Ghost Orders Reconciliation ───────────────────
         # Before starting the main loop, forcefully query Bitkub API for
         # real open orders and balances. Use the authoritative remote data to
@@ -456,6 +805,7 @@ class TradingBotOrchestrator:
         self.executor.sync_open_orders_from_db()
         if not self._auth_degraded:
             self._bootstrap_held_coin_history()
+            self._bootstrap_held_positions()
         if self._state_machine_enabled:
             self._state_manager.sync_in_position_states(self.executor.get_open_orders())
 
@@ -511,6 +861,107 @@ class TradingBotOrchestrator:
                 backfilled,
             )
 
+    def _bootstrap_held_positions(self) -> None:
+        """Register wallet-held coins as OMS-tracked open positions.
+
+        Coins that have real balance on Bitkub but no corresponding entry in
+        ``executor._open_orders`` (e.g. manually bought, transferred in, or
+        bought while the bot was offline) are registered as synthetic BUY
+        positions so the bot can manage SL/TP and auto-sell them.
+
+        Runs once at startup, after ``_bootstrap_held_coin_history`` and
+        ``sync_open_orders_from_db``, but before ``sync_in_position_states``.
+        """
+        tracked_pairs = [pair.upper() for pair in self._get_trading_pairs()]
+        if not tracked_pairs:
+            return
+
+        try:
+            balances = self.api_client.get_balances()
+        except Exception as e:
+            logger.warning("[Bootstrap Positions] Cannot fetch balances: %s", e)
+            return
+
+        # Symbols already tracked by OMS
+        tracked_symbols = {
+            str(order.get("symbol", "")).upper()
+            for order in self.executor.get_open_orders()
+            if order.get("symbol")
+        }
+
+        from helpers import parse_ticker_last
+
+        registered: list[str] = []
+        for pair in tracked_pairs:
+            if pair in tracked_symbols:
+                continue
+
+            base_asset = pair.split("_", 1)[1] if "_" in pair else pair
+            balance_data = balances.get(base_asset.upper(), {}) if isinstance(balances, dict) else {}
+            available_qty = float(balance_data.get("available", 0) or 0)
+            reserved_qty = float(balance_data.get("reserved", 0) or 0)
+            total_qty = available_qty + reserved_qty
+
+            if total_qty <= 0:
+                continue
+
+            # Get current market price as best-effort entry price estimate
+            try:
+                ticker = self.api_client.get_ticker(pair)
+                current_price = parse_ticker_last(ticker) or 0.0
+            except Exception:
+                current_price = 0.0
+
+            if current_price <= 0:
+                logger.debug("[Bootstrap Positions] Skipping %s: no price available", pair)
+                continue
+
+            # Minimum value check (Bitkub minimum ~10-15 THB)
+            position_value = total_qty * current_price
+            if position_value < self.min_trade_value_thb:
+                logger.debug(
+                    "[Bootstrap Positions] Skipping %s: value %.2f THB < min %.2f THB",
+                    pair, position_value, self.min_trade_value_thb,
+                )
+                continue
+
+            stop_loss, take_profit = self._build_bootstrap_position_sl_tp(pair, current_price)
+
+            # Create synthetic position
+            synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
+            pos_data = {
+                "symbol": pair,
+                "side": OrderSide.BUY,
+                "amount": total_qty,
+                "entry_price": current_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "order_id": synthetic_id,
+                "timestamp": datetime.now(),
+                "is_partial_fill": False,
+                "remaining_amount": total_qty,
+                "total_entry_cost": total_qty * current_price,
+                "filled": True,
+                "filled_amount": total_qty,
+                "filled_price": current_price,
+            }
+
+            self.executor.register_tracked_position(synthetic_id, pos_data)
+            # Ensure held-coin history is also recorded
+            self.db.record_held_coin(pair, total_qty)
+            registered.append(
+                f"{pair} ({total_qty:.8f} @ {current_price:,.2f} | SL {float(stop_loss or 0.0):,.2f} TP {float(take_profit or 0.0):,.2f})"
+            )
+
+            time.sleep(0.15)  # rate-limit ticker calls
+
+        if registered:
+            logger.info(
+                "📦 [Bootstrap Positions] Registered %d held coin(s) as open positions:\n  %s",
+                len(registered),
+                "\n  ".join(registered),
+            )
+
     def _reconcile_on_startup(self):
         """
         HOTFIX FATAL-01: Ghost Orders Reconciliation on boot.
@@ -540,8 +991,14 @@ class TradingBotOrchestrator:
 
         reconciled_count = 0
         ghost_orders = []
+        balances: Dict[str, Any] = {}
 
         try:
+            try:
+                balances = self.api_client.get_balances() or {}
+            except Exception as exc:
+                logger.warning("[Reconcile] Failed to fetch balances for startup preservation checks: %s", exc)
+
             # ── Step 1: Get ALL open orders from Bitkub ──────────────────
             # We query each tracked symbol; the API doesn't support wildcard.
             symbols_to_check = [p.upper() for p in self._get_trading_pairs()]
@@ -628,6 +1085,39 @@ class TradingBotOrchestrator:
                     )
                     continue
 
+                # Skip ghost SELL orders that are the exit (TP/SL) of an existing
+                # filled BUY position — importing them would overwrite the
+                # original entry price with the exit price.
+                if side_str == "sell":
+                    ghost_price = float(ghost.get("entry_price", 0) or 0)
+                    _is_exit_of_existing = False
+                    with self.executor._orders_lock:
+                        for _pos in self.executor._open_orders.values():
+                            if (
+                                str(_pos.get("symbol", "")).upper() == local_sym
+                                and _pos.get("filled")
+                                and str(
+                                    _pos.get("side").value
+                                    if isinstance(_pos.get("side"), Enum)
+                                    else _pos.get("side", "")
+                                ).lower() == "buy"
+                            ):
+                                _tp = float(_pos.get("take_profit") or 0)
+                                _sl = float(_pos.get("stop_loss") or 0)
+                                if (_tp and abs(ghost_price - _tp) < 0.01) or (
+                                    _sl and abs(ghost_price - _sl) < 0.01
+                                ):
+                                    _is_exit_of_existing = True
+                                    break
+                    if _is_exit_of_existing:
+                        skipped_ghost_counts[(local_sym, side_str)] += 1
+                        logger.info(
+                            "[Reconcile] Ghost SELL %s @ %.2f matches existing position exit — "
+                            "skipping ghost import to preserve entry price",
+                            ghost.get("order_id"), ghost_price,
+                        )
+                        continue
+
                 oid = ghost["order_id"]
                 logger.warning(
                     f"👻 [Ghost Order] {oid} found on Bitkub but NOT in local DB! "
@@ -649,7 +1139,9 @@ class TradingBotOrchestrator:
                         "timestamp": datetime.now(),
                         "is_partial_fill": ghost["remaining"] < ghost["amount"],
                         "remaining_amount": ghost["remaining"],
-                        "total_entry_cost": ghost["entry_price"] * ghost["amount"],
+                        # BUY orders: Bitkub returns THB spent as `amount`, so that IS the entry cost.
+                        # SELL orders: `amount` is coin qty, so cost = price × qty.
+                        "total_entry_cost": ghost["amount"] if ghost["side"] == OrderSide.BUY else ghost["entry_price"] * ghost["amount"],
                         "filled": ghost["remaining"] < ghost["amount"],
                     }
                 # Persist to DB so it survives another crash
@@ -774,6 +1266,9 @@ class TradingBotOrchestrator:
                             )
                     else:
                         # Not in order history either — could be very old or expired
+                        if self._preserve_bootstrap_position_from_balances(missing_oid, local_pos, balances):
+                            continue
+
                         logger.warning(
                             f"[Reconcile] Order {missing_oid} not found in Bitkub or history. "
                             f"Removing from local tracking (likely stale)"
@@ -823,6 +1318,12 @@ class TradingBotOrchestrator:
         if balance_monitor:
             balance_monitor.stop()
 
+        if self.executor:
+            try:
+                self.executor.stop()
+            except Exception as e:
+                logger.warning(f"เกิดข้อผิดพลาดในการหยุด OMS executor: {e}")
+
         logger.info("เทรดบอทหยุดการทำงานโดยสมบูรณ์")
     
     def _main_loop(self):
@@ -845,6 +1346,7 @@ class TradingBotOrchestrator:
             try:
                 self._last_loop_time = datetime.now()
                 self._loop_count += 1
+                self._maybe_run_candle_retention_cleanup()
                 
                 logger.debug(f"Loop #{self._loop_count} started at {self._last_loop_time}")
                 
@@ -1149,13 +1651,13 @@ class TradingBotOrchestrator:
             return
 
         entry_cost = float(snapshot.total_entry_cost or (snapshot.entry_price * amount) or 0.0)
-        entry_fee = entry_cost * BITKUB_FEE_PCT
-        gross_exit = exit_price * amount
-        exit_fee = gross_exit * BITKUB_FEE_PCT
-        net_exit = gross_exit - exit_fee
-        total_fees = entry_fee + exit_fee
-        net_pnl = net_exit - entry_cost
-        net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0.0
+        entry_fee = precise_multiply(entry_cost, BITKUB_FEE_PCT)
+        gross_exit = precise_multiply(exit_price, amount)
+        exit_fee = precise_multiply(gross_exit, BITKUB_FEE_PCT)
+        net_exit = precise_subtract(gross_exit, exit_fee)
+        total_fees = precise_add(entry_fee, exit_fee)
+        net_pnl = precise_subtract(net_exit, entry_cost)
+        net_pnl_pct = precise_multiply(precise_divide(net_pnl, entry_cost), 100) if entry_cost > 0 else 0.0
         now = datetime.now()
 
         self._log_filled_order(
@@ -1226,6 +1728,8 @@ class TradingBotOrchestrator:
             "result": result,
             "timestamp": datetime.now(),
         })
+        if len(self._executed_today) > self._executed_today_max:
+            self._executed_today = self._executed_today[-self._executed_today_max:]
         coin = self._format_coin_symbol(decision.plan.symbol)
         msg = self._format_alert_block(
             f"📥 <b>ส่งคำสั่งซื้อ</b>  {coin}",
@@ -1234,7 +1738,7 @@ class TradingBotOrchestrator:
                 f"SL <code>{decision.plan.stop_loss:,.0f}</code>  TP <code>{decision.plan.take_profit:,.0f}</code>",
             ],
         )
-        self._send_alert(msg, to_telegram=False)
+        self._send_alert(msg, to_telegram=True)
 
     def _submit_managed_exit(
         self,
@@ -1354,6 +1858,15 @@ class TradingBotOrchestrator:
                             filled_amount,
                             filled_price,
                         )
+                        if self.send_alerts:
+                            msg = self._format_alert_block(
+                                f"✅ <b>ซื้อสำเร็จ (Filled)</b>  {snapshot.symbol.replace('THB_', '')}",
+                                [
+                                    f"ได้ของจำนวน: <code>{filled_amount:.6f}</code>",
+                                    f"ที่ราคา: <code>{filled_price:,.2f}</code> THB",
+                                ]
+                            )
+                            self._send_alert(msg, to_telegram=True)
                         continue
 
                     if self._state_manager.is_timed_out(snapshot):
@@ -1378,6 +1891,12 @@ class TradingBotOrchestrator:
                         if cancelled:
                             self._state_manager.cancel_pending_buy(snapshot.symbol, "buy timeout cancel")
                             logger.info("[State] %s -> idle | pending buy timed out", snapshot.symbol)
+                            if self.send_alerts:
+                                msg = self._format_alert_block(
+                                    f"⏰ <b>ยกเลิกคำสั่งซื้อ (ตกรถ)</b>  {snapshot.symbol.replace('THB_', '')}",
+                                    [f"ออเดอร์ Limit ไม่ถูกจับคู่ภายในเวลาที่กำหนด", "ดึงออเดอร์กลับและรอสัญญาณใหม่"]
+                                )
+                                self._send_alert(msg, to_telegram=True)
                         else:
                             logger.warning("[State] Failed to cancel timed-out buy for %s", snapshot.symbol)
 
@@ -1465,6 +1984,8 @@ class TradingBotOrchestrator:
             )
             return
 
+        self._reconcile_tracked_positions_with_balance_state()
+
         # ── Reconciliation pause gate ─────────────────────────────────────
         paused, reason = self._is_paused()
         if paused:
@@ -1490,26 +2011,28 @@ class TradingBotOrchestrator:
         # Get trading pairs (supports multiple pairs)
         trading_pairs = self._get_trading_pairs()
         logger.debug(f"Processing {len(trading_pairs)} trading pair(s): {trading_pairs}")
-        
-        # Portfolio Guard: Filter to only trade coins that have been held
-        held_pairs = [
-            pair for pair in trading_pairs
-            if self.db.has_ever_held(pair)
-        ]
-        
-        # Log filtered pairs
-        if len(held_pairs) < len(trading_pairs):
-            skipped = [p for p in trading_pairs if p not in held_pairs]
-            skipped_key = tuple(skipped)
-            if skipped_key != self._last_portfolio_guard_skipped:
-                logger.info(f"🛡️  [Portfolio Guard] Skipping never-held pairs: {skipped}")
-                self._last_portfolio_guard_skipped = skipped_key
+
+        active_pairs = trading_pairs
+        if self._held_coins_only:
+            active_pairs = [
+                pair for pair in trading_pairs
+                if self.db.has_ever_held(pair)
+            ]
+
+            if len(active_pairs) < len(trading_pairs):
+                skipped = [p for p in trading_pairs if p not in active_pairs]
+                skipped_key = tuple(skipped)
+                if skipped_key != self._last_portfolio_guard_skipped:
+                    logger.info(f"🛡️  [Portfolio Guard] Skipping never-held pairs: {skipped}")
+                    self._last_portfolio_guard_skipped = skipped_key
+            else:
+                self._last_portfolio_guard_skipped = ()
         else:
             self._last_portfolio_guard_skipped = ()
-        
-        logger.debug(f"Actual pairs to process: {held_pairs}")
-        
-        for current_pair in held_pairs:
+
+        logger.debug(f"Actual pairs to process: {active_pairs}")
+
+        for current_pair in active_pairs:
             self._process_pair_iteration(current_pair)
     
     def _process_pair_iteration(self, symbol: str):
@@ -1520,6 +2043,7 @@ class TradingBotOrchestrator:
         """
         portfolio = self._get_portfolio_state()
         mtf_signal = self._get_mtf_signal_for_symbol(symbol, portfolio)
+        lifecycle_gated = False
 
         if self._state_machine_enabled:
             snapshot = self._state_manager.get_state(symbol)
@@ -1528,7 +2052,7 @@ class TradingBotOrchestrator:
                 if last_logged != snapshot.state.value:
                     logger.info("[State] %s gated by execution state: %s", symbol, snapshot.state.value)
                     self._last_state_gate_logged[symbol] = snapshot.state.value
-                return
+                lifecycle_gated = True
             self._last_state_gate_logged.pop(symbol, None)
 
         # 1. Get current market data for this symbol
@@ -1575,6 +2099,11 @@ class TradingBotOrchestrator:
         
         if not signals:
             logger.debug(f"No signals generated for {symbol}")
+            return
+
+        # Keep signal diagnostics fresh for Rich CLI even when execution state
+        # currently blocks new signal processing for this symbol.
+        if lifecycle_gated:
             return
         
         # 4. Log signals to database
@@ -1881,10 +2410,8 @@ class TradingBotOrchestrator:
         if not rows:
             # Try API fallback
             try:
-                timeframe_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60", "1d": "1440"}
-                tf_param = timeframe_map.get(self.timeframe, "60")
-                
-                response = self.api_client.get_candle(symbol, tf_param)
+                # api_client.get_candle has its own complete mapping, pass directly
+                response = self.api_client.get_candle(symbol, timeframe=self.timeframe)
                 if response.get("error") == 0:
                     data = response.get("result", [])
                     import pandas as pd
@@ -1911,6 +2438,12 @@ class TradingBotOrchestrator:
         df.attrs["_data_source"] = "db"
         
         self._symbol_market_cache[cache_key] = {"data": df, "timestamp": now}
+        # Evict stale entries to prevent cache growth
+        if len(self._symbol_market_cache) > 100:
+            stale_cutoff = now - self._cache_ttl['market_data'] * 3
+            stale_keys = [k for k, v in self._symbol_market_cache.items() if v["timestamp"] < stale_cutoff]
+            for k in stale_keys:
+                del self._symbol_market_cache[k]
         return df
     
     def _create_execution_plan_for_symbol(self, signal: AggregatedSignal, symbol: str) -> Optional[ExecutionPlan]:
@@ -1948,8 +2481,8 @@ class TradingBotOrchestrator:
         except Exception as e:
             logger.debug(f"[Position Check] Could not check positions: {e}")
         
-        # ✓ NEW: Restrict BUY signals to coins ever held by this bot
-        if side == OrderSide.BUY and plan_close_flag is False:
+        # Restrict BUY signals to previously held coins only when held-coins-only mode is enabled.
+        if side == OrderSide.BUY and plan_close_flag is False and self._held_coins_only:
             has_history = False
             try:
                 if self.db:
@@ -2023,7 +2556,7 @@ class TradingBotOrchestrator:
                 f"Dynamic SL/TP: pair={symbol}",
             ],
             signal_timestamp=signal.timestamp,
-            signal_id=f"{signal.symbol}_{signal.signal_type.value}_{int(signal.timestamp.timestamp())}",
+            signal_id=f"{signal.symbol}_{signal.signal_type.value}_{int(signal.timestamp.timestamp())}_{self._loop_count}",
             max_price_drift_pct=1.5,
             close_position=plan_close_flag,
         )
@@ -2199,20 +2732,20 @@ class TradingBotOrchestrator:
                 price=current_price,
             )
             if result.success:
-                # ── Net P/L with Bitkub 0.25% fees ────────────────
+                # ── Net P/L with Bitkub 0.25% fees (Decimal precision) ──
                 from trade_executor import BITKUB_FEE_PCT
                 now = datetime.now()
                 
-                entry_cost = total_entry_cost if total_entry_cost > 0 else (entry_price * amount)
-                entry_fee = entry_cost * BITKUB_FEE_PCT
+                entry_cost = total_entry_cost if total_entry_cost > 0 else precise_multiply(entry_price, amount)
+                entry_fee = precise_multiply(entry_cost, BITKUB_FEE_PCT)
                 
-                gross_exit = current_price * amount
-                exit_fee = gross_exit * BITKUB_FEE_PCT
-                net_exit = gross_exit - exit_fee
+                gross_exit = precise_multiply(current_price, amount)
+                exit_fee = precise_multiply(gross_exit, BITKUB_FEE_PCT)
+                net_exit = precise_subtract(gross_exit, exit_fee)
                 
-                total_fees = entry_fee + exit_fee
-                net_pnl = net_exit - entry_cost
-                net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
+                total_fees = precise_add(entry_fee, exit_fee)
+                net_pnl = precise_subtract(net_exit, entry_cost)
+                net_pnl_pct = precise_multiply(precise_divide(net_pnl, entry_cost), 100) if entry_cost > 0 else 0
                 
                 pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
                 coin = symbol.replace("THB_", "")
@@ -2432,6 +2965,8 @@ class TradingBotOrchestrator:
                 "result": result,
                 "timestamp": datetime.now()
             })
+            if len(self._executed_today) > self._executed_today_max:
+                self._executed_today = self._executed_today[-self._executed_today_max:]
             
             # Log order to database
             try:
@@ -2456,6 +2991,12 @@ class TradingBotOrchestrator:
                 logger.info(result.message)
             else:
                 logger.error(f"Trade execution failed: {result.message}")
+                if self.send_alerts:
+                    symbol = decision.plan.symbol if decision.plan else "?"
+                    self._send_alert(
+                        f"\u26a0\ufe0f Trade REJECTED [{symbol}]: {result.message}",
+                        to_telegram=True,
+                    )
     
     def _process_semi_auto(self, decision: TradeDecision, portfolio: Dict[str, Any]):
         """
@@ -2541,6 +3082,8 @@ class TradingBotOrchestrator:
                 "result": result,
                 "timestamp": datetime.now()
             })
+            if len(self._executed_today) > self._executed_today_max:
+                self._executed_today = self._executed_today[-self._executed_today_max:]
             with self._pending_decisions_lock:
                 self._pending_decisions.pop(decision_id)
             return True
@@ -2618,12 +3161,12 @@ class TradingBotOrchestrator:
         return True
     
     def _send_trade_alert(self, decision: TradeDecision, result: OrderResult):
-        """Log executed entries without notifying Telegram."""
+        """Log executed entries and notify Telegram."""
         if not self.send_alerts:
             return
         
         message = self._format_trade_alert(decision, result)
-        self._send_alert(message, to_telegram=False)
+        self._send_alert(message, to_telegram=True)
     
     def _send_pending_alert(self, decision: TradeDecision, portfolio: Dict[str, Any]):
         """Send alert about pending trade requiring approval."""
@@ -3009,13 +3552,20 @@ class TradingBotOrchestrator:
 
             triggered = None
 
-            if side == OrderSide.BUY:
+            if self._scalping_mode_enabled:
+                opened_at = _coerce_trade_datetime(pos.get("timestamp"))
+                if opened_at is not None:
+                    hold_seconds = (datetime.now() - opened_at).total_seconds()
+                    if hold_seconds >= (self._scalping_position_timeout_minutes * 60):
+                        triggered = "TIME"
+
+            if not triggered and side == OrderSide.BUY:
                 # For long positions: SL below entry, TP above entry
                 if stop_loss > 0 and current_price <= stop_loss:
                     triggered = "SL"
                 elif take_profit > 0 and current_price >= take_profit:
                     triggered = "TP"
-            else:
+            elif not triggered:
                 # For short positions (if supported): SL above entry, TP below entry
                 if stop_loss > 0 and current_price >= stop_loss:
                     triggered = "SL"
@@ -3064,15 +3614,15 @@ class TradingBotOrchestrator:
                     now = datetime.now()
                     
                     entry_cost = pos.get("total_entry_cost", entry_price * amount)
-                    entry_fee = entry_cost * BITKUB_FEE_PCT
+                    entry_fee = precise_multiply(entry_cost, BITKUB_FEE_PCT)
                     
-                    gross_exit = exit_price * amount
-                    exit_fee = gross_exit * BITKUB_FEE_PCT
-                    net_exit = gross_exit - exit_fee
+                    gross_exit = precise_multiply(exit_price, amount)
+                    exit_fee = precise_multiply(gross_exit, BITKUB_FEE_PCT)
+                    net_exit = precise_subtract(gross_exit, exit_fee)
                     
-                    total_fees = entry_fee + exit_fee
-                    net_pnl = net_exit - entry_cost
-                    net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
+                    total_fees = precise_add(entry_fee, exit_fee)
+                    net_pnl = precise_subtract(net_exit, entry_cost)
+                    net_pnl_pct = precise_multiply(precise_divide(net_pnl, entry_cost), 100) if entry_cost > 0 else 0
                     
                     pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
                     trigger_emoji = "🎯" if triggered == "TP" else "🛑"

@@ -71,6 +71,7 @@ def _make_executor(db: object = _SENTINEL) -> TradeExecutor:
     ex._open_orders = {}
     ex._order_history = []
     ex._orders_lock = threading.Lock()
+    ex._oms_processing_lock = threading.Lock()
     ex._oms_processing = set()
     ex._exit_in_progress = set()
     ex._exit_in_progress_lock = threading.Lock()
@@ -80,6 +81,7 @@ def _make_executor(db: object = _SENTINEL) -> TradeExecutor:
     ex._reconcile_done = threading.Event()
     ex._reconcile_done.set()  # allow OMS ticks in tests that need them
     ex._oms_running = False
+    ex._oms_stop_event = threading.Event()
     ex._oms_thread = None  # type: ignore[assignment]
     return ex
 
@@ -136,6 +138,22 @@ class TestM1CancelOrderAtomicity:
         ex.cancel_order("ord-1", symbol="THB_BTC", side="buy")
 
         db.delete_position.assert_not_called()
+
+
+def test_oms_processing_is_cleared_when_replacement_thread_fails_to_start():
+    db = Mock()
+    db.load_all_positions.return_value = []
+    ex = _make_executor(db=db)
+    new_order = Mock()
+    old_pos_data = {"order_id": "ord-1"}
+    failing_thread = Mock()
+    failing_thread.start.side_effect = RuntimeError("thread start failed")
+
+    with patch("trade_executor.threading.Thread", return_value=failing_thread):
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            ex._start_oms_replacement("ord-1", new_order, old_pos_data)
+
+    assert "ord-1" not in ex._oms_processing
 
     def test_successful_cancel_removes_from_open_orders(self):
         """Confirmed API cancel must evict the order from _open_orders."""
@@ -212,6 +230,7 @@ class TestM1AgedOrderOmsPath:
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
+                ex._oms_stop_event.set()
 
             t = threading.Thread(target=_stop, daemon=True)
             t.start()
@@ -239,6 +258,7 @@ class TestM1AgedOrderOmsPath:
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
+                ex._oms_stop_event.set()
 
             t = threading.Thread(target=_stop, daemon=True)
             t.start()
@@ -273,6 +293,7 @@ class TestM1AgedOrderOmsPath:
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
+                ex._oms_stop_event.set()
 
             t = threading.Thread(target=_stop, daemon=True)
             t.start()

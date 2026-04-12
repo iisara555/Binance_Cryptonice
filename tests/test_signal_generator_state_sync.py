@@ -445,6 +445,46 @@ class TestBotSyncsStateBeforeSignals:
             f"Expected open_positions_count=2 from list_active_states, got {kwargs}"
         )
 
+    def test_lifecycle_gated_pair_still_refreshes_signal_flow_but_skips_execution(self):
+        """In-position pairs should still refresh diagnostics for Rich CLI while skipping trade execution."""
+        mock_api = Mock()
+        mock_api.get_balances.return_value = {"THB": {"available": 100_000.0}}
+        mock_api.is_circuit_open.return_value = False
+
+        mock_sg = Mock(spec=SignalGenerator)
+        mock_sg.generate_sniper_signal.return_value = [_make_aggregated_signal()]
+        mock_sg.check_risk.return_value = Mock(passed=True, reasons=[])
+
+        mock_rm = Mock()
+        mock_rm.trade_count_today = 0
+
+        mock_executor = Mock()
+        mock_executor.get_open_orders.return_value = []
+
+        bot = _build_bot(
+            config_overrides={"state_management": {"enabled": True}},
+            api_client=mock_api,
+            signal_generator=mock_sg,
+            risk_manager=mock_rm,
+            executor=mock_executor,
+        )
+
+        from state_management import TradeLifecycleState
+        gated_snapshot = Mock()
+        gated_snapshot.state = TradeLifecycleState.IN_POSITION
+        bot._state_manager.get_state = Mock(return_value=gated_snapshot)
+        bot._create_execution_plan_for_symbol = Mock()
+
+        data = _make_ohlcv(rows=250)
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
+             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
+             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+            bot._process_pair_iteration("THB_BTC")
+
+        mock_sg.sync_state.assert_called_once()
+        mock_sg.generate_sniper_signal.assert_called_once()
+        bot._create_execution_plan_for_symbol.assert_not_called()
+
     def test_idle_sell_requires_confirmation_before_plan_creation(self):
         """When idle SELL is enabled, it must still pass confirmation gate first."""
         mock_api = Mock()

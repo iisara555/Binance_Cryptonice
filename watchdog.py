@@ -107,6 +107,9 @@ def get_last_price_time():
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=5)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA busy_timeout=5000")
+        # Keep watchdog reads compatible with bot's WAL write pattern.
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("SELECT MAX(timestamp) FROM prices")
         result = cursor.fetchone()[0]
         conn.close()

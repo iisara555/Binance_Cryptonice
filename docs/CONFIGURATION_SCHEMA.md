@@ -86,11 +86,10 @@ repo ปัจจุบันใช้ strategy engine เป็น signal sourc
 ```yaml
 multi_timeframe:
   enabled: true
-  signal_source: "strategy"
   require_htf_confirmation: true
 ```
 
-ให้ปรับ threshold และ logic ผ่าน `strategies.*`, `multi_timeframe.*` และ `trading_strategy.*` ใน `bot_config.yaml`
+ให้ปรับ threshold และ logic ผ่าน `strategies.*` และ `multi_timeframe.*` ใน `bot_config.yaml`
 
 ---
 
@@ -115,7 +114,6 @@ notifications:
   alert_channel: "telegram"
   telegram_command_polling_enabled: false
   send_alerts: true
-  notify_position_updates: true
 ```
 
 `telegram_command_polling_enabled: false` keeps outbound Telegram alerts available but disables long-poll command handling.
@@ -183,7 +181,6 @@ strategies:
 
 multi_timeframe:
   enabled: true
-  signal_source: "strategy"
 
 risk:
   max_risk_per_trade_pct: 4.0

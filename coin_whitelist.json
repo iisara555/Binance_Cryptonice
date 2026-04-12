@@ -10,15 +10,35 @@
       "enabled": true
     },
     {
-      "symbol": "POL",
-      "enabled": true
-    },
-    {
       "symbol": "ETH",
       "enabled": true
     },
     {
       "symbol": "DOGE",
+      "enabled": true
+    },
+    {
+      "symbol": "SOL",
+      "enabled": true
+    },
+    {
+      "symbol": "XRP",
+      "enabled": true
+    },
+    {
+      "symbol": "ADA",
+      "enabled": true
+    },
+    {
+      "symbol": "BNB",
+      "enabled": true
+    },
+    {
+      "symbol": "DOT",
+      "enabled": true
+    },
+    {
+      "symbol": "LINK",
       "enabled": true
     }
   ]

@@ -19,7 +19,7 @@ import threading
 import logging
 import textwrap
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any, Callable, TypeVar
+from typing import List, Optional, Dict, Any, Callable, TypeVar, Mapping
 
 import pandas as pd
 
@@ -93,6 +93,7 @@ class Database:
             cursor.execute("PRAGMA busy_timeout=30000")   # 30 s
             cursor.execute("PRAGMA synchronous=NORMAL")  # safe + faster than FULL
             cursor.execute("PRAGMA cache_size=-64000")  # 64 MB page cache
+            cursor.execute("PRAGMA temp_store=MEMORY")  # Store temp tables and indexes in RAM for faster ORDER BY
             cursor.close()
 
         self.SessionLocal = sessionmaker(bind=self.engine)
@@ -303,6 +304,26 @@ class Database:
         """Get a new database session"""
         return self.SessionLocal()
 
+    from contextlib import contextmanager as _contextmanager
+
+    @_contextmanager
+    def session_scope(self):
+        """Context manager for auto-closing sessions — reduces boilerplate.
+
+        Usage::
+
+            with self.session_scope() as session:
+                session.query(Price).filter(...).all()
+        """
+        session = self.SessionLocal()
+        try:
+            yield session
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def get_connection(self):
         """Get a raw DB-API connection (compatibility wrapper)."""
         return self.engine.raw_connection()
@@ -441,14 +462,11 @@ class Database:
 
     def get_latest_price(self, pair: str, timeframe: str = None) -> Optional[Price]:
         """Get the most recent price for a trading pair"""
-        session = self.get_session()
-        try:
+        with self.session_scope() as session:
             query = session.query(Price).filter(Price.pair == pair)
             if timeframe:
                 query = query.filter(Price.timeframe == timeframe)
             return query.order_by(Price.timestamp.desc()).first()
-        finally:
-            session.close()
 
     def get_price_history(self, pair: str,
                           start_time: datetime = None,
@@ -456,8 +474,7 @@ class Database:
                           limit: int = 1000,
                           timeframe: str = None) -> List[Price]:
         """Get historical prices for a pair"""
-        session = self.get_session()
-        try:
+        with self.session_scope() as session:
             query = session.query(Price).filter(Price.pair == pair)
 
             if timeframe:
@@ -468,8 +485,6 @@ class Database:
                 query = query.filter(Price.timestamp <= end_time)
 
             return query.order_by(Price.timestamp.desc()).limit(limit).all()
-        finally:
-            session.close()
 
     def get_price_df(self, pair: str, days: int = 30, timeframe: str = None) -> List[Dict[str, Any]]:
         """Get price data as list of dicts for analysis (pandas-ready)"""
@@ -1373,6 +1388,95 @@ class Database:
 
         with self._write_lock:
             return self._with_retry(_do_cleanup)
+
+    def cleanup_price_history_by_timeframe(self, retention_days_by_timeframe: Mapping[str, int]) -> Dict[str, int]:
+        """Prune old candle rows using timeframe-specific retention windows."""
+
+        normalized_policy: Dict[str, int] = {}
+        for timeframe, raw_days in dict(retention_days_by_timeframe or {}).items():
+            normalized_timeframe = str(timeframe or "").strip()
+            if not normalized_timeframe:
+                continue
+            try:
+                days = int(raw_days)
+            except (TypeError, ValueError):
+                _logger.warning("[Retention] Ignoring invalid retention for timeframe %s: %r", normalized_timeframe, raw_days)
+                continue
+            if days <= 0:
+                _logger.warning("[Retention] Ignoring non-positive retention for timeframe %s: %s", normalized_timeframe, days)
+                continue
+            normalized_policy[normalized_timeframe] = days
+
+        if not normalized_policy:
+            return {"total": 0}
+
+        def _do_cleanup() -> Dict[str, int]:
+            session = self.get_session()
+            deleted_counts: Dict[str, int] = {}
+            try:
+                now_utc = datetime.utcnow()
+                total_deleted = 0
+                for timeframe, days in normalized_policy.items():
+                    cutoff = now_utc - timedelta(days=days)
+                    deleted = session.query(Price).filter(
+                        func.coalesce(Price.timeframe, '1h') == timeframe,
+                        Price.timestamp < cutoff,
+                    ).delete(synchronize_session=False)
+                    deleted_counts[timeframe] = int(deleted or 0)
+                    total_deleted += int(deleted or 0)
+
+                session.commit()
+                deleted_counts["total"] = total_deleted
+                return deleted_counts
+            except Exception as e:
+                session.rollback()
+                raise e
+            finally:
+                session.close()
+
+        with self._write_lock:
+            return self._with_retry(_do_cleanup)
+
+    def vacuum(self) -> bool:
+        """Run VACUUM on the SQLite database file.
+
+        This is intentionally separate from retention cleanup because VACUUM can
+        be expensive on live runtimes.
+        """
+
+        for attempt in range(1, self._WRITE_RETRIES + 1):
+            connection: Optional[sqlite3.Connection] = None
+            try:
+                with self._write_lock:
+                    connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+                    cursor = connection.cursor()
+                    cursor.execute("PRAGMA busy_timeout=30000")
+                    cursor.execute("PRAGMA temp_store=MEMORY")
+                    cursor.execute("VACUUM")
+                    connection.commit()
+                return True
+            except sqlite3.OperationalError as exc:
+                err_str = str(exc).lower()
+                if "locked" not in err_str and "busy" not in err_str:
+                    raise
+                delay = min(
+                    self._RETRY_BASE_DELAY * (2 ** (attempt - 1)),
+                    self._RETRY_MAX_DELAY,
+                )
+                _logger.warning(
+                    "Database vacuum %s (attempt %d/%d) — retrying in %.2fs. Error: %s",
+                    'locked' if 'locked' in err_str else 'busy',
+                    attempt,
+                    self._WRITE_RETRIES,
+                    delay,
+                    exc,
+                )
+                time.sleep(delay)
+            finally:
+                if connection is not None:
+                    connection.close()
+
+        return False
 
 
 def init_db(db_path: str = None) -> Database:

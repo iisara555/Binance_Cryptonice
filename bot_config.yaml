@@ -17,8 +17,51 @@ trading:
   # Multi-pair support: bot will iterate through all pairs in data.pairs
   # trading_pairs list can be added for specific pairs to trade
   interval_seconds: 60               # Main loop interval in seconds
-  timeframe: "15m"                    # Primary data timeframe for analysis
+  timeframe: "15m"                    # Overridden to 5m automatically when strategy_mode.active=scalping
   mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
+  min_order_amount: 15.0            # Bitkub minimum order value in THB
+
+strategy_mode:
+  active: "scalping"               # "standard" | "trend_only" | "scalping"
+  trend_only:
+    primary_timeframe: "15m"
+    confirm_timeframe: "1h"
+    min_confidence: 0.35
+    min_strategies_agree: 1
+    confirmations_required: 1
+    confirmation_window_seconds: 180
+    stop_loss_pct: 4.5
+    take_profit_pct: 10.0
+    max_hold_hours: 48
+    min_time_between_trades_minutes: 5
+    mtf_enabled: true
+  scalping:
+    primary_timeframe: "5m"
+    confirm_timeframe: "15m"
+    trend_timeframe: "1h"
+    fast_ema: 9
+    slow_ema: 21
+    rsi_period: 7
+    rsi_oversold: 34
+    rsi_overbought: 66
+    bollinger_period: 20
+    bollinger_std: 2.0
+    min_confidence: 0.30
+    min_strategies_agree: 1
+    confirmations_required: 1
+    confirmation_window_seconds: 90
+    pending_buy_timeout_seconds: 60
+    pending_sell_timeout_seconds: 60
+    stop_loss_pct: 0.75
+    take_profit_pct: 1.75
+    position_timeout_minutes: 30
+    max_trades_per_day: 72
+    min_time_between_trades_minutes: 2
+    monitor_check_interval_seconds: 5
+    max_position_per_trade_pct: 8.0
+    max_risk_per_trade_pct: 1.0
+    position_risk_per_trade_pct: 0.75
+    position_size_cap_pct: 8.0
 
 # Multi-Timeframe Analysis Settings
 multi_timeframe:
@@ -49,9 +92,9 @@ multi_timeframe:
 
 # Risk Management
 risk:
-  max_risk_per_trade_pct: 4.0        # Max risk per trade for high-volatility crypto profile
+  max_risk_per_trade_pct: 2.0        # Max risk per trade for high-volatility crypto profile
   max_daily_loss_pct: 10.0           # Higher daily drawdown budget for crypto volatility
-  max_position_per_trade_pct: 10.0   # Max position size (% of portfolio)
+  max_position_per_trade_pct: 20.0   # Max position size (% of portfolio)
   max_open_positions: 4              # Maximum open positions (adjust based on active pairs)
   max_daily_trades: 50               # Maximum trades per day
   stop_loss_pct: 4.5                 # Wider stop loss to survive deep wick noise
@@ -70,6 +113,18 @@ strategies:
     - "scalping"
   min_confidence: 0.35               # Minimum confidence to act (lowered from 0.40)
   min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
+  scalping:
+    fast_ema: 9
+    slow_ema: 21
+    rsi_period: 7
+    rsi_oversold: 34
+    rsi_overbought: 66
+    bollinger_period: 20
+    bollinger_std: 2.0
+    min_entry_confidence: 0.30
+    stop_loss_pct: 0.75
+    take_profit_pct: 1.75
+    position_timeout_minutes: 30
 
 # Trading Strategy Parameters (NEW - Easy to edit)
 # All trading decisions use these parameters
@@ -131,7 +186,7 @@ auto_trader:
 notifications:
   alert_channel: "telegram"          # "telegram" or "console"
   telegram_chat_id: ""               # Telegram chat ID for alerts
-  telegram_command_polling_enabled: false  # Keep sendMessage alerts but disable long-poll command handling in service mode
+  telegram_command_polling_enabled: true   # Enable Telegram command polling in VPS tmux runtime
   send_alerts: true                  # Enable/disable alerts
   notify_ml_signals: false           # Deprecated after AI purge
   notify_position_updates: true      # Notify on SL/TP hits
@@ -142,7 +197,7 @@ execution:
   retry_attempts: 3                  # Number of retry attempts for failed orders
   retry_delay_seconds: 5             # Delay between retries
   order_timeout_seconds: 30          # Timeout for order execution
-  allow_trailing_stop: false         # Fixed TP/SL mode: keep exit levels static once entered
+  allow_trailing_stop: true          # อนุญาตให้ระบบประมวลผลการเลื่อนจุดตัดขาดทุนได้
 
 # Execution State Machine
 # Separate ML entry decisions from order lifecycle and exits.
@@ -153,14 +208,16 @@ state_management:
   confirmation_window_seconds: 180   # Reset confirmation if next signal arrives too late
   pending_buy_timeout_seconds: 120   # Cancel unmatched BUY and return to IDLE after this timeout
   pending_sell_timeout_seconds: 120  # Cancel unmatched SELL and restore IN_POSITION after this timeout
-  allow_sell_entries_from_idle: false # Conservative default: SELL signals close existing positions only unless explicitly enabled
-  allow_trailing_stop: false         # Use fixed TP/SL exits instead of dynamic trailing updates
+  allow_sell_entries_from_idle: true  # Allow SELL signals to liquidate held coins even without a tracked BUY position
+  allow_trailing_stop: true          # อนุญาตให้ State Machine จัดการอัปเดต Trailing Stop แบบไดนามิกได้
 
 # Market data / trading pairs
 # Use data.pairs to enable multi-pair trading and collection.
 data:
   auto_detect_held_pairs: true       # Use Hybrid Dynamic Coin Config to resolve runtime pairs
   pairs: []                          # Optional runtime override / extra filter (leave empty to use JSON whitelist order)
+  portfolio_guard:
+    held_coins_only: false           # Allow BUY entries on new whitelist coins; set true to trade only coins already held
   collect_interval_seconds: 60       # Interval for data collector loop
   hybrid_dynamic_coin_config:
     whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON)
@@ -169,6 +226,20 @@ data:
     include_assets_with_balance: true  # Keep whitelisted coins with real holdings even if THB quote balance is low
     hot_reload_enabled: true         # Watch the JSON whitelist and refresh runtime pairs without restart
     reload_interval_seconds: 30      # Polling interval for whitelist change detection
+
+# Candle retention / database cleanup
+candle_retention:
+  enabled: true                      # Prune old candle rows so the local prices table does not grow forever
+  run_on_startup: true               # Run one retention pass at bot startup
+  cleanup_interval_hours: 12         # Scheduled cleanup cadence during runtime
+  vacuum_after_cleanup: false        # VACUUM is expensive; keep opt-in for maintenance windows
+  timeframes:
+    "1m": 7                         # High-volume intraday data
+    "5m": 14
+    "15m": 30
+    "1h": 60
+    "4h": 90
+    "1d": 180
 
 # Portfolio
 portfolio:
@@ -183,6 +254,7 @@ portfolio:
 # ─────────────────────────────────────────────────────────────────────────────
 rebalance:
   enabled: false                    # Permanently disabled in sniper mode
+  allow_new_assets: true            # When rebalance is enabled later, allow allocation into new whitelist assets
   # Strategy: "threshold" | "calendar" | "risk" | "combined"
   strategy: "threshold"
   # Environment overrides supported:
@@ -236,6 +308,7 @@ balance_monitor:
   enabled: true                     # Poll Bitkub balances + wallet history in the background
   poll_interval_seconds: 30         # Main polling interval
   persist_path: "balance_monitor_state.json"  # Seen tx IDs / status cache
+  bootstrap_history_on_startup: true  # Mark existing wallet history as seen on first poll to avoid replaying old events after restart
   thb_min_threshold: 0.0            # Default THB critical threshold (or use THB_MIN_THRESHOLD env)
   coin_min_threshold: 0.0           # Default per-coin critical threshold (or use COIN_MIN_THRESHOLD env)
   coin_min_thresholds: {}           # Optional overrides, e.g. BTC: 0.0005

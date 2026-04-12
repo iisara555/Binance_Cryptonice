@@ -1,12 +1,21 @@
 import json
 from unittest.mock import Mock
 
+from rich.console import Console
+
 from main import TradingBotApp
+from cli_ui import CLICommandCenter
+from signal_generator import _LATEST_SIGNAL_FLOW, _SIGNAL_FLOW_LOCK, _diag
 from trade_executor import OrderResult, OrderSide, OrderStatus
 
 
 def _build_app(tmp_path, *, auto_detect_held_pairs: bool = False) -> TradingBotApp:
     whitelist_path = tmp_path / "coin_whitelist.json"
+    config_path = tmp_path / "bot_config.yaml"
+    config_path.write_text(
+        "strategy_mode:\n  active: \"standard\"\n",
+        encoding="utf-8",
+    )
     return TradingBotApp(
         {
             "mode": "full_auto",
@@ -24,8 +33,15 @@ def _build_app(tmp_path, *, auto_detect_held_pairs: bool = False) -> TradingBotA
                 },
             },
             "cli_ui": {"enabled": False, "command_listener_enabled": False},
-        }
+            "strategy_mode": {"active": "standard"},
+        },
+        config_path=str(config_path),
     )
+
+
+def _clear_signal_flow() -> None:
+    with _SIGNAL_FLOW_LOCK:
+        _LATEST_SIGNAL_FLOW.clear()
 
 
 def test_set_runtime_risk_pct_updates_running_config(tmp_path):
@@ -82,6 +98,39 @@ def test_submit_manual_market_buy_places_market_order_and_tracks_position(tmp_pa
     app.executor.register_tracked_position.assert_called_once()
 
 
+def test_track_manual_position_registers_real_cost_basis_with_sl_tp(tmp_path):
+    app = _build_app(tmp_path)
+    app.api_client = Mock()
+    app.executor = Mock()
+    app.executor.get_open_orders.return_value = []
+
+    result = app.track_manual_position("btc", 0.001, 1_500_000.0)
+
+    assert result["symbol"] == "THB_BTC"
+    assert result["entry_price"] == 1_500_000.0
+    assert result["total_entry_cost"] == 1500.0
+    assert result["stop_loss"] == 1_447_500.0
+    assert result["take_profit"] == 1_590_000.0
+    app.executor.register_tracked_position.assert_called_once()
+
+
+def test_process_cli_command_track_requires_confirmation_and_registers_position(tmp_path):
+    app = _build_app(tmp_path)
+    app.api_client = Mock()
+    app.executor = Mock()
+    app.executor.get_open_orders.return_value = []
+
+    preview = app.process_cli_command("track btc 0.001 1500000")
+
+    assert "Type 'confirm'" in preview
+    app.executor.register_tracked_position.assert_not_called()
+
+    confirmed = app.process_cli_command("confirm")
+
+    assert "Tracked position:" in confirmed
+    app.executor.register_tracked_position.assert_called_once()
+
+
 def test_submit_manual_market_sell_can_close_active_order_by_id(tmp_path):
     app = _build_app(tmp_path)
     app.api_client = Mock()
@@ -126,6 +175,98 @@ def test_process_cli_command_supports_runtime_commands(tmp_path):
     assert "Type 'confirm'" in risk_message
     assert "THB_BTC" in pairs_message
     assert "THB_DOGE" in pairs_message
+
+
+def test_mode_show_reports_active_mode_and_path(tmp_path):
+    app = _build_app(tmp_path)
+
+    result = app.process_cli_command("mode show")
+
+    assert "Strategy mode: standard" in result
+    assert "timeframe=" in result
+    assert str(tmp_path / "bot_config.yaml") in result
+
+
+def test_cli_snapshot_and_header_expose_active_strategy_mode(tmp_path):
+    app = _build_app(tmp_path)
+    app.config["active_strategy_mode"] = "trend_only"
+
+    snapshot = app.get_cli_snapshot()
+    console = Console(record=True, width=120)
+    console.print(CLICommandCenter(app)._build_header(snapshot))
+    header_text = console.export_text()
+
+    assert snapshot["strategy_mode"] == "trend_only"
+    assert "trend_only" in header_text
+
+
+def test_mode_set_requires_confirmation_and_persists_yaml_active_mode(tmp_path):
+    app = _build_app(tmp_path)
+
+    preview = app.process_cli_command("mode set scalping")
+
+    assert "Type 'confirm'" in preview
+    result = app.process_cli_command("confirm")
+
+    assert "Strategy mode saved: scalping" in result
+    config_text = (tmp_path / "bot_config.yaml").read_text(encoding="utf-8")
+    assert 'active: "scalping"' in config_text
+    assert app.config["active_strategy_mode"] == "scalping"
+
+
+def test_mode_set_restart_requires_confirmation_and_requests_restart(tmp_path):
+    app = _build_app(tmp_path)
+    app.stop = Mock()
+
+    preview = app.process_cli_command("mode set trend_only restart")
+
+    assert "Type 'confirm'" in preview
+    result = app.process_cli_command("confirm")
+
+    assert "Strategy mode saved: trend_only" in result
+    assert "restarting now" in result
+    config_text = (tmp_path / "bot_config.yaml").read_text(encoding="utf-8")
+    assert 'active: "trend_only"' in config_text
+    assert app._restart_requested is True
+
+
+def test_mode_alias_supports_shortcuts_and_cycle(tmp_path):
+    app = _build_app(tmp_path)
+
+    preview = app.process_cli_command("mode trend")
+    assert "Type 'confirm'" in preview
+    result = app.process_cli_command("confirm")
+    assert "Strategy mode saved: trend_only" in result
+
+    preview = app.process_cli_command("mode cycle")
+    assert "Type 'confirm'" in preview
+    result = app.process_cli_command("confirm")
+    assert "Strategy mode saved: scalping" in result
+
+
+def test_mode_alias_restart_requests_restart(tmp_path):
+    app = _build_app(tmp_path)
+    app.stop = Mock()
+
+    preview = app.process_cli_command("mode scalp restart")
+
+    assert "Type 'confirm'" in preview
+    result = app.process_cli_command("confirm")
+
+    assert "Strategy mode saved: scalping" in result
+    assert "restarting now" in result
+    assert app._restart_requested is True
+
+
+def test_help_includes_track_command(tmp_path):
+    app = _build_app(tmp_path)
+
+    help_text = app.process_cli_command("help")
+
+    assert "track <PAIR> <COIN_AMOUNT> <ENTRY_PRICE>" in help_text
+    assert "mode <standard|trend|scalp>" in help_text
+    assert "mode set <standard|trend_only|scalping>" in help_text
+    assert "ui log <debug|info|warning|error|critical>" in help_text
 
 
 def test_cli_chat_submission_updates_snapshot_history(tmp_path):
@@ -205,3 +346,81 @@ def test_snapshot_exposes_pending_confirmation_and_suggestions(tmp_path):
 
     assert chat["pending_confirmation"]["command"] == "buy"
     assert any(item == "confirm" for item in chat["suggestions"])
+
+
+def test_ui_commands_update_runtime_dashboard_preferences(tmp_path):
+    app = _build_app(tmp_path)
+
+    msg1 = app.process_cli_command("ui log warning")
+    msg2 = app.process_cli_command("ui footer verbose")
+    snapshot = app.get_cli_snapshot()
+
+    assert msg1 == "UI log filter set to WARNING+"
+    assert msg2 == "UI footer mode set to verbose"
+    assert snapshot["ui"]["log_level_filter"] == "WARNING"
+    assert snapshot["ui"]["footer_mode"] == "verbose"
+
+
+def test_ui_command_rejects_invalid_values(tmp_path):
+    app = _build_app(tmp_path)
+
+    bad_log = app.process_cli_command("ui log noisy")
+    bad_footer = app.process_cli_command("ui footer tiny")
+
+    assert bad_log == "Usage: ui log <debug|info|warning|error|critical>"
+    assert bad_footer == "Usage: ui footer <compact|verbose>"
+
+
+def test_signal_alignment_reports_waiting_for_market_data(tmp_path):
+    _clear_signal_flow()
+    try:
+        app = _build_app(tmp_path)
+        _diag("THB_BTC", "Sniper:DataCheck", "REJECT", "Insufficient data (3/210 bars)")
+
+        rows = app._build_cli_signal_alignment(["THB_BTC"])
+
+        assert rows[0]["action"] == "WAIT"
+        assert rows[0]["status"] == "Waiting: Insufficient data (3/210 bars)"
+    finally:
+        _clear_signal_flow()
+
+
+def test_signal_alignment_reports_waiting_for_first_signal_flow(tmp_path):
+    _clear_signal_flow()
+    try:
+        app = _build_app(tmp_path)
+
+        rows = app._build_cli_signal_alignment(["THB_BTC"])
+
+        assert rows[0]["action"] == "WAIT"
+        assert rows[0]["status"] == "Waiting for first signal flow"
+    finally:
+        _clear_signal_flow()
+
+
+def test_signal_alignment_includes_pair_runtime_context(tmp_path):
+    _clear_signal_flow()
+    try:
+        app = _build_app(tmp_path)
+
+        rows = app._build_cli_signal_alignment(
+            ["THB_BTC"],
+            {
+                "pairs": [
+                    {
+                        "pair": "THB_BTC",
+                        "ready": False,
+                        "timeframes": [
+                            {"timeframe": "1m", "count": 5, "latest": "2026-04-11T15:35:00Z"},
+                            {"timeframe": "5m", "count": 0, "latest": None},
+                        ],
+                    }
+                ]
+            },
+        )
+
+        assert rows[0]["tf_ready"] == "1/2"
+        assert rows[0]["pair_state"] == "Collecting"
+        assert rows[0]["market_update"] == "22:35:00"
+    finally:
+        _clear_signal_flow()

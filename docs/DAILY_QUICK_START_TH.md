@@ -7,7 +7,7 @@
 - `.env.example`
 - `run_bot.bat`
 - `restart_bot.bat`
-- `deploy/systemd/crypto-bot-runtime.service`
+- `deploy/systemd/crypto-bot-tmux.service`
 - `docs/VPS_GO_LIVE_CHECKLIST_TH.md`
 - `docs/WINDOWS_TRANSFER_WITH_STATE_TH.md`
 
@@ -52,5 +52,5 @@ Set-Location "C:\path\to\crypto-bot V1"
 
 - ถ้ารัน `main.py` เอง ให้กด `Ctrl+C`
 - ถ้ารันผ่าน `run_bot.bat` หรือ `restart_bot.bat` ให้ปิดหน้าต่างนั้นหรือกด `Ctrl+C`
-- ถ้ารันบน VPS ให้ใช้ `systemctl stop crypto-bot-runtime`
+- ถ้ารันบน VPS แบบ Rich CLI + auto-start ให้ใช้ `systemctl stop crypto-bot-tmux`
 - ถ้ารันบน Windows service mode ให้ใช้ `Stop-Service CryptoBotRuntime`

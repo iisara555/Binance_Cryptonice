@@ -231,6 +231,20 @@ class TestBreakoutStrategy:
 
 class TestScalpingStrategy:
     """Tests for ScalpingStrategy."""
+
+    def test_scalping_defaults_match_strategy_profile(self):
+        from strategies.scalping import ScalpingStrategy
+
+        strategy = ScalpingStrategy()
+
+        assert strategy.fast_ema == 9
+        assert strategy.slow_ema == 21
+        assert strategy.rsi_period == 7
+        assert strategy.rsi_oversold == 34.0
+        assert strategy.rsi_overbought == 66.0
+        assert strategy.bollinger_period == 20
+        assert strategy.bollinger_std == 2.0
+        assert strategy.min_confidence == 0.30
     
     def test_analyze_ema_crossover(self, sample_price_data):
         """Test signal on EMA crossover."""
@@ -242,6 +256,37 @@ class TestScalpingStrategy:
         
         assert signal.action in ['BUY', 'SELL', 'HOLD']
         assert 0 <= signal.confidence <= 1
+
+    def test_generate_signal_uses_fixed_scalping_sl_tp_metadata(self):
+        """Scalping strategy should emit tight fixed SL/TP metadata for fast trades."""
+        from strategies.scalping import ScalpingStrategy
+
+        prices = [100.0] * 18 + [86.0, 86.0, 104.0, 88.0, 114.0]
+        data = pd.DataFrame(
+            {
+                'close': prices,
+                'high': [p + 0.5 for p in prices],
+                'low': [p - 0.5 for p in prices],
+                'open': prices,
+                'volume': [1000.0] * len(prices),
+            }
+        )
+
+        strategy = ScalpingStrategy({
+            'rsi_oversold': 70,
+            'min_entry_confidence': 0.3,
+            'stop_loss_pct': 0.75,
+            'take_profit_pct': 1.75,
+            'position_timeout_minutes': 30,
+        })
+
+        signal = strategy.generate_signal(data, symbol='THB_TEST')
+
+        assert signal.signal_type.value == 'BUY'
+        assert signal.stop_loss == 113.145
+        assert signal.take_profit == 115.995
+        assert signal.metadata['strategy_mode'] == 'scalping'
+        assert signal.metadata['position_timeout_minutes'] == 30
 
 
 # ============================================================================

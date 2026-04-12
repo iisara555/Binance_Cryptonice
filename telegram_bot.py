@@ -29,6 +29,11 @@ import requests
 
 from alerts import TelegramSender
 
+try:
+    from bitkub_websocket import get_latest_ticker
+except Exception:  # pragma: no cover - websocket dependency can be absent in some envs
+    get_latest_ticker = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -243,7 +248,10 @@ class TelegramBotHandler:
                 self.telegram.answer_callback(cq_id)
             except Exception as e:
                 logger.warning("Failed to answer callback kill_confirm: %s", e)
-            self._execute_kill(msg)
+            threading.Thread(
+                target=self._execute_kill, args=(msg,),
+                daemon=True, name="emergency-kill"
+            ).start()
         elif data == "kill_cancel":
             try:
                 self.telegram.answer_callback(cq_id)
@@ -296,6 +304,50 @@ class TelegramBotHandler:
             )
         self._send(text)
 
+    @staticmethod
+    def _safe_balance_amount(payload: Any) -> float:
+        if isinstance(payload, dict):
+            return float(payload.get("available", 0.0) or 0.0)
+        return float(payload or 0.0)
+
+    def _get_status_balances(self) -> Dict[str, Dict[str, float]]:
+        """Prefer monitor snapshot to avoid duplicate private API calls on /status."""
+        state_balances = {}
+        if hasattr(self.app_ref, "get_balance_state"):
+            state = self.app_ref.get_balance_state() or {}
+            state_balances = state.get("balances") or {}
+
+        normalized = {
+            str(sym).upper(): {"available": self._safe_balance_amount(payload)}
+            for sym, payload in state_balances.items()
+        }
+        if normalized:
+            return normalized
+
+        api = self.app_ref.api_client
+        return api.get_balances()
+
+    def _get_cached_price(self, symbol: str) -> Optional[float]:
+        """Fast price lookup that avoids network calls in Telegram /status."""
+        pair = f"THB_{symbol}"
+
+        if callable(get_latest_ticker):
+            try:
+                tick = get_latest_ticker(pair)
+                if tick and getattr(tick, "last", None) is not None:
+                    return float(tick.last)
+            except Exception:
+                pass
+
+        cache = getattr(self.app_ref, "_cli_price_cache", {}) or {}
+        cached = cache.get(pair)
+        if isinstance(cached, tuple) and cached:
+            try:
+                return float(cached[0]) if cached[0] is not None else None
+            except Exception:
+                return None
+        return None
+
     def _cmd_status(self):
         """Clean /status command with portfolio overview."""
         disabled = self.trading_disabled.is_set()
@@ -325,31 +377,23 @@ class TelegramBotHandler:
             )
         else:
             try:
-                api = self.app_ref.api_client
-                balances = api.get_balances()
+                balances = self._get_status_balances()
 
-                prices = {}
-                try:
-                    r = requests.get("https://api.bitkub.com/api/v3/market/ticker", timeout=10)
-                    if r.status_code == 200:
-                        for item in r.json():
-                            normalized_symbol = _normalize_ticker_symbol(item.get("symbol", ""))
-                            if normalized_symbol:
-                                prices[normalized_symbol] = float(item.get("last") or 0.0)
-                except Exception:
-                    pass
-
-                thb_balance = float(balances.get("THB", {}).get("available", 0))
+                thb_balance = self._safe_balance_amount(balances.get("THB", {}))
                 total_value = thb_balance
 
                 holdings = []
                 for sym, bal in balances.items():
-                    avail = float(bal.get("available", 0))
+                    sym = str(sym).upper()
+                    avail = self._safe_balance_amount(bal)
                     if sym != "THB" and avail > 0.0001:
-                        price = prices.get(f"THB_{sym}", 0)
-                        val = avail * price if price > 0 else 0
-                        total_value += val
-                        holdings.append(f"  {sym}  <code>{avail:.6f}</code>  ~{val:,.0f} THB")
+                        price = self._get_cached_price(sym)
+                        if price is not None and price > 0:
+                            val = avail * price
+                            total_value += val
+                            holdings.append(f"  {sym}  <code>{avail:.6f}</code>  ~{val:,.0f} THB")
+                        else:
+                            holdings.append(f"  {sym}  <code>{avail:.6f}</code>  ~N/A")
 
                 initial = float(self.app_ref.config.get("portfolio", {}).get("initial_balance", 500.0))
                 pnl = total_value - initial
@@ -488,6 +532,10 @@ class TelegramBotHandler:
             api = self.app_ref.api_client
             executor = self.app_ref.executor
 
+            # Reset circuit breaker so cancel/sell calls are never silently blocked
+            api.reset_circuit()
+            logger.info("Emergency kill: circuit breaker reset to CLOSED")
+
             # 1. Cancel ALL open orders
             try:
                 for pair in pairs_to_check:
@@ -520,13 +568,18 @@ class TelegramBotHandler:
                 logger.error("Error clearing tracked orders: %s", e)
 
             # 2. Sell ALL holdings
+            # Fetch balances ONCE before the loop — avoids N×API calls (one per pair)
+            try:
+                balances = api.get_balance()
+            except Exception as _bal_err:
+                logger.error("Emergency kill: failed to fetch balances: %s", _bal_err)
+                balances = {}
             for pair in pairs_to_check:
                 try:
                     parts = pair.upper().split("_")
                     if len(parts) != 2:
                         continue
                     base = parts[1]
-                    balances = api.get_balance()
                     amt = float(balances.get(base, 0))
                     if amt > 0.00001:
                         r = api.place_ask(symbol=pair, amount=amt, rate=0, order_type="market")

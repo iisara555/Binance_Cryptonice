@@ -15,11 +15,26 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from state_management import normalize_buy_quantity
+from risk_management import precise_add, precise_subtract, precise_multiply, precise_divide, precise_round
 
 logger = logging.getLogger(__name__)
 
 # Bitkub trading fee (0.25% per side)
 BITKUB_FEE_PCT = 0.0025
+
+# Late-bound WS import (avoids circular dep at module load)
+_ws_mod = None
+
+def _ws_ticker(symbol: str):
+    """Get latest WS ticker, lazy-loading the module on first call."""
+    global _ws_mod
+    if _ws_mod is None:
+        try:
+            import bitkub_websocket as _bws
+            _ws_mod = _bws
+        except ImportError:
+            return None
+    return _ws_mod.get_latest_ticker(symbol)
 
 
 class OrderStatus(Enum):
@@ -74,11 +89,14 @@ class PartialFillTracker:
                 raise KeyError(order_id)
             info = self._fills[order_id]
             prev = info.filled_amount
-            total_value = (info.avg_fill_price * prev) + (price * filled)
-            info.filled_amount += filled
-            info.avg_fill_price = total_value / info.filled_amount if info.filled_amount else 0
+            total_value = precise_add(
+                precise_multiply(info.avg_fill_price, prev),
+                precise_multiply(price, filled),
+            )
+            info.filled_amount = precise_add(info.filled_amount, filled)
+            info.avg_fill_price = precise_divide(total_value, info.filled_amount) if info.filled_amount else 0
             info.last_update = datetime.now()
-            if info.filled_amount >= info.original_amount * 0.9999:
+            if info.filled_amount >= precise_multiply(info.original_amount, 0.9999):
                 info.is_complete = True
             logger.info(
                 "[PartialFill] %s: %.6f -> %.6f (@ %.4f)",
@@ -255,6 +273,13 @@ class TradeExecutor:
         self.retry_delay = config.get("retry_delay_seconds", 5)
         self.order_timeout = config.get("order_timeout_seconds", 30)
         self.order_type = config.get("order_type", "limit")
+        try:
+            trading_cfg = config.get("trading", {}) if isinstance(config, dict) else {}
+            self._min_order_thb = float(
+                trading_cfg.get("min_order_amount", config.get("min_order_amount", 15.0)) or 15.0
+            )
+        except (TypeError, ValueError):
+            self._min_order_thb = 15.0
 
         self._fill_tracker = PartialFillTracker(
             max_wait_seconds=config.get("partial_fill_max_wait", 60.0)
@@ -262,6 +287,7 @@ class TradeExecutor:
         self._open_orders: Dict[str, Dict] = {}
         self._order_history: List[OrderResult] = []
         self._orders_lock = threading.Lock()
+        self._oms_processing_lock = threading.Lock()
         self._oms_processing: set = set()  # Orders currently being replaced
         self._exit_in_progress: set = set()
         self._exit_in_progress_lock = threading.Lock()
@@ -284,14 +310,10 @@ class TradeExecutor:
         self.sync_open_orders_from_db()
 
         # ── H3/H4: Reconciliation gate ─────────────────────────────────
-        # The OMS thread starts immediately so it can warm up, but it MUST
-        # NOT cancel, reprice or otherwise mutate order state until the bot
-        # has completed its full startup reconciliation with Bitkub.
-        # trading_bot.start() calls set_reconcile_complete() after
-        # _reconcile_on_startup() and sync_open_orders_from_db() finish.
         self._reconcile_done = threading.Event()
 
         self._oms_running = True
+        self._oms_stop_event = threading.Event()
         self._oms_thread = threading.Thread(target=self._oms_monitor_loop, daemon=True)
         self._oms_thread.start()
         logger.info("[OMS] Smart Execution Order Management System running in background.")
@@ -321,6 +343,33 @@ class TradeExecutor:
         with self._orders_lock:
             self._open_orders.pop(order_id, None)
         self._remove_persisted_position(order_id)
+
+    def _is_oms_processing(self, order_id: str) -> bool:
+        with self._oms_processing_lock:
+            return order_id in self._oms_processing
+
+    def _mark_oms_processing(self, order_id: str) -> None:
+        with self._oms_processing_lock:
+            self._oms_processing.add(order_id)
+
+    def _clear_oms_processing(self, order_id: Optional[str]) -> None:
+        if not order_id:
+            return
+        with self._oms_processing_lock:
+            self._oms_processing.discard(order_id)
+
+    def _start_oms_replacement(self, order_id: str, new_order: OrderRequest, old_pos_data: Dict[str, Any]) -> None:
+        self._mark_oms_processing(order_id)
+        try:
+            replacement_thread = threading.Thread(
+                target=self._replace_order_async,
+                args=(new_order, old_pos_data),
+                daemon=True,
+            )
+            replacement_thread.start()
+        except Exception:
+            self._clear_oms_processing(order_id)
+            raise
 
     def remove_tracked_position(self, order_id: str) -> None:
         """Drop a position from in-memory tracking and DB (invalid/ghost cleanup)."""
@@ -410,6 +459,7 @@ class TradeExecutor:
     def stop(self):
         """Stop the OMS background thread gracefully."""
         self._oms_running = False
+        self._oms_stop_event.set()
         # Unblock _oms_monitor_loop if it is waiting for reconciliation.
         self._reconcile_done.set()
         if self._oms_thread and self._oms_thread.is_alive():
@@ -431,8 +481,6 @@ class TradeExecutor:
         """Background Order Management System loop."""
         while getattr(self, "_oms_running", True):
             try:
-                time.sleep(5)
-
                 # ── H3/H4: Block until reconciliation is complete ─────────────
                 # The bot may still be running _reconcile_on_startup() while
                 # this loop ticks.  Acting on pre-reconciliation state risks
@@ -441,14 +489,17 @@ class TradeExecutor:
                 # if reconciliation hasn't finished yet.
                 if not self._reconcile_done.is_set():
                     logger.debug("[OMS] Waiting for startup reconciliation before processing orders.")
+                    self._oms_stop_event.wait(timeout=1.0)
                     continue
 
                 if self.api_client.is_circuit_open():
                     logger.debug("Circuit breaker is OPEN. Skipping OMS cleanup routine.")
+                    self._oms_stop_event.wait(timeout=5.0)
                     continue
 
                 with self._orders_lock:
                     if not self._open_orders:
+                        self._oms_stop_event.wait(timeout=5.0)
                         continue
                     orders_to_check = list(self._open_orders.values())
 
@@ -458,7 +509,7 @@ class TradeExecutor:
                         continue
                     
                     # Skip orders already being processed/replaced
-                    if order_id in self._oms_processing:
+                    if self._is_oms_processing(order_id):
                         continue
 
                     order_time = order_info.get("timestamp", datetime.now())
@@ -493,6 +544,7 @@ class TradeExecutor:
                             order_id,
                             symbol=order_info.get("symbol"),
                             side=_aged_side,
+                            retry=False,
                         ):
                             # Could not confirm cancellation — keep tracking so
                             # the next cycle can retry rather than orphan the order.
@@ -523,7 +575,12 @@ class TradeExecutor:
                             self._cleanup_completed_order(order_id)
                             continue
 
-                        if not self.cancel_order(order_id, symbol=order_info.get("symbol"), side=side_val):
+                        if not self.cancel_order(
+                            order_id,
+                            symbol=order_info.get("symbol"),
+                            side=side_val,
+                            retry=False,
+                        ):
                             err_detail = self._last_cancel_error or "Unknown"
                             logger.warning(
                                 "[OMS] Failed to cancel order %s | reason: %s | retrying next loop",
@@ -563,22 +620,20 @@ class TradeExecutor:
                                 logger.warning("[OMS] Balance check failed: %s — proceeding", bal_err, exc_info=True)
 
                         try:
+                            tick = _ws_ticker(symbol)
+                            if tick and tick.last > 0:
+                                new_price = float(tick.last)
+                            else:
+                                raise ValueError("Empty WS cache")
+                        except Exception:
                             try:
-                                from bitkub_websocket import get_latest_ticker
-                                tick = get_latest_ticker(symbol)
-                                if tick and tick.last > 0:
-                                    new_price = float(tick.last)
-                                else:
-                                    raise ValueError("Empty WS cache")
-                            except Exception:
-                                try:
-                                    from helpers import parse_ticker_last
-                                    ticker = self.api_client.get_ticker(symbol)
-                                    parsed = parse_ticker_last(ticker)
-                                    new_price = parsed if parsed is not None else order_info["entry_price"]
-                                except Exception as tick_e:
-                                    logger.error("[OMS] API ticker error %s. Using old price.", tick_e, exc_info=True)
-                                    new_price = order_info["entry_price"]
+                                from helpers import parse_ticker_last
+                                ticker = self.api_client.get_ticker(symbol)
+                                parsed = parse_ticker_last(ticker)
+                                new_price = parsed if parsed is not None else order_info["entry_price"]
+                            except Exception as tick_e:
+                                logger.error("[OMS] API ticker error %s. Using old price.", tick_e, exc_info=True)
+                                new_price = order_info["entry_price"]
 
                             if amount <= 0:
                                 logger.warning(
@@ -596,14 +651,42 @@ class TradeExecutor:
                                 symbol, order_info["entry_price"], new_price,
                             )
 
+                            # Shift SL/TP relative to the repriced entry.
+                            old_entry = float(order_info.get("entry_price") or 0.0)
+                            raw_sl = order_info.get("stop_loss")
+                            raw_tp = order_info.get("take_profit")
+                            shifted_sl = raw_sl
+                            shifted_tp = raw_tp
+                            if old_entry > 0 and new_price > 0:
+                                if raw_sl is not None:
+                                    shifted_sl = new_price - (old_entry - float(raw_sl))
+                                if raw_tp is not None:
+                                    shifted_tp = new_price + (float(raw_tp) - old_entry)
+
+                            side_for_reprice = order_info.get("side")
+                            side_str_reprice = (
+                                side_for_reprice.value
+                                if isinstance(side_for_reprice, Enum)
+                                else str(side_for_reprice or "").lower()
+                            )
+                            # BUY safety clamp: SL must be below the new entry.
+                            if side_str_reprice == "buy" and shifted_sl is not None and float(shifted_sl) >= new_price:
+                                shifted_sl = round(new_price * 0.98, 2)
+                                logger.warning(
+                                    "[OMS] Reprice SL clamp applied for %s: new SL=%.2f at entry %.2f",
+                                    order_id,
+                                    shifted_sl,
+                                    new_price,
+                                )
+
                             # FIX FATAL-04: Pass old order info so it can be restored on failure
                             old_pos_data = {
                                 "symbol": order_info["symbol"],
                                 "side": order_info["side"],
                                 "amount": order_info["amount"],
                                 "entry_price": order_info["entry_price"],
-                                "stop_loss": order_info.get("stop_loss"),
-                                "take_profit": order_info.get("take_profit"),
+                                "stop_loss": shifted_sl,
+                                "take_profit": shifted_tp,
                                 "order_id": order_id,
                                 "timestamp": order_info.get("timestamp"),
                                 "is_partial_fill": order_info.get("is_partial_fill", False),
@@ -618,15 +701,12 @@ class TradeExecutor:
                                 symbol=symbol, side=side, amount=amount,
                                 price=new_price, order_type=self.order_type,
                             )
-                            self._oms_processing.add(order_id)
-                            threading.Thread(
-                                target=self._replace_order_async,
-                                args=(new_order, old_pos_data),
-                                daemon=True,
-                            ).start()
+                            self._start_oms_replacement(order_id, new_order, old_pos_data)
                         except Exception as e:
                             logger.error("[OMS] Loop error: %s", e, exc_info=True)
 
+                # Interruptible sleep between cycles — exits on stop signal.
+                self._oms_stop_event.wait(timeout=5.0)
             except Exception as e:
                 logger.error("[OMS] Loop error: %s", e, exc_info=True)
 
@@ -679,7 +759,7 @@ class TradeExecutor:
                 except Exception as restore_err:
                     logger.error("[OMS] Failed to restore old position %s: %s", old_order_id, restore_err)
         finally:
-            self._oms_processing.discard(old_order_id)
+            self._clear_oms_processing(old_order_id)
 
     def _apply_trailing_stop(self, order_info: Dict) -> None:
         """Dynamic Trailing Stop — lock in profits while letting winners run."""
@@ -699,8 +779,7 @@ class TradeExecutor:
             return
 
         try:
-            from bitkub_websocket import get_latest_ticker
-            tick = get_latest_ticker(symbol)
+            tick = _ws_ticker(symbol)
             if tick and tick.last > 0:
                 current_price = float(tick.last)
             else:
@@ -761,6 +840,10 @@ class TradeExecutor:
         last_error: Optional[str] = None
 
         while attempts < self.retry_attempts:
+            if hasattr(self.api_client, "is_circuit_open") and self.api_client.is_circuit_open():
+                last_error = "Circuit breaker is OPEN"
+                logger.warning("Order aborted before attempt: %s", last_error)
+                break
             attempts += 1
             try:
                 result = self._place_order(order)
@@ -776,6 +859,8 @@ class TradeExecutor:
                     )
                     with self._orders_lock:
                         self._order_history.append(result)
+                        if len(self._order_history) > 500:
+                            self._order_history = self._order_history[-500:]
                     if order.side == OrderSide.BUY and result.filled_amount > 0 and self._db:
                         try:
                             self._db.record_held_coin(order.symbol, result.filled_amount)
@@ -784,11 +869,22 @@ class TradeExecutor:
                     return result
                 last_error = result.message
                 logger.warning("Order attempt %d failed: %s", attempts, last_error)
+                
+                # Skip retries for fatal errors (insufficient balance, amount too low, etc.)
+                if getattr(result, "error_code", None) in (-1, 15, 18, 21):
+                    logger.warning("Fatal error code %s. Stopping retries.", result.error_code)
+                    break
+                if hasattr(self.api_client, "is_circuit_open") and self.api_client.is_circuit_open():
+                    logger.warning("Circuit breaker opened after attempt %d. Stopping retries.", attempts)
+                    break
+                    
                 if attempts < self.retry_attempts:
                     time.sleep(self.retry_delay)
             except Exception as e:
                 last_error = str(e)
                 logger.error("Order attempt %d exception: %s", attempts, e)
+                if "Circuit breaker" in last_error:
+                    break
                 if attempts < self.retry_attempts:
                     time.sleep(self.retry_delay)
 
@@ -814,7 +910,7 @@ class TradeExecutor:
             
             symbol = order.symbol
             price = 0.0 if order.order_type == "market" else (order.price or 0.0)
-            MIN_ORDER_THB = 15.0  # Bitkub minimum order value
+            min_order_thb = self._min_order_thb
 
             if order.side == OrderSide.BUY:
                 if order.amount <= 0:
@@ -831,20 +927,22 @@ class TradeExecutor:
                 logger.info("  THB avail: %s", self._format_balance_for_display("THB", available_thb))
                 logger.info("  Price: %s THB", self._format_balance_for_display("THB", price))
 
-                if thb_amount < MIN_ORDER_THB:
-                    logger.error("[Cancel] THB %.2f < minimum %.2f — not sending", thb_amount, MIN_ORDER_THB)
+                if thb_amount < min_order_thb:
+                    logger.error("[Cancel] THB %.2f < minimum %.2f — not sending", thb_amount, min_order_thb)
                     return OrderResult(False, OrderStatus.REJECTED,
-                                       message="Order %.2f THB below minimum %.2f" % (thb_amount, MIN_ORDER_THB),
+                                       message="Order %.2f THB below minimum %.2f" % (thb_amount, min_order_thb),
                                        error_code=-1, ordered_amount=thb_amount)
 
                 if thb_amount > available_thb:
                     logger.warning("[Balance Check] Insufficient THB (%.2f < %.2f) — skipping", available_thb, thb_amount)
                     return OrderResult(False, OrderStatus.REJECTED, message="THB insufficient", error_code=18)
 
-                max_thb = available_thb * 0.95
+                max_thb = round(available_thb * 0.95, 2)
                 if thb_amount > max_thb:
                     logger.warning("[Size] %.2f THB > 95%% of %.2f — capping", thb_amount, max_thb)
                     thb_amount = max_thb
+                # Bitkub rejects THB amounts with > 2 decimal places (Error 12)
+                thb_amount = round(thb_amount, 2)
 
                 response = self.api_client.place_bid(symbol=symbol, amount=thb_amount, rate=price, order_type=order.order_type, client_id=idempotency_key)
                 logger.info("[Response] %s", str(response)[:500])
@@ -879,13 +977,13 @@ class TradeExecutor:
                         logger.warning("[Value Check] Could not fetch market price for zero-price validation.")
 
                 order_value_thb = order.amount * check_price
-                if check_price > 0 and order_value_thb < MIN_ORDER_THB:
+                if check_price > 0 and order_value_thb < min_order_thb:
                     logger.warning(
                         "[Value Check] %s order value %.4f THB < MIN %.2f THB — rejecting",
-                        base_asset_upper, order_value_thb, MIN_ORDER_THB
+                        base_asset_upper, order_value_thb, min_order_thb
                     )
                     return OrderResult(False, OrderStatus.REJECTED,
-                                       message="Order value %.2f THB below minimum %.2f" % (order_value_thb, MIN_ORDER_THB),
+                                       message="Order value %.2f THB below minimum %.2f" % (order_value_thb, min_order_thb),
                                        error_code=18)
 
                 if order.amount > available_base:
@@ -893,7 +991,9 @@ class TradeExecutor:
                                    base_asset_upper, available_base, order.amount)
                     return OrderResult(False, OrderStatus.REJECTED, message="%s insufficient" % base_asset_upper, error_code=18)
 
-                response = self.api_client.place_ask(symbol=symbol, amount=order.amount, rate=price, order_type=order.order_type, client_id=idempotency_key)
+                # Bitkub rejects crypto amounts with > 8 decimal places (Error 12)
+                sell_amount = round(order.amount, 8)
+                response = self.api_client.place_ask(symbol=symbol, amount=sell_amount, rate=price, order_type=order.order_type, client_id=idempotency_key)
                 logger.info("[Response] %s", str(response)[:500])
 
             if isinstance(response, dict) and response.get("error", 0) != 0:
@@ -1004,9 +1104,9 @@ class TradeExecutor:
 
         if plan.signal_timestamp:
             age_seconds = (datetime.now() - plan.signal_timestamp).total_seconds()
-            if age_seconds > 120:
+            if age_seconds > 300:
                 logger.warning("[SignalExpiry] Signal too old: %.0fs — rejecting", age_seconds)
-                return OrderResult(False, OrderStatus.REJECTED, message="Signal expired (%.0fs old, max 120s)" % age_seconds)
+                return OrderResult(False, OrderStatus.REJECTED, message="Signal expired (%.0fs old, max 300s)" % age_seconds)
 
         try:
             from helpers import parse_ticker_last
@@ -1083,15 +1183,15 @@ class TradeExecutor:
             amount = self._round_amount(amount, plan.symbol)
 
         order_value_thb = amount if plan.side == OrderSide.BUY else amount * plan.entry_price
-        MIN_ORDER_THB = 15.0
+        min_order_thb = self._min_order_thb
         if plan.side == OrderSide.SELL and not plan.close_position:
-            if amount <= 0 or order_value_thb < MIN_ORDER_THB:
+            if amount <= 0 or order_value_thb < min_order_thb:
                 logger.info("SELL signal but insufficient balance — skipping")
                 return OrderResult(False, OrderStatus.CANCELLED, message="Insufficient balance", ordered_amount=amount)
 
-        if order_value_thb < MIN_ORDER_THB:
+        if order_value_thb < min_order_thb:
             logger.error("[Cancel] Order value %.2f THB < minimum %.2f | amount=%.6f, price=%.2f",
-                         order_value_thb, MIN_ORDER_THB, amount, plan.entry_price)
+                         order_value_thb, min_order_thb, amount, plan.entry_price)
             return OrderResult(False, OrderStatus.REJECTED, message="Order value %.2f THB below minimum" % order_value_thb)
 
         order = OrderRequest(symbol=plan.symbol, side=plan.side, amount=amount, price=plan.entry_price, order_type=self.order_type)
@@ -1217,7 +1317,13 @@ class TradeExecutor:
             with self._exit_in_progress_lock:
                 self._exit_in_progress.discard(position_id)
 
-    def cancel_order(self, order_id: str, symbol: Optional[str] = None, side: Optional[str] = None) -> bool:
+    def cancel_order(
+        self,
+        order_id: str,
+        symbol: Optional[str] = None,
+        side: Optional[str] = None,
+        retry: bool = True,
+    ) -> bool:
         """Cancel a pending order with retry logic.
         
         FIX HIGH: Added retry logic to handle network timeouts and transient failures.
@@ -1227,7 +1333,7 @@ class TradeExecutor:
         self._oms_cancel_was_error_21 = False
         
         # Retry configuration
-        max_retries = 3
+        max_retries = 3 if retry else 1
         retry_delay = 1.0  # seconds
         
         for attempt in range(1, max_retries + 1):
@@ -1404,15 +1510,13 @@ class TradeExecutor:
                         fill_price = status_result.filled_price or 0
                         value_thb = filled_amt * fill_price
                         side_str = side_val.upper() if side_val else "SELL"
-                        # Calculate unrealized PnL if entry price is available
+                        # Spot rule: BUY fill establishes cost basis (no realized PnL).
+                        # Realized PnL is reported only for SELL fills.
                         pnl_amt = None
                         pnl_pct = None
                         entry_price = order_info.get("entry_price", 0)
-                        if entry_price and fill_price:
-                            if side_val == "buy":
-                                pnl_amt = (fill_price - entry_price) * filled_amt
-                            else:  # sell
-                                pnl_amt = (entry_price - fill_price) * filled_amt
+                        if entry_price and fill_price and side_val == "sell":
+                            pnl_amt = (fill_price - entry_price) * filled_amt
                             pnl_pct = (pnl_amt / (entry_price * filled_amt)) * 100 if entry_price * filled_amt > 0 else 0
                         msg = format_trade_alert(
                             symbol=symbol or "",

@@ -7,6 +7,8 @@ Provides SL/TP calculation helpers aligned with risk_management conventions:
 - Strategies should call calculate_sl_tp_from_atr() for consistent SL/TP values
 """
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
 from typing import Optional, Dict, Any, Tuple
 import pandas as pd
 
@@ -16,7 +18,7 @@ class Signal:
     """Trading signal from a strategy."""
     action: str  # BUY, SELL, HOLD
     confidence: float  # 0.0 to 1.0
-    metadata: Dict[str, Any] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -26,10 +28,30 @@ class StrategyConfig:
     enabled: bool = True
 
 
+class SignalType(Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+    HOLD = "HOLD"
+
+
+@dataclass
+class TradingSignal:
+    strategy_name: str
+    symbol: str
+    signal_type: SignalType
+    confidence: float
+    price: float
+    timestamp: Optional[datetime] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_reward_ratio: Optional[float] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
 class StrategyBase:
     """Base class for all trading strategies."""
     
-    def __init__(self, config: StrategyConfig = None):
+    def __init__(self, config: Optional[StrategyConfig] = None):
         self.config = config or StrategyConfig(name=self.__class__.__name__)
         self.name = self.config.name
     
@@ -93,7 +115,6 @@ class StrategyBase:
         with risk_management. If ATR is unavailable, returns None SL/TP.
         """
         # We import locally to avoid circular dependencies
-        from strategy_base import TradingSignal, SignalType
         from config import MIN_RISK_REWARD_RATIO
         
         signal_action = self.analyze(data)

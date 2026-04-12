@@ -8,10 +8,13 @@
 - ยืนยันว่า `.env` ถูกสร้างจาก `.env.example` และใส่ key จริงครบแล้ว
 - ยืนยันว่า `LIVE_TRADING` เป็นค่าที่คุณตั้งใจจริง
 - ยืนยันว่า `bot_config.yaml` ใช้ค่าที่ต้องการจริง โดยเฉพาะ `trading.mode`, `rebalance`, `monitoring`
+- ถ้าต้องการ Rich CLI ให้ใช้ `crypto-bot-tmux.service` และ `tmux` session แทนการรัน bot ตรงใต้ `systemd`
 
 ## หลัง start service
 
-- `systemctl status crypto-bot-runtime` ต้องขึ้น `active (running)`
+- `systemctl status crypto-bot-tmux` ต้องขึ้น `active (exited)`
+- `tmux list-sessions` ต้องเห็น session เช่น `crypto`
+- `tmux attach -t crypto` ต้องเข้า Rich CLI ได้
 - `curl http://127.0.0.1:8080/health` ต้องได้ `healthy: true`
 - bot health ต้องไม่ขึ้น `status: degraded`
 
@@ -31,8 +34,10 @@ python scripts/vps_preflight.py \
 ## คำสั่งที่ใช้บ่อยหน้างาน
 
 ```bash
-sudo systemctl restart crypto-bot-runtime
-sudo journalctl -u crypto-bot-runtime -n 100 --no-pager
+sudo systemctl restart crypto-bot-tmux
+sudo journalctl -u crypto-bot-tmux -n 100 --no-pager
+tmux list-sessions
+tmux attach -t crypto
 curl http://127.0.0.1:8080/health
 ```
 

@@ -1,0 +1,23 @@
+# Copy this file to /etc/systemd/system/crypto-bot-tmux.service
+# Adjust User, Group, and environment paths if your deployment path differs.
+
+[Unit]
+Description=Crypto Bot V1 tmux Runtime
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+Environment=TMUX_SESSION_NAME=crypto
+Environment=CRYPTO_BOT_ROOT=/opt/crypto-bot-v1
+Environment=CRYPTO_BOT_PYTHON=/opt/crypto-bot-v1/.venv-3/bin/python
+Environment=CRYPTO_BOT_ENTRY=/opt/crypto-bot-v1/main.py
+ExecStart=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh start
+ExecStop=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh stop
+ExecReload=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh restart
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -49,6 +49,8 @@ Rich terminal จะแสดง:
 data:
   auto_detect_held_pairs: true
   pairs: []
+  portfolio_guard:
+    held_coins_only: true
   hybrid_dynamic_coin_config:
     whitelist_json_path: "coin_whitelist.json"
     include_assets_with_balance: true
@@ -79,3 +81,5 @@ $env:BOT_STARTUP_TEST_MODE = "1"
 ## Important Note
 
 ถ้าคุณต้องการ “ไม่เปิดเหรียญใหม่เลย” จริง ๆ ต้อง review ทั้ง config และ runtime behavior ร่วมกัน ไม่ใช่ดูเพียง static config file อย่างเดียว
+
+ถ้าคุณต้องการให้บอทเปิด BUY เหรียญใหม่จาก whitelist ได้ ให้ตั้ง `data.portfolio_guard.held_coins_only: false` ใน `bot_config.yaml`

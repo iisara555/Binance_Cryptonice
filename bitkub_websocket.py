@@ -16,7 +16,7 @@ import logging
 import threading
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Callable, Optional, Dict
+from typing import List, Callable, Optional, Dict, Any
 
 try:
     import websocket
@@ -95,10 +95,11 @@ class BitkubWebSocket:
         self._state_lock = threading.RLock()
         
         # WebSocket instance
-        self.ws: Optional[websocket.WebSocketApp] = None
+        self.ws: Optional[Any] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
+        self._wakeup_event = threading.Event()
         
         # Reconnection logic
         self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
@@ -144,7 +145,15 @@ class BitkubWebSocket:
 
     def _get_stream_url(self) -> str:
         """Build Bitkub WebSocket URL with stream subscriptions."""
-        streams = [f"market.ticker.{s.lower()}" for s in self.symbols]
+        streams = []
+        for s in self.symbols:
+            s_lower = s.lower()
+            # Convert internal THB_BTC to Bitkub's WS format (btc_thb)
+            if '_' in s_lower:
+                parts = s_lower.split('_')
+                if len(parts) == 2 and parts[0] == 'thb':
+                    s_lower = f"{parts[1]}_{parts[0]}"
+            streams.append(f"market.ticker.{s_lower}")
         stream_path = ",".join(streams)
         return f"wss://api.bitkub.com/websocket-api/{stream_path}"
 
@@ -160,6 +169,7 @@ class BitkubWebSocket:
             return
 
         self._running = True
+        self._wakeup_event.clear()
         self._set_state(ConnectionState.CONNECTING)
         
         # Main connection loop thread
@@ -172,18 +182,10 @@ class BitkubWebSocket:
         """Main loop: connect, monitor, and reconnect as needed."""
         while self._running:
             # ── Circuit Breaker Check ────────────────────────────────────────
-            if self._consecutive_failures >= self.MAX_RECONNECT_ATTEMPTS:
-                if time.time() - self._circuit_open_time < self._circuit_breaker_timeout:
-                    logger.warning(
-                        f"[WS] Circuit breaker OPEN - too many failures. "
-                        f"Retrying in {self._circuit_breaker_timeout:.0f}s"
-                    )
-                    time.sleep(self._circuit_breaker_timeout)
-                else:
-                    # Reset circuit breaker after timeout
-                    logger.info("[WS] Circuit breaker timeout - resetting and retrying")
-                    self._consecutive_failures = 0
-                    self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
+            if not self._enforce_circuit_breaker():
+                if not self._running:
+                    break
+                continue
             
             # ── Connect ──────────────────────────────────────────────────────
             self._set_state(ConnectionState.CONNECTING)
@@ -216,11 +218,41 @@ class BitkubWebSocket:
             if not self._running:
                 break
                 
-            self._handle_disconnection()
+            if not self._handle_disconnection():
+                break
+
+    def _enforce_circuit_breaker(self) -> bool:
+        """Return True when connection attempts are allowed to proceed."""
+        if self._consecutive_failures < self.MAX_RECONNECT_ATTEMPTS:
+            return True
+
+        now = time.time()
+        if self._circuit_open_time <= 0:
+            self._circuit_open_time = now
+            logger.warning(
+                "[WS] Circuit breaker OPEN after %d failures; pausing reconnects",
+                self._consecutive_failures,
+            )
+
+        elapsed = now - self._circuit_open_time
+        remaining = self._circuit_breaker_timeout - elapsed
+        if remaining > 0:
+            logger.warning("[WS] Circuit breaker active; retry in %.1fs", remaining)
+            self._wakeup_event.wait(min(remaining, self._circuit_breaker_timeout))
+            return False
+
+        # Reset breaker after cooldown and allow a fresh reconnect cycle.
+        logger.info("[WS] Circuit breaker cooldown finished; reconnecting")
+        self._consecutive_failures = 0
+        self._circuit_open_time = 0.0
+        self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
+        return True
 
     def _handle_disconnection(self):
         """Handle reconnection after unexpected disconnection."""
         self._consecutive_failures += 1
+        if self._consecutive_failures >= self.MAX_RECONNECT_ATTEMPTS and self._circuit_open_time <= 0:
+            self._circuit_open_time = time.time()
         self._set_state(ConnectionState.RECONNECTING)
         
         # Stop heartbeat thread if running
@@ -237,7 +269,8 @@ class BitkubWebSocket:
             f"(attempt {self._reconnect_attempts + 1}/{self.MAX_RECONNECT_ATTEMPTS})"
         )
         
-        time.sleep(delay)
+        if self._wakeup_event.wait(delay):
+            return False
         
         # Exponential backoff
         self._reconnect_delay = min(
@@ -246,6 +279,7 @@ class BitkubWebSocket:
         )
         self._reconnect_attempts += 1
         self._stats['reconnections'] += 1
+        return True
 
     def _on_open(self, ws):
         """Called when WebSocket connection is established."""
@@ -337,7 +371,7 @@ class BitkubWebSocket:
             self._stats['total_messages'] += 1
             
             # ── Handle error responses ──────────────────────────────────────
-            if isinstance(data, dict) and data.get("error") != 0:
+            if isinstance(data, dict) and "error" in data and data.get("error") != 0:
                 error_msg = data.get("message", "Unknown error")
                 error_code = data.get("error", "unknown")
                 # Log as DEBUG since these are often harmless (rate limits, subscriptions, heartbeats)
@@ -351,9 +385,16 @@ class BitkubWebSocket:
                 # Extract symbol from stream path
                 if stream:
                     parts = stream.split(".")
-                    symbol_str = parts[-1].upper() if len(parts) > 1 else self.symbols[0]
+                    raw_sym = parts[-1].upper() if len(parts) > 1 else self.symbols[0]
                 else:
-                    symbol_str = data.get("symbol", self.symbols[0]).upper()
+                    raw_sym = data.get("symbol", self.symbols[0]).upper()
+                
+                # Denormalize BTC_THB back to internal THB_BTC format
+                symbol_str = raw_sym
+                if '_' in raw_sym:
+                    p = raw_sym.split('_')
+                    if len(p) == 2 and p[1] == 'THB':
+                        symbol_str = f"THB_{p[0]}"
                 
                 # Create price tick
                 tick = PriceTick(
@@ -423,6 +464,7 @@ class BitkubWebSocket:
         """Gracefully stop the WebSocket connection."""
         logger.info("[WS] Stopping...")
         self._running = False
+        self._wakeup_event.set()
         self._set_state(ConnectionState.DISCONNECTED)
         
         # Close WebSocket

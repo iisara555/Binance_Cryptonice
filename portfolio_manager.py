@@ -10,6 +10,7 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field, asdict
+from risk_management import precise_subtract, precise_multiply, precise_divide
 
 logger = logging.getLogger(__name__)
 
@@ -92,15 +93,15 @@ class Position:
     def update_price(self, new_price: float):
         self.current_price = new_price
         if self.side == "long":
-            self.unrealized_pnl = (new_price - self.entry_price) * self.quantity
+            self.unrealized_pnl = precise_multiply(precise_subtract(new_price, self.entry_price), self.quantity)
             self.unrealized_pnl_pct = (
-                (new_price - self.entry_price) / self.entry_price * 100
+                precise_multiply(precise_divide(precise_subtract(new_price, self.entry_price), self.entry_price), 100)
                 if self.entry_price else 0
             )
         else:  # short
-            self.unrealized_pnl = (self.entry_price - new_price) * self.quantity
+            self.unrealized_pnl = precise_multiply(precise_subtract(self.entry_price, new_price), self.quantity)
             self.unrealized_pnl_pct = (
-                (self.entry_price - new_price) / self.entry_price * 100
+                precise_multiply(precise_divide(precise_subtract(self.entry_price, new_price), self.entry_price), 100)
                 if self.entry_price else 0
             )
 

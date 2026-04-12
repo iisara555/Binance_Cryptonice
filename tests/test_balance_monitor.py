@@ -79,6 +79,103 @@ def test_detect_crypto_withdrawal_lifecycle(tmp_path):
     assert repeated_completion == []
 
 
+def test_first_poll_bootstraps_existing_history_without_emitting_events(tmp_path):
+    monitor = _build_monitor(tmp_path)
+    monitor.api_client.get_balances.return_value = {
+        "THB": {"available": 100.0, "reserved": 0.0, "total": 100.0},
+        "BTC": {"available": 0.25, "reserved": 0.0, "total": 0.25},
+    }
+    monitor.api_client.get_fiat_deposit_history.return_value = [
+        {"txn_id": "dep-old", "status": "complete", "amount": "2000", "time": "2022-01-01T00:00:00Z"}
+    ]
+    monitor.api_client.get_fiat_withdraw_history.return_value = [
+        {"txn_id": "wd-old", "status": "complete", "amount": "500", "time": "2022-01-02T00:00:00Z"}
+    ]
+    monitor.api_client.get_crypto_deposit_history.return_value = {
+        "items": [
+            {
+                "txn_id": "crypto-dep-old",
+                "symbol": "btc",
+                "status": "complete",
+                "amount": "0.01",
+                "completed_at": "2022-01-03T00:00:00Z",
+            }
+        ]
+    }
+    monitor.api_client.get_crypto_withdraw_history.return_value = {
+        "items": [
+            {
+                "txn_id": "crypto-wd-old",
+                "symbol": "btc",
+                "status": "complete",
+                "amount": "0.02",
+                "completed_at": "2022-01-04T00:00:00Z",
+            }
+        ]
+    }
+
+    events = monitor.poll_once()
+
+    assert events == []
+    assert monitor._history_bootstrapped is True
+    assert "dep-old" in monitor._seen_fiat_deposits
+    assert "wd-old" in monitor._seen_fiat_withdrawals
+    assert "crypto-dep-old" in monitor._seen_crypto_deposits
+    assert monitor._crypto_withdraw_status["crypto-wd-old"] == "complete"
+
+
+def test_second_poll_emits_only_new_history_after_bootstrap(tmp_path):
+    monitor = _build_monitor(tmp_path)
+    monitor.api_client.get_balances.return_value = {
+        "THB": {"available": 500.0, "reserved": 0.0, "total": 500.0}
+    }
+    monitor.api_client.get_crypto_deposit_history.return_value = {"items": []}
+    monitor.api_client.get_crypto_withdraw_history.return_value = {"items": []}
+
+    monitor.api_client.get_fiat_deposit_history.return_value = [
+        {"txn_id": "dep-old", "status": "complete", "amount": "1000", "time": "2022-01-01T00:00:00Z"}
+    ]
+    monitor.api_client.get_fiat_withdraw_history.return_value = [
+        {"txn_id": "wd-old", "status": "complete", "amount": "250", "time": "2022-01-02T00:00:00Z"}
+    ]
+
+    assert monitor.poll_once() == []
+
+    monitor.api_client.get_fiat_deposit_history.return_value = [
+        {"txn_id": "dep-old", "status": "complete", "amount": "1000", "time": "2022-01-01T00:00:00Z"},
+        {"txn_id": "dep-new", "status": "complete", "amount": "200", "time": "2024-01-03T00:00:00Z"},
+    ]
+    monitor.api_client.get_fiat_withdraw_history.return_value = [
+        {"txn_id": "wd-old", "status": "complete", "amount": "250", "time": "2022-01-02T00:00:00Z"},
+        {"txn_id": "wd-new", "status": "complete", "amount": "50", "time": "2024-01-04T00:00:00Z"},
+    ]
+
+    events = monitor.poll_once()
+
+    assert [event.transaction_id for event in events] == ["dep-new", "wd-new"]
+    assert [event.event_type for event in events] == ["DEPOSIT", "WITHDRAWAL"]
+
+
+def test_first_poll_can_emit_existing_history_when_bootstrap_disabled(tmp_path):
+    monitor = _build_monitor(tmp_path, config={"bootstrap_history_on_startup": False})
+    monitor.api_client.get_balances.return_value = {
+        "THB": {"available": 500.0, "reserved": 0.0, "total": 500.0}
+    }
+    monitor.api_client.get_fiat_deposit_history.return_value = [
+        {"txn_id": "dep-old", "status": "complete", "amount": "1000", "time": "2022-01-01T00:00:00Z"}
+    ]
+    monitor.api_client.get_fiat_withdraw_history.return_value = [
+        {"txn_id": "wd-old", "status": "complete", "amount": "250", "time": "2022-01-02T00:00:00Z"}
+    ]
+    monitor.api_client.get_crypto_deposit_history.return_value = {"items": []}
+    monitor.api_client.get_crypto_withdraw_history.return_value = {"items": []}
+
+    events = monitor.poll_once()
+
+    assert [event.transaction_id for event in events] == ["dep-old", "wd-old"]
+    assert monitor._history_bootstrapped is True
+
+
 def test_threshold_alerts_only_repeat_after_recovery(tmp_path):
     alert_system = Mock()
     monitor = _build_monitor(

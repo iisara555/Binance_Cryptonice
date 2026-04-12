@@ -79,6 +79,7 @@ def _make_executor(db: object = _SENTINEL):
     ex._reconcile_done = _t.Event()
     ex._reconcile_done.set()
     ex._oms_running = False
+    ex._oms_stop_event = _t.Event()
     ex._oms_thread = None  # type: ignore[assignment]
     return ex
 
@@ -313,6 +314,7 @@ class TestM4RiskStateLocking:
         state_file = tmp_path / "risk_state_rt.json"
         rm._trade_count_today = 7
         rm._cooling_down = True
+        rm._peak_portfolio_value = 1234.5
         rm.save_state(str(state_file))
 
         rm2 = _make_rm(tmp_path)
@@ -322,6 +324,27 @@ class TestM4RiskStateLocking:
         assert result is True
         assert rm2._trade_count_today == 7
         assert rm2._cooling_down is True
+        assert rm2._peak_portfolio_value == 1234.5
+
+    def test_drawdown_multiplier_reduces_position_size_before_hard_block(self, tmp_path):
+        rm = _make_rm(tmp_path)
+        rm.config.max_risk_per_trade_pct = 1.0
+        rm.config.max_position_per_trade_pct = 100.0
+        rm.config.max_drawdown_threshold_pct = 12.0
+        rm.config.drawdown_soft_reduce_start_pct = 5.0
+        rm.config.min_drawdown_risk_multiplier = 0.35
+        rm._peak_portfolio_value = 100_000.0
+
+        result = rm.calculate_position_size(
+            portfolio_value=92_000.0,
+            entry_price=100_000.0,
+            stop_loss_price=99_000.0,
+            take_profit_price=102_000.0,
+            confidence=0.7,
+        )
+
+        assert result.allowed is True
+        assert result.suggested_size == pytest.approx(66457.14, rel=0.01)
 
     def test_load_state_recovers_from_corrupt_file(self, tmp_path):
         """load_state() must reset to safe defaults if the JSON is corrupt."""

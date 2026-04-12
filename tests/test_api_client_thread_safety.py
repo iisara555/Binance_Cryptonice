@@ -96,6 +96,44 @@ class TestRateLimiterThreadSafety:
                 "rate-limiter race condition detected"
             )
 
+
+class TestCandleCacheCleanup:
+
+    def teardown_method(self):
+        BitkubClient._candle_cache.clear()
+
+    def test_expired_candle_entries_are_pruned_even_below_max_size(self):
+        BitkubClient._candle_cache.clear()
+        BitkubClient._candle_cache_max_size = 200
+        BitkubClient._candle_cache_ttl = 60.0
+        BitkubClient._candle_cache["stale"] = (100, {"result": [1]})
+
+        response = MagicMock()
+        response.json.return_value = {"result": [2]}
+
+        with patch("api_client.time.time", return_value=200), \
+             patch("api_client.requests.get", return_value=response):
+            BitkubClient._get_candle_cached("THB_BTC", "15", 1, 2, "https://example.invalid")
+
+        assert "stale" not in BitkubClient._candle_cache
+
+    def test_candle_cache_trims_oldest_entries_after_overflow(self):
+        BitkubClient._candle_cache.clear()
+        BitkubClient._candle_cache_ttl = 60.0
+        BitkubClient._candle_cache_max_size = 2
+        BitkubClient._candle_cache["older"] = (101, {"result": [1]})
+        BitkubClient._candle_cache["old"] = (102, {"result": [2]})
+
+        response = MagicMock()
+        response.json.return_value = {"result": [3]}
+
+        with patch("api_client.time.time", return_value=103), \
+             patch("api_client.requests.get", return_value=response):
+            BitkubClient._get_candle_cached("THB_ETH", "15", 1, 2, "https://example.invalid")
+
+        assert len(BitkubClient._candle_cache) == 2
+        assert "older" not in BitkubClient._candle_cache
+
     def test_last_request_time_monotonically_advances(self):
         """
         After N concurrent _request calls the _last_request_time must have

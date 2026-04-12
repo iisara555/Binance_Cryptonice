@@ -164,7 +164,7 @@ class SignalGenerator:
         self.risk_config = {
             "min_confidence": self.config.get("min_confidence", 0.5),
             "max_risk_score": self.config.get("max_risk_score", 70),
-            "min_strategies_agree": self.config.get("min_strategies_agree", 1),
+            "min_strategies_agree": self.config.get("min_strategies_agree", 2),
             "max_positions": self.config.get("max_open_positions", 3),
             "max_daily_trades": self.config.get("max_daily_trades", 10),
         }

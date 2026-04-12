@@ -67,6 +67,7 @@ def _make_executor(db=None, oms_running=False) -> TradeExecutor:
     ex._allow_trailing_stop = True
     ex._reconcile_done = threading.Event()
     ex._oms_running = oms_running
+    ex._oms_stop_event = threading.Event()
     ex._oms_thread = None  # type: ignore[assignment]
     return ex
 

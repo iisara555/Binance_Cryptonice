@@ -118,6 +118,7 @@ class BalanceMonitor:
         )
         self.coin_min_thresholds = dict(self.config.get("coin_min_thresholds") or {})
         self.coin_min_thresholds.update(_parse_asset_threshold_map(os.environ.get("COIN_MIN_THRESHOLDS", "")))
+        self._bootstrap_history_on_startup = bool(self.config.get("bootstrap_history_on_startup", True))
 
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -135,6 +136,8 @@ class BalanceMonitor:
         self._seen_crypto_deposits: set[str] = set()
         self._crypto_withdraw_status: Dict[str, str] = {}
         self._low_balance_alerts: set[str] = set()
+        self._seen_set_max = 5000
+        self._history_bootstrapped = False
         self._load_state()
 
     def start(self) -> None:
@@ -188,6 +191,28 @@ class BalanceMonitor:
         self._raise_if_stopping()
 
         normalized_balances = self._normalize_balances(balances)
+
+        if not self._history_bootstrapped:
+            self._history_bootstrapped = True
+
+            if self._bootstrap_history_on_startup:
+                self._seed_seen_history(
+                    fiat_deposits or [],
+                    fiat_withdrawals or [],
+                    crypto_deposits or {},
+                    crypto_withdrawals or {},
+                )
+
+                with self._state_lock:
+                    self._state["updated_at"] = datetime.now().isoformat()
+                    self._state["balances"] = normalized_balances
+                    self._state["api_health"] = copy.deepcopy(self._endpoint_health)
+
+                self._check_thresholds(normalized_balances)
+                self._save_state()
+                logger.info("BalanceMonitor history bootstrap complete; existing history marked as seen")
+                return []
+
         events: List[BalanceEvent] = []
         events.extend(self._detect_fiat_events(fiat_deposits or [], fiat_withdrawals or [], normalized_balances))
         events.extend(self._detect_crypto_events(crypto_deposits or {}, crypto_withdrawals or {}, normalized_balances))
@@ -211,7 +236,24 @@ class BalanceMonitor:
                 except Exception as exc:
                     logger.error("Balance event callback failed: %s", exc, exc_info=True)
 
+        self._trim_seen_sets()
         return events
+
+    def _trim_seen_sets(self) -> None:
+        """Prevent unbounded growth of deduplication sets."""
+        cap = self._seen_set_max
+        for s in (self._seen_fiat_deposits, self._seen_fiat_withdrawals, self._seen_crypto_deposits):
+            if len(s) > cap:
+                excess = len(s) - cap
+                # Remove arbitrary `excess` items (oldest are unknowable in a set)
+                it = iter(s)
+                to_remove = [next(it) for _ in range(excess)]
+                s.difference_update(to_remove)
+        if len(self._crypto_withdraw_status) > cap:
+            excess = len(self._crypto_withdraw_status) - cap
+            keys = list(self._crypto_withdraw_status.keys())[:excess]
+            for k in keys:
+                del self._crypto_withdraw_status[k]
 
     def _monitor_loop(self) -> None:
         while self.running and not self._stop_event.is_set():
@@ -286,6 +328,33 @@ class BalanceMonitor:
                 "total": available + reserved,
             }
         return normalized
+
+    def _seed_seen_history(
+        self,
+        fiat_deposits: List[Dict[str, Any]],
+        fiat_withdrawals: List[Dict[str, Any]],
+        crypto_deposits: Dict[str, Any],
+        crypto_withdrawals: Dict[str, Any],
+    ) -> None:
+        for item in fiat_deposits:
+            txn_id = str(item.get("txn_id") or item.get("txn") or "")
+            if txn_id and str(item.get("status") or "").lower() == "complete":
+                self._seen_fiat_deposits.add(txn_id)
+
+        for item in fiat_withdrawals:
+            txn_id = str(item.get("txn_id") or item.get("txn") or "")
+            if txn_id and str(item.get("status") or "").lower() == "complete":
+                self._seen_fiat_withdrawals.add(txn_id)
+
+        for item in crypto_deposits.get("items", []) or []:
+            txn_id = str(item.get("hash") or item.get("txn_id") or "")
+            if txn_id and str(item.get("status") or "").lower() == "complete":
+                self._seen_crypto_deposits.add(txn_id)
+
+        for item in crypto_withdrawals.get("items", []) or []:
+            txn_id = str(item.get("txn_id") or item.get("hash") or "")
+            if txn_id:
+                self._crypto_withdraw_status[txn_id] = str(item.get("status") or "").lower()
 
     def _detect_fiat_events(
         self,

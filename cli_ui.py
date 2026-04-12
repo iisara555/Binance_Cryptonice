@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import math
+import threading
+from collections import deque
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from rich.align import Align
@@ -15,7 +19,22 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from helpers import format_bitkub_time
 from logger_setup import get_shared_console
+
+
+class _UILogBufferHandler(logging.Handler):
+    """Push emitted log records into the dashboard ring buffer."""
+
+    def __init__(self, sink) -> None:
+        super().__init__(level=logging.NOTSET)
+        self._sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._sink(record)
+        except Exception:
+            self.handleError(record)
 
 
 class CLICommandCenter:
@@ -32,6 +51,55 @@ class CLICommandCenter:
         self.bot_name = bot_name
         self.refresh_interval_seconds = max(1.0, float(refresh_interval_seconds))
         self.console = console or get_shared_console() or Console(stderr=True, soft_wrap=True)
+        self._log_lines: deque[Dict[str, str]] = deque(maxlen=140)
+        self._log_lock = threading.Lock()
+        self._log_handler: Optional[_UILogBufferHandler] = None
+
+    def start_log_capture(self) -> None:
+        """Start mirroring runtime logs into an in-memory ring buffer for UI rendering."""
+        if self._log_handler is not None:
+            return
+        handler = _UILogBufferHandler(self._append_log_record)
+        root = logging.getLogger()
+        root.addHandler(handler)
+        self._log_handler = handler
+
+    def stop_log_capture(self) -> None:
+        """Detach runtime log mirroring handler."""
+        handler = self._log_handler
+        if handler is None:
+            return
+        root = logging.getLogger()
+        try:
+            root.removeHandler(handler)
+        except Exception:
+            pass
+        self._log_handler = None
+
+    def _append_log_record(self, record: logging.LogRecord) -> None:
+        if record.name == __name__:
+            return
+
+        rendered = record.getMessage().replace("\n", " ").strip()
+        if not rendered:
+            return
+
+        timestamp = format_bitkub_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
+        logger_name = str(record.name or "root").split(".")[-1]
+        if len(logger_name) > 14:
+            logger_name = logger_name[-14:]
+        if len(rendered) > 150:
+            rendered = f"{rendered[:147]}..."
+
+        with self._log_lock:
+            self._log_lines.append(
+                {
+                    "timestamp": timestamp,
+                    "level": record.levelname.upper(),
+                    "logger": logger_name,
+                    "message": rendered,
+                }
+            )
 
     def create_live(self) -> Live:
         """Create the Live context used by the main runtime loop."""
@@ -47,12 +115,17 @@ class CLICommandCenter:
     def render(self) -> Layout:
         """Build the latest dashboard layout from the app snapshot."""
         snapshot = self.app.get_cli_snapshot(bot_name=self.bot_name)
+        ui_cfg = dict(snapshot.get("ui") or {})
+        footer_mode = str(ui_cfg.get("footer_mode") or "compact").lower()
 
-        # Adaptive footer size: cap at ~1/3 of terminal height, min 5
+        # Adaptive footer size: compact chat area while preserving input visibility.
         term_height = self.console.height if self.console else 30
         term_width = self.console.width if self.console else 120
         compact_mode = term_width < 140 or term_height < 30
-        footer_size = max(5, min(11, term_height // 3))
+        if footer_mode == "verbose":
+            footer_size = max(7, min(11, term_height // 3))
+        else:
+            footer_size = max(4, min(8, term_height // 4))
 
         layout = Layout(name="root")
         layout.split_column(
@@ -66,7 +139,7 @@ class CLICommandCenter:
                 Layout(self._build_system_status_table(snapshot), ratio=2, name="system"),
                 Layout(self._build_signal_alignment_panel(snapshot), ratio=2, name="alignment"),
                 Layout(self._build_balance_breakdown_panel(snapshot), ratio=2, name="portfolio"),
-                Layout(self._build_recent_events_panel(snapshot), ratio=1, name="events"),
+                Layout(self._build_log_stream_panel(snapshot), ratio=2, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -77,12 +150,68 @@ class CLICommandCenter:
                 Layout(self._build_system_status_table(snapshot), ratio=2, name="system"),
                 Layout(self._build_signal_alignment_panel(snapshot), ratio=2, name="alignment"),
                 Layout(self._build_balance_breakdown_panel(snapshot), ratio=3, name="portfolio"),
-                Layout(self._build_recent_events_panel(snapshot), ratio=1, name="events"),
+                Layout(self._build_log_stream_panel(snapshot), ratio=2, name="logs"),
             )
         return layout
 
+    @staticmethod
+    def _level_style(level: str) -> str:
+        value = str(level or "").upper()
+        if value in {"CRITICAL", "FATAL"}:
+            return "bold white on red"
+        if value == "ERROR":
+            return "bold red"
+        if value == "WARNING":
+            return "bold yellow"
+        if value == "INFO":
+            return "bold cyan"
+        return "bright_black"
+
+    @staticmethod
+    def _level_no(value: str) -> int:
+        order = {
+            "DEBUG": 10,
+            "INFO": 20,
+            "WARNING": 30,
+            "ERROR": 40,
+            "CRITICAL": 50,
+        }
+        return order.get(str(value or "").upper(), 20)
+
+    def _build_log_stream_panel(self, snapshot: Dict[str, Any]) -> Panel:
+        ui_cfg = dict(snapshot.get("ui") or {})
+        min_level = str(ui_cfg.get("log_level_filter") or "INFO").upper()
+        min_level_no = self._level_no(min_level)
+
+        with self._log_lock:
+            rows = list(self._log_lines)[-8:]
+
+        rows = [row for row in rows if self._level_no(row.get("level", "INFO")) >= min_level_no]
+
+        if not rows:
+            return Panel(
+                Text(f"Waiting for runtime logs ({min_level}+)...", style="bright_black"),
+                title="Terminal Log Stream",
+                border_style="bright_black",
+            )
+
+        lines: List[Text] = []
+        for row in rows:
+            level = str(row.get("level") or "INFO")
+            lines.append(
+                Text.assemble(
+                    (f"{row.get('timestamp', '-')} ", "bright_black"),
+                    (f"{level:<8}", self._level_style(level)),
+                    (f" {row.get('logger', '-'):<14}", "magenta"),
+                    (f" {row.get('message', '-')}", "white"),
+                )
+            )
+
+        return Panel(Group(*lines), title=f"Terminal Log Stream [{min_level}+ ]", border_style="blue")
+
     def _build_header(self, snapshot: Dict[str, Any]) -> Panel:
         mode = snapshot.get("mode", "UNKNOWN")
+        strategy_mode = str(snapshot.get("strategy_mode") or "standard").lower()
         mode_style = self._mode_style(mode)
         risk_text = Text(str(snapshot.get("risk_level", "UNKNOWN")), style=snapshot.get("risk_style", "bold white"))
         header = Text.assemble(
@@ -90,6 +219,9 @@ class CLICommandCenter:
             "    ",
             ("Mode: ", "bold white"),
             (mode, mode_style),
+            "    ",
+            ("Strategy: ", "bold white"),
+            (strategy_mode, "bold magenta"),
             "    ",
             ("Risk: ", "bold white"),
             risk_text,
@@ -187,14 +319,17 @@ class CLICommandCenter:
     def _build_signal_alignment_panel(self, snapshot: Dict[str, Any]) -> Panel:
         table = Table(expand=True)
         table.add_column("Pair", style="bold cyan")
+        table.add_column("TF", justify="center")
+        table.add_column("Upd", justify="center")
         table.add_column("M/m/T", justify="center")
         table.add_column("Trend", justify="center")
         table.add_column("Trigger", justify="center")
         table.add_column("Action", justify="center")
+        table.add_column("Status", overflow="fold")
 
         rows = list(snapshot.get("signal_alignment") or [])
         if not rows:
-            table.add_row("-", "-", "-", "-", "-")
+            table.add_row("-", "-", "-", "-", "-", "-", "No runtime trading pairs")
         else:
             for row in rows[:8]:
                 action = str(row.get("action") or "HOLD").upper()
@@ -202,17 +337,25 @@ class CLICommandCenter:
                     action_text = Text("BUY", style="bold green")
                 elif action == "SELL":
                     action_text = Text("SELL", style="bold red")
+                elif action == "WAIT":
+                    action_text = Text("WAIT", style="bold cyan")
                 else:
                     action_text = Text("HOLD", style="bold yellow")
-                macro = str(row.get("macro") or "N/A")[0:1]
-                micro = str(row.get("micro") or "N/A")[0:1]
-                trigger = str(row.get("trigger") or "N/A")[0:1]
+                macro_value = str(row.get("macro") or "N/A")
+                micro_value = str(row.get("micro") or "N/A")
+                trigger_value = str(row.get("trigger") or "N/A")
+                macro = "-" if macro_value.upper() == "N/A" else macro_value[0:1]
+                micro = "-" if micro_value.upper() == "N/A" else micro_value[0:1]
+                trigger = "-" if trigger_value.upper() == "N/A" else trigger_value[0:1]
                 table.add_row(
                     str(row.get("symbol") or "-"),
+                    str(row.get("tf_ready") or "-"),
+                    str(row.get("market_update") or "-"),
                     f"{macro}/{micro}/{trigger}",
                     str(row.get("trend") or "MIXED"),
                     str(row.get("trigger_side") or "NONE"),
                     action_text,
+                    str(row.get("status") or row.get("pair_state") or "Ready"),
                 )
 
         return Panel(table, title="Signal Alignment", border_style="cyan")
@@ -260,54 +403,69 @@ class CLICommandCenter:
 
     def _build_footer(self, snapshot: Dict[str, Any]) -> Panel:
         chat = snapshot.get("chat", {}) or {}
+        ui_cfg = dict(snapshot.get("ui") or {})
         history = list(chat.get("history") or [])
         pending = chat.get("pending_confirmation") or {}
         suggestions = list(chat.get("suggestions") or [])
+        footer_mode = str(ui_cfg.get("footer_mode") or "compact").lower()
+        log_filter = str(ui_cfg.get("log_level_filter") or "INFO").upper()
 
         meta = Text.assemble(
-            ("Pairs: ", "bold white"),
+            ("Pairs ", "bold white"),
             (snapshot.get("pairs", "NONE"), "cyan"),
-            "    ",
-            ("Strategies: ", "bold white"),
-            (snapshot.get("strategies", "-"), "magenta"),
-            "    ",
-            ("Updated: ", "bold white"),
+            "  ",
+            ("Mode ", "bold white"),
+            (snapshot.get("mode", "-"), "green"),
+            "  ",
+            ("Upd ", "bold white"),
             (snapshot.get("updated_at", "-"), "white"),
+            "  ",
+            ("Log ", "bold white"),
+            (f"{log_filter}+", "blue"),
+            "  ",
+            ("Footer ", "bold white"),
+            (footer_mode, "yellow"),
         )
 
         lines: List[Text] = [meta]
-        lines.append(Text.assemble(("Status: ", "bold white"), (str(chat.get("status") or snapshot.get("commands_hint") or "help"), "bright_black")))
+        status_text = str(chat.get("status") or snapshot.get("commands_hint") or "help")
+        if pending:
+            status_text = f"{status_text} | Pending confirm"
+        status_text = f"[{str(snapshot.get('strategy_mode') or 'standard').lower()}] {status_text}"
+        lines.append(Text.assemble(("Status ", "bold white"), (status_text, "bright_black")))
 
         if pending:
             lines.append(
                 Text.assemble(
-                    ("Pending: ", "bold yellow"),
+                    ("Pending ", "bold yellow"),
                     (str(pending.get("summary") or pending.get("command_text") or "-"), "yellow"),
                 )
             )
 
+        history_limit = 4 if footer_mode == "verbose" else 2
         if history:
-            for item in history:
+            for item in history[-history_limit:]:
                 role = str(item.get("role") or "bot").lower()
                 label = "You" if role == "user" else "Bot"
                 style = "bold cyan" if role == "user" else "bold green"
                 lines.append(Text.assemble((f"{label}: ", style), (str(item.get("message") or "-"), "white")))
         else:
-            lines.append(Text("Bot: Type a command below and press Enter", style="white"))
+            lines.append(Text("Bot: Type command + Enter", style="white"))
 
+        suggestion_limit = 5 if footer_mode == "verbose" else 3
         if suggestions:
+            compact_suggestions = [str(item) for item in suggestions[:suggestion_limit]]
             lines.append(
                 Text.assemble(
-                    ("Suggestions: ", "bold white"),
-                    (" | ".join(str(item) for item in suggestions), "bright_black"),
+                    ("Tips ", "bold white"),
+                    (" | ".join(compact_suggestions), "bright_black"),
                 )
             )
 
         lines.append(
             Text.assemble(
-                ("Input> ", "bold yellow"),
+                ("> ", "bold yellow"),
                 (str(chat.get("input") or ""), "yellow"),
-                ("_", "yellow"),
             )
         )
         return Panel(Group(*lines), title="Command Chat", border_style="bright_black")

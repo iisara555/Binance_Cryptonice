@@ -10,7 +10,7 @@ import json
 import requests
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any
 from unittest.mock import Mock, MagicMock, patch
 import pytest
@@ -28,10 +28,12 @@ from trading_bot import TradingBotOrchestrator, BotMode, SignalSource
 from cli_ui import CLICommandCenter
 from main import (
     TradingBotApp,
+    _apply_strategy_mode_profile,
     _clear_startup_auth_shutdown_state,
     _enable_startup_auth_degraded_mode,
     resolve_runtime_trading_pairs,
 )
+from helpers import format_bitkub_time
 from state_management import TradeLifecycleState, TradeStateManager, TradeStateSnapshot
 
 logger = logging.getLogger(__name__)
@@ -143,6 +145,57 @@ def mock_trade_executor(mock_db, mock_risk_manager, mock_api_client):
 
 class TestFullIntegrationFlow:
     """Full end-to-end integration tests"""
+
+    def test_strategy_mode_profile_trend_only_forces_trend_following(self):
+        config = {
+            "trading": {"timeframe": "15m"},
+            "strategies": {
+                "enabled": ["trend_following", "mean_reversion", "breakout"],
+                "min_confidence": 0.35,
+                "min_strategies_agree": 2,
+            },
+            "risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0},
+            "state_management": {"confirmations_required": 2, "confirmation_window_seconds": 180},
+            "auto_trader": {"auto_exit": {"max_hold_hours": 48}},
+            "multi_timeframe": {"enabled": True, "timeframes": ["15m", "1h"], "higher_timeframes": ["1h"]},
+            "strategy_mode": {
+                "active": "trend_only",
+                "trend_only": {
+                    "primary_timeframe": "15m",
+                    "confirm_timeframe": "1h",
+                    "min_confidence": 0.4,
+                    "stop_loss_pct": 4.5,
+                    "take_profit_pct": 10.0,
+                    "max_hold_hours": 48,
+                },
+            },
+        }
+
+        applied = _apply_strategy_mode_profile(config)
+
+        assert applied["active_strategy_mode"] == "trend_only"
+        assert applied["trading"]["timeframe"] == "15m"
+        assert applied["strategies"]["enabled"] == ["trend_following"]
+        assert applied["strategies"]["min_confidence"] == 0.4
+        assert applied["auto_trader"]["auto_exit"]["max_hold_hours"] == 48
+
+    def test_strategy_mode_profile_standard_leaves_existing_mix_unchanged(self):
+        config = {
+            "trading": {"timeframe": "15m"},
+            "strategies": {
+                "enabled": ["trend_following", "mean_reversion", "breakout"],
+                "min_confidence": 0.35,
+                "min_strategies_agree": 2,
+            },
+            "strategy_mode": {"active": "standard"},
+        }
+
+        applied = _apply_strategy_mode_profile(config)
+
+        assert applied["active_strategy_mode"] == "standard"
+        assert applied["trading"]["timeframe"] == "15m"
+        assert applied["strategies"]["enabled"] == ["trend_following", "mean_reversion", "breakout"]
+        assert applied["strategies"]["min_strategies_agree"] == 2
 
     def test_enable_startup_auth_degraded_mode_forces_safe_config(self):
         """Startup auth failures should force a safe, non-trading runtime config."""
@@ -431,6 +484,10 @@ class TestFullIntegrationFlow:
         bot._state_manager = Mock()
         bot._state_manager.sync_in_position_states = Mock()
         bot._main_loop = Mock()
+        bot._candle_retention_enabled = False
+        bot._candle_retention_run_on_startup = False
+        bot._last_candle_retention_cleanup_at = 0
+        bot._bootstrap_held_positions = Mock()
 
         fake_thread = Mock()
         with patch('trading_bot.threading.Thread', return_value=fake_thread):
@@ -510,6 +567,10 @@ class TestFullIntegrationFlow:
         bot.risk_manager = Mock()
         bot.risk_manager.get_risk_summary.return_value = {'ok': True}
         bot._get_portfolio_state = Mock(return_value={'balance': 0.0})
+        bot._pause_state_lock = threading.Lock()
+        bot._paused = False
+        bot._pause_reason = ''
+        bot._reconcile_in_progress = False
 
         status = TradingBotOrchestrator.get_status(bot)
 
@@ -596,8 +657,8 @@ class TestFullIntegrationFlow:
         handler.telegram.answer_callback.assert_called_once_with('update-1')
         handler._execute_kill.assert_called_once()
 
-    def test_telegram_status_normalizes_ticker_symbols_for_holdings_value(self):
-        """Telegram /status should map BTC_THB ticker rows to THB_BTC lookup keys."""
+    def test_telegram_status_uses_balance_snapshot_and_cached_prices_without_api_burst(self):
+        """Telegram /status should use runtime snapshots/caches and avoid private API bursts."""
         handler = TelegramBotHandler.__new__(TelegramBotHandler)
         bot_ref = Mock()
         bot_ref.get_status.return_value = {
@@ -609,8 +670,16 @@ class TestFullIntegrationFlow:
         app_ref.bot = bot_ref
         app_ref.api_client = Mock()
         app_ref.api_client.get_balances.return_value = {
-            'THB': {'available': 500.0, 'reserved': 0.0},
-            'BTC': {'available': 0.01, 'reserved': 0.0},
+            'THB': {'available': 999.0, 'reserved': 0.0},
+        }
+        app_ref.get_balance_state.return_value = {
+            'balances': {
+                'THB': {'available': 500.0, 'reserved': 0.0},
+                'BTC': {'available': 0.01, 'reserved': 0.0},
+            }
+        }
+        app_ref._cli_price_cache = {
+            'THB_BTC': (1000000.0, time.time()),
         }
         app_ref.config = {
             'portfolio': {'initial_balance': 500.0},
@@ -621,15 +690,10 @@ class TestFullIntegrationFlow:
         handler.pairs = ['THB_BTC']
         handler._send = Mock()
 
-        response = Mock()
-        response.status_code = 200
-        response.json.return_value = [
-            {'symbol': 'BTC_THB', 'last': 1000000.0},
-        ]
-
-        with patch('telegram_bot.requests.get', return_value=response):
+        with patch('telegram_bot.get_latest_ticker', return_value=None):
             handler._cmd_status()
 
+        app_ref.api_client.get_balances.assert_not_called()
         sent_text = handler._send.call_args.args[0]
         assert '10,000 THB' in sent_text
         assert '10,500.00' in sent_text
@@ -984,6 +1048,56 @@ class TestFullIntegrationFlow:
 
         assert executor._open_orders['ghost-doge-1']['symbol'] == 'THB_DOGE'
         assert 'Ghost orders imported summary: SELL THB_DOGE x1' in caplog.text
+
+    def test_reconcile_skips_remote_exit_sell_for_existing_position(self, caplog):
+        """A live TP/SL order must not be imported as a ghost position on restart."""
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._get_trading_pairs = Mock(return_value=['THB_BTC'])
+        bot.trading_pairs = ['THB_BTC']
+        bot.trading_pair = 'THB_BTC'
+        bot._state_machine_enabled = False
+        bot._reconcile_pending_trade_states = Mock(return_value=set())
+        bot._history_status_is_filled = TradingBotOrchestrator._history_status_is_filled
+        bot._history_status_is_cancelled = TradingBotOrchestrator._history_status_is_cancelled
+        bot._history_status_value = TradingBotOrchestrator._history_status_value
+        bot._extract_history_fill_details = TradingBotOrchestrator._extract_history_fill_details.__get__(bot, TradingBotOrchestrator)
+        bot._lookup_order_history_status = Mock(return_value=None)
+        bot._report_completed_exit = Mock()
+        bot._register_filled_position_from_state = Mock()
+        bot.risk_manager = None
+
+        api_client = Mock()
+        api_client.get_open_orders.return_value = [
+            {'id': 'sell-tp-1', 'sym': 'btc_thb', 'typ': 'ask', 'rate': 1650000.0, 'amount': 0.001, 'unfilled': 0.001}
+        ]
+        api_client.get_order_history.return_value = []
+        bot.api_client = api_client
+
+        executor = Mock()
+        executor._orders_lock = threading.Lock()
+        executor._open_orders = {
+            'buy-entry-1': {
+                'order_id': 'buy-entry-1',
+                'symbol': 'THB_BTC',
+                'side': OrderSide.BUY,
+                'amount': 0.001,
+                'entry_price': 1500000.0,
+                'stop_loss': 1447500.0,
+                'take_profit': 1650000.0,
+                'remaining_amount': 0.0,
+                'total_entry_cost': 1500.0,
+                'filled': True,
+            }
+        }
+        bot.executor = executor
+        bot.db = Mock()
+
+        with caplog.at_level(logging.INFO):
+            bot._reconcile_on_startup()
+
+        assert 'sell-tp-1' not in executor._open_orders
+        bot.db.save_position.assert_not_called()
+        assert 'skipping ghost import to preserve entry price' in caplog.text
 
     def test_reconcile_pending_sell_fill_while_offline_logs_closed_trade(self):
         db = Mock()
@@ -1384,6 +1498,34 @@ class TestCliSnapshot:
         ]
         assert snapshot["system"]["trade_count"] == "3"
 
+    def test_format_cli_timestamp_converts_runtime_utc_to_bitkub_time(self):
+        assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00") == "22:35:00"
+        assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00Z") == "22:35:00"
+
+    def test_format_cli_recent_events_converts_timestamps_without_instance_state(self):
+        events = TradingBotApp._format_cli_recent_events(
+            {
+                "recent_trades": [
+                    {
+                        "timestamp": "2026-04-11T15:35:00Z",
+                        "symbol": "THB_BTC",
+                        "side": "buy",
+                        "status": "filled",
+                    }
+                ],
+                "balance_events": [
+                    {
+                        "timestamp": "2026-04-11T15:36:00",
+                        "type": "DEPOSIT",
+                        "message": "DEPOSIT THB 100.0000",
+                    }
+                ],
+            }
+        )
+
+        assert events[0]["timestamp"] == "22:36:00"
+        assert events[1]["timestamp"] == "22:35:00"
+
 
 class TestCliUi:
     def test_balance_breakdown_text_uses_allocation_aware_styles(self):
@@ -1532,11 +1674,64 @@ class TestCliUi:
         rendered = console.export_text()
 
         assert "Command Chat" in rendered
-        assert "Pending: Confirm market BUY THB_BTC with 500.00 THB" in rendered
+        assert "Pending Confirm market BUY THB_BTC with 500.00 THB" in rendered
         assert "You: risk show" in rendered
         assert "Bot: Runtime risk: 2.00% per trade (MEDIUM)" in rendered
-        assert "Suggestions: confirm | cancel" in rendered
-        assert "Input> pairs add BTC_" in rendered
+        assert "Tips confirm | cancel" in rendered
+        assert "> pairs add BTC" in rendered
+
+    def test_log_buffer_uses_bitkub_time(self):
+        app = Mock()
+        command_center = CLICommandCenter(app)
+        record = logging.LogRecord(
+            name="test.runtime",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="runtime ready",
+            args=(),
+            exc_info=None,
+        )
+        record.created = datetime(2026, 4, 11, 15, 35, 0, tzinfo=timezone.utc).timestamp()
+
+        command_center._append_log_record(record)
+
+        assert command_center._log_lines[-1]["timestamp"] == "22:35:00"
+
+    def test_signal_alignment_panel_renders_pair_runtime_context(self):
+        app = Mock()
+        command_center = CLICommandCenter(app)
+
+        panel = command_center._build_signal_alignment_panel(
+            {
+                "signal_alignment": [
+                    {
+                        "symbol": "THB_BTC",
+                        "tf_ready": "4/6",
+                        "market_update": "22:35:00",
+                        "macro": "BUY",
+                        "micro": "BUY",
+                        "trigger": "HOLD",
+                        "trend": "BUY",
+                        "trigger_side": "NONE",
+                        "action": "WAIT",
+                        "status": "Waiting: Insufficient data (3/210 bars)",
+                    }
+                ]
+            }
+        )
+        console = Console(record=True, width=140)
+        console.print(panel)
+        rendered = console.export_text()
+
+        assert "TF" in rendered
+        assert "Upd" in rendered
+        assert "4/6" in rendered
+        assert "22:35:00" in rendered
+
+
+def test_format_bitkub_time_normalizes_to_thailand_timezone():
+    assert format_bitkub_time(datetime(2026, 4, 11, 15, 35, 0, tzinfo=timezone.utc)) == "22:35:00"
 
 
 if __name__ == '__main__':

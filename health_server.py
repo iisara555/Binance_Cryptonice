@@ -45,7 +45,20 @@ class BotHealthServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path not in {server_ref.path, "/health"}:
+                if self.path == "/metrics":
+                    try:
+                        from metrics import get_metrics
+                        metrics_data = get_metrics().export().encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                        self.send_header("Content-Length", str(len(metrics_data)))
+                        self.end_headers()
+                        self.wfile.write(metrics_data)
+                        return
+                    except ImportError:
+                        pass
+
+                if self.path not in {server_ref.path, "/health"} and self.path != "/metrics":
                     self.send_response(404)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.end_headers()

@@ -19,6 +19,7 @@ Use this checklist before enabling live trading on a VPS.
 
 - Start the trading bot with the project virtualenv, not the system Python.
 - Start the trading bot with `BOT_READ_ONLY=true` or `BOT_STARTUP_TEST_MODE=1` for the first smoke test.
+- If you want Rich CLI plus reboot-safe autostart, start the bot via a `tmux` session and let a oneshot `systemd` unit recreate that session on boot.
 - Do not use ad-hoc shell state from an old project path after moving folders; reopen the shell and activate from the new root.
 
 ## 4. Health Checks
@@ -56,5 +57,6 @@ python scripts/vps_preflight.py --skip-bot-health
 
 - Preflight script returns `status: pass`
 - Bot `/health` returns `healthy: true` and not `status: degraded`
+- If using Rich CLI on VPS, `tmux list-sessions` shows the expected session (for example `crypto`) after boot
 - Telegram behavior is intentional: valid credentials for alerts, or disabled by config/env
 - `LIVE_TRADING` and `simulate_only` flags are reviewed one last time before restart
