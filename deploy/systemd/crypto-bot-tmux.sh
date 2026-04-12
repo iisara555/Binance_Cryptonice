@@ -12,7 +12,7 @@ start_session() {
         return 0
     fi
 
-    tmux new-session -d -s "${SESSION_NAME}" -x 200 -y 50 -c "${PROJECT_ROOT}" "${PYTHON_BIN} ${BOT_ENTRY}"
+    tmux new-session -d -s "${SESSION_NAME}" -x 200 -y 50 -c "${PROJECT_ROOT}" "bash -lc 'stty -echo; exec \"${PYTHON_BIN}\" \"${BOT_ENTRY}\"'"
     echo "started tmux session '${SESSION_NAME}'"
 }
 

@@ -63,6 +63,8 @@ from cli_ui import CLICommandCenter
 
 logger = logging.getLogger(__name__)
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+
 
 def _normalize_pairs(pairs: Iterable[str]) -> List[str]:
     """Normalize pair strings and drop blanks while preserving order."""
@@ -75,6 +77,13 @@ def _normalize_pairs(pairs: Iterable[str]) -> List[str]:
         seen.add(value)
         normalized.append(value)
     return normalized
+
+
+def _sanitize_cli_input_line(value: Any) -> str:
+    """Strip ANSI escape sequences from line-buffered CLI input."""
+    text = str(value or "")
+    sanitized = _ANSI_ESCAPE_RE.sub("", text)
+    return sanitized.replace("\x1b", "")
 
 
 def _normalize_cli_pair(value: Any) -> str:
@@ -1854,7 +1863,8 @@ class TradingBotApp:
                 return
 
             if _termios is not None and self._live_dashboard_active:
-                # ── Linux: line-buffered input (typed chars echo, Rich overwrites on refresh) ──
+                # ── Linux/tmux: canonical input with shell-level `stty -echo` ──
+                self._set_cli_chat_status("Linux tmux mode: Enter=send | Backspace=edit | arrow keys ignored")
                 while not self._shutdown_event.is_set():
                     try:
                         line = sys.stdin.readline()
@@ -1866,7 +1876,7 @@ class TradingBotApp:
                     if not line:
                         time.sleep(0.1)
                         continue
-                    raw_command = line.strip()
+                    raw_command = _sanitize_cli_input_line(line).strip()
                     if not raw_command:
                         continue
                     result = self._submit_cli_chat_command(raw_command)
