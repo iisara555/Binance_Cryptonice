@@ -69,7 +69,7 @@ strategies:
     - "breakout"
     - "scalping"
   min_confidence: 0.35               # Minimum confidence to act (lowered from 0.40)
-  min_strategies_agree: 2            # Minimum strategies that must agree (increased from 1)
+  min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
 
 # Trading Strategy Parameters (NEW - Easy to edit)
 # All trading decisions use these parameters

@@ -27,6 +27,13 @@ try:
 except ImportError:  # pragma: no cover - non-Windows fallback
     msvcrt = None  # type: ignore[assignment]
 
+# Linux raw terminal input support
+_termios = None
+try:
+    import termios as _termios  # type: ignore[import-untyped]
+except ImportError:
+    pass
+
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -36,7 +43,7 @@ from config import BITKUB, TRADING, validate_config
 from api_client import BitkubClient, BitkubAPIError
 from data_collector import BitkubCollector
 from signal_generator import SignalGenerator, get_latest_signal_flow_snapshot
-from risk_management import RiskManager, RiskConfig
+from risk_management import RiskManager, RiskConfig, get_default_sl_tp
 from trade_executor import TradeExecutor
 from trading_bot import TradingBotOrchestrator
 from telegram_bot import TelegramBotHandler
@@ -51,7 +58,7 @@ from logger_setup import setup_logging as configure_application_logging
 from logger_setup import get_shared_console
 from health_server import BotHealthServer
 from process_guard import acquire_bot_lock, release_bot_lock, get_lock_status
-from helpers import get_current_price
+from helpers import format_bitkub_time, get_current_price, now_bitkub, parse_as_bitkub_time
 from cli_ui import CLICommandCenter
 
 logger = logging.getLogger(__name__)
@@ -162,6 +169,118 @@ def _get_candidate_dynamic_pairs(data_config: Optional[Dict[str, Any]] = None, p
 def _get_dynamic_whitelist_path(data_config: Optional[Dict[str, Any]] = None, project_root: Optional[Path] = None) -> Path:
     settings = _get_hybrid_dynamic_coin_settings(data_config)
     return resolve_whitelist_path(settings.get("whitelist_json_path"), project_root or PROJECT_ROOT)
+
+
+def _merge_unique_timeframes(existing: Iterable[str], additions: Iterable[str]) -> List[str]:
+    merged: List[str] = []
+    seen: set[str] = set()
+    for item in list(existing or []) + list(additions or []):
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        merged.append(value)
+    return merged
+
+
+def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    runtime_config = dict(config or {})
+    strategy_mode = dict(runtime_config.get("strategy_mode", {}) or {})
+    active_mode = str(strategy_mode.get("active") or "standard").strip().lower()
+    runtime_config["active_strategy_mode"] = active_mode
+    if active_mode == "standard":
+        return runtime_config
+
+    trading_cfg = runtime_config.setdefault("trading", {})
+    strategies_cfg = runtime_config.setdefault("strategies", {})
+    risk_cfg = runtime_config.setdefault("risk", {})
+    state_cfg = runtime_config.setdefault("state_management", {})
+    auto_trader_cfg = runtime_config.setdefault("auto_trader", {})
+    position_sizing_cfg = auto_trader_cfg.setdefault("position_sizing", {})
+    auto_exit_cfg = auto_trader_cfg.setdefault("auto_exit", {})
+    mtf_cfg = runtime_config.setdefault("multi_timeframe", {})
+
+    if active_mode == "trend_only":
+        trend_mode = dict(strategy_mode.get("trend_only", {}) or {})
+        trend_tf = str(trend_mode.get("primary_timeframe") or trading_cfg.get("timeframe") or "15m")
+        hold_hours = float(trend_mode.get("max_hold_hours", auto_exit_cfg.get("max_hold_hours", 48)) or 48)
+
+        trading_cfg["timeframe"] = trend_tf
+        strategies_cfg["enabled"] = ["trend_following"]
+        strategies_cfg["min_confidence"] = float(trend_mode.get("min_confidence", strategies_cfg.get("min_confidence", 0.35)))
+        strategies_cfg["min_strategies_agree"] = int(trend_mode.get("min_strategies_agree", 1) or 1)
+
+        risk_cfg["stop_loss_pct"] = float(trend_mode.get("stop_loss_pct", risk_cfg.get("stop_loss_pct", 4.5)))
+        risk_cfg["take_profit_pct"] = float(trend_mode.get("take_profit_pct", risk_cfg.get("take_profit_pct", 10.0)))
+        risk_cfg["cool_down_minutes"] = float(trend_mode.get("min_time_between_trades_minutes", risk_cfg.get("cool_down_minutes", 5)) or 5)
+
+        state_cfg["confirmations_required"] = int(trend_mode.get("confirmations_required", state_cfg.get("confirmations_required", 1)) or 1)
+        state_cfg["confirmation_window_seconds"] = int(trend_mode.get("confirmation_window_seconds", state_cfg.get("confirmation_window_seconds", 180)) or 180)
+
+        auto_exit_cfg["max_hold_hours"] = hold_hours
+        mtf_cfg["enabled"] = bool(trend_mode.get("mtf_enabled", mtf_cfg.get("enabled", True)))
+        trend_confirm_tf = str(trend_mode.get("confirm_timeframe") or "1h")
+        mtf_cfg["timeframes"] = _merge_unique_timeframes(mtf_cfg.get("timeframes") or [], [trend_tf, trend_confirm_tf])
+        mtf_cfg["higher_timeframes"] = _merge_unique_timeframes([], [trend_confirm_tf])
+        return runtime_config
+
+    if active_mode != "scalping":
+        return runtime_config
+
+    scalping_mode = dict(strategy_mode.get("scalping", {}) or {})
+
+    primary_tf = str(scalping_mode.get("primary_timeframe") or "5m")
+    confirm_tf = str(scalping_mode.get("confirm_timeframe") or "15m")
+    trend_tf = str(scalping_mode.get("trend_timeframe") or "1h")
+    max_hold_minutes = int(scalping_mode.get("position_timeout_minutes", 30) or 30)
+
+    trading_cfg["timeframe"] = primary_tf
+    strategies_cfg["enabled"] = ["scalping"]
+    strategies_cfg["min_confidence"] = float(scalping_mode.get("min_confidence", strategies_cfg.get("min_confidence", 0.35)))
+    strategies_cfg["min_strategies_agree"] = int(scalping_mode.get("min_strategies_agree", 1) or 1)
+
+    risk_cfg["stop_loss_pct"] = float(scalping_mode.get("stop_loss_pct", 0.75))
+    risk_cfg["take_profit_pct"] = float(scalping_mode.get("take_profit_pct", 1.75))
+    risk_cfg["max_daily_trades"] = int(scalping_mode.get("max_trades_per_day", risk_cfg.get("max_daily_trades", 50)) or 50)
+    risk_cfg["max_position_per_trade_pct"] = float(scalping_mode.get("max_position_per_trade_pct", risk_cfg.get("max_position_per_trade_pct", 20.0)))
+    risk_cfg["max_risk_per_trade_pct"] = float(scalping_mode.get("max_risk_per_trade_pct", risk_cfg.get("max_risk_per_trade_pct", 2.0)))
+    risk_cfg["cool_down_minutes"] = float(scalping_mode.get("min_time_between_trades_minutes", risk_cfg.get("cool_down_minutes", 5)) or 5)
+
+    state_cfg["confirmations_required"] = int(scalping_mode.get("confirmations_required", state_cfg.get("confirmations_required", 1)) or 1)
+    state_cfg["confirmation_window_seconds"] = int(scalping_mode.get("confirmation_window_seconds", 90) or 90)
+    state_cfg["pending_buy_timeout_seconds"] = int(scalping_mode.get("pending_buy_timeout_seconds", 60) or 60)
+    state_cfg["pending_sell_timeout_seconds"] = int(scalping_mode.get("pending_sell_timeout_seconds", 60) or 60)
+
+    position_sizing_cfg["risk_per_trade_pct"] = float(scalping_mode.get("position_risk_per_trade_pct", position_sizing_cfg.get("risk_per_trade_pct", 1.0)))
+    position_sizing_cfg["max_position_pct"] = float(scalping_mode.get("position_size_cap_pct", position_sizing_cfg.get("max_position_pct", 10.0)))
+    auto_exit_cfg["max_hold_hours"] = max_hold_minutes / 60.0
+    auto_exit_cfg["check_interval_seconds"] = int(scalping_mode.get("monitor_check_interval_seconds", auto_exit_cfg.get("check_interval_seconds", 10)) or 10)
+
+    mtf_cfg["enabled"] = True
+    mtf_cfg["timeframes"] = _merge_unique_timeframes(mtf_cfg.get("timeframes") or [], [primary_tf, confirm_tf, trend_tf])
+    mtf_cfg["higher_timeframes"] = _merge_unique_timeframes([], [trend_tf])
+
+    scalping_strategy_cfg = dict(strategies_cfg.get("scalping", {}) or {})
+    scalping_strategy_cfg.update(
+        {
+            "primary_timeframe": primary_tf,
+            "confirm_timeframe": confirm_tf,
+            "trend_timeframe": trend_tf,
+            "fast_ema": int(scalping_mode.get("fast_ema", 9) or 9),
+            "slow_ema": int(scalping_mode.get("slow_ema", 21) or 21),
+            "rsi_period": int(scalping_mode.get("rsi_period", 7) or 7),
+            "rsi_oversold": float(scalping_mode.get("rsi_oversold", 34) or 34),
+            "rsi_overbought": float(scalping_mode.get("rsi_overbought", 66) or 66),
+            "bollinger_period": int(scalping_mode.get("bollinger_period", 20) or 20),
+            "bollinger_std": float(scalping_mode.get("bollinger_std", 2.0) or 2.0),
+            "min_entry_confidence": float(scalping_mode.get("min_confidence", 0.30)),
+            "stop_loss_pct": float(scalping_mode.get("stop_loss_pct", 0.75)),
+            "take_profit_pct": float(scalping_mode.get("take_profit_pct", 1.75)),
+            "position_timeout_minutes": max_hold_minutes,
+        }
+    )
+    strategies_cfg["scalping"] = scalping_strategy_cfg
+    return runtime_config
 
 
 def _normalize_optional_secret(value: Optional[Any]) -> str:
@@ -279,7 +398,7 @@ def load_bot_config(config_path: str | PathLike[str] | None = None) -> Dict[str,
     try:
         import yaml
         with open(resolved_config_path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+            return _apply_strategy_mode_profile(yaml.safe_load(f))
     except ImportError:
         logger.warning("PyYAML not installed, trying JSON")
     
@@ -288,7 +407,7 @@ def load_bot_config(config_path: str | PathLike[str] | None = None) -> Dict[str,
     if json_path.exists():
         import json
         with open(json_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            return _apply_strategy_mode_profile(json.load(f))
     
     logger.error(f"No valid config file found at {resolved_config_path}")
     return _get_default_config()
@@ -298,14 +417,31 @@ def _get_default_config() -> Dict[str, Any]:
     """Return default configuration."""
     return {
         "trading_pair": "",
-        "interval_seconds": 60,
-        "timeframe": "1h",
         "mode": "semi_auto",
         "simulate_only": True,
+        "trading": {
+            "trading_pair": "",
+            "interval_seconds": 60,
+            "timeframe": "1h",
+            "mode": "semi_auto",
+        },
         "strategies": {
             "enabled": ["trend_following", "mean_reversion", "breakout", "scalping"],
             "min_confidence": 0.5,
-            "min_strategies_agree": 2
+            "min_strategies_agree": 2,
+            "scalping": {
+                "fast_ema": 9,
+                "slow_ema": 21,
+                "rsi_period": 7,
+                "rsi_oversold": 34,
+                "rsi_overbought": 66,
+                "bollinger_period": 20,
+                "bollinger_std": 2.0,
+                "min_entry_confidence": 0.3,
+                "stop_loss_pct": 0.75,
+                "take_profit_pct": 1.75,
+                "position_timeout_minutes": 30,
+            },
         },
         "risk": {
             "max_risk_per_trade_pct": 4.0,
@@ -360,6 +496,9 @@ def _get_default_config() -> Dict[str, Any]:
             "collect_interval_seconds": 60,
             "auto_detect_held_pairs": True,
             "pairs": [],
+            "portfolio_guard": {
+                "held_coins_only": True,
+            },
             "hybrid_dynamic_coin_config": {
                 "whitelist_json_path": DEFAULT_WHITELIST_JSON,
                 "min_quote_balance_thb": max(float(TRADING.min_order_amount or 0.0), 100.0),
@@ -409,17 +548,24 @@ def setup_signal_handlers(bot: TradingBotOrchestrator, collector: BitkubCollecto
     def signal_handler(signum, frame):
         logger.info(f"ได้รับสัญญาณ {signum}, กำลังเริ่มขั้นตอนปิดระบบอย่างปลอดภัย (Graceful shutdown)...")
 
-        # Stop bot first (will stop main loop)
-        if bot:
-            bot.stop()
+        try:
+            # Stop bot first (will stop main loop)
+            if bot:
+                bot.stop()
 
-        # Stop Telegram handler
-        if telegram_handler:
-            telegram_handler.stop()
+            # Stop Telegram handler
+            if telegram_handler:
+                telegram_handler.stop()
 
-        # Stop collector
-        if collector:
-            collector.stop()
+            # Stop collector
+            if collector:
+                collector.stop()
+        finally:
+            # Always release singleton lock on signal-driven shutdown.
+            try:
+                release_bot_lock()
+            except Exception as lock_err:
+                logger.warning("Failed to release bot lock during signal shutdown: %s", lock_err)
 
         logger.info("ปิดระบบเสร็จสมบูรณ์")
         sys.exit(0)
@@ -433,14 +579,15 @@ class TradingBotApp:
     Main application class that coordinates all components.
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, config_path: str | PathLike[str] | None = None):
         """
         Initialize the trading bot application.
         
         Args:
             config: Bot configuration dict
         """
-        self.config = config or load_bot_config()
+        self._config_path = Path(config_path) if config_path is not None else Path(os.environ.get("BOT_CONFIG_PATH", PROJECT_ROOT / "bot_config.yaml"))
+        self.config = _apply_strategy_mode_profile(config or load_bot_config(self._config_path))
         self.bot: Optional[TradingBotOrchestrator] = None
         self.collector: Optional[BitkubCollector] = None
         self.api_client: Optional[BitkubClient] = None
@@ -481,6 +628,11 @@ class TradingBotApp:
         self._cli_history_max_items = 50
         self._cli_pending_confirmation: Optional[Dict[str, Any]] = None
         self._cli_suggestion_limit = 5
+        self._cli_log_level_filter = "INFO"
+        self._cli_footer_mode = "compact"
+        self._restart_requested = False
+        self._restart_reason = ""
+        self._restart_lock = threading.Lock()
     
 
     def _ensure_cli_chat_runtime_state(self) -> None:
@@ -504,6 +656,33 @@ class TradingBotApp:
             self._cli_pending_confirmation = None
         if not hasattr(self, "_cli_suggestion_limit"):
             self._cli_suggestion_limit = 5
+        if not hasattr(self, "_cli_log_level_filter"):
+            self._cli_log_level_filter = "INFO"
+        if not hasattr(self, "_cli_footer_mode"):
+            self._cli_footer_mode = "compact"
+        if not hasattr(self, "_restart_requested"):
+            self._restart_requested = False
+        if not hasattr(self, "_restart_reason"):
+            self._restart_reason = ""
+        if not hasattr(self, "_restart_lock"):
+            self._restart_lock = threading.Lock()
+
+    @staticmethod
+    def _normalize_cli_log_level(value: str) -> str:
+        alias = {
+            "warn": "WARNING",
+            "err": "ERROR",
+            "fatal": "CRITICAL",
+        }
+        normalized = str(value or "").strip().lower()
+        if normalized in alias:
+            return alias[normalized]
+        return normalized.upper()
+
+    @staticmethod
+    def _normalize_cli_footer_mode(value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in {"compact", "verbose"} else ""
 
     def _set_cli_chat_status(self, status: str) -> None:
         self._ensure_cli_chat_runtime_state()
@@ -642,9 +821,20 @@ class TradingBotApp:
                 "help",
                 "status",
                 "orders",
+                "mode show",
+                "mode cycle",
+                "mode standard",
+                "mode trend",
+                "mode scalp",
+                "mode set standard",
+                "mode set standard restart",
                 "risk show",
                 "risk set 2.0",
+                "ui",
+                "ui log info",
+                "ui footer compact",
                 f"buy {default_pair} 500",
+                f"track {default_pair} 0.001 1500000",
                 f"sell {default_pair} 0.001",
                 "pairs list",
                 f"pairs add {default_pair}",
@@ -666,10 +856,28 @@ class TradingBotApp:
 
         first = parts[0].lower()
         if len(parts) == 1 and not has_trailing_space:
-            command_options = ["help", "status", "orders", "risk", "buy", "sell", "close", "pairs"]
+            command_options = ["help", "status", "orders", "mode", "risk", "ui", "buy", "track", "sell", "close", "pairs"]
             if pending:
                 command_options.extend(["confirm", "cancel"])
             return self._match_cli_suggestions(command_options, stripped)
+
+        if first == "mode":
+            return self._match_cli_suggestions([
+                "mode show",
+                "mode cycle",
+                "mode standard",
+                "mode set standard",
+                "mode set standard restart",
+                "mode trend",
+                "mode trend_only",
+                "mode set trend_only",
+                "mode set trend_only restart",
+                "mode scalp",
+                "mode scalping",
+                "mode set scalping",
+                "mode set scalping restart",
+                "mode cycle restart",
+            ], stripped)
 
         if pending and first in {"c", "co", "con", "conf", "confi", "confirm", "ca", "can", "canc", "cance", "cancel"}:
             return self._match_cli_suggestions(["confirm", "cancel"], stripped)
@@ -682,6 +890,19 @@ class TradingBotApp:
                 return self._match_cli_suggestions([f"buy {pair} 500" for pair in known_pairs], stripped)
             pair = _normalize_cli_pair(parts[1]) if len(parts) >= 2 else default_pair
             return self._match_cli_suggestions([f"buy {pair} 100", f"buy {pair} 500", f"buy {pair} 1000"], stripped)
+
+        if first == "track":
+            if len(parts) == 1 or (len(parts) == 2 and not has_trailing_space):
+                return self._match_cli_suggestions([f"track {pair} 0.001 1500000" for pair in known_pairs], stripped)
+            pair = _normalize_cli_pair(parts[1]) if len(parts) >= 2 else default_pair
+            return self._match_cli_suggestions(
+                [
+                    f"track {pair} 0.001 1500000",
+                    f"track {pair} 0.01 2500",
+                    f"track {pair} 100 2.5",
+                ],
+                stripped,
+            )
 
         if first == "sell":
             suggestions = [f"sell {pair} 0.001" for pair in known_pairs]
@@ -696,6 +917,19 @@ class TradingBotApp:
             pair_commands.extend(f"pairs add {pair}" for pair in known_pairs)
             pair_commands.extend(f"pairs remove {pair}" for pair in known_pairs)
             return self._match_cli_suggestions(pair_commands, stripped)
+
+        if first == "ui":
+            ui_commands = [
+                "ui",
+                "ui log debug",
+                "ui log info",
+                "ui log warning",
+                "ui log error",
+                "ui log critical",
+                "ui footer compact",
+                "ui footer verbose",
+            ]
+            return self._match_cli_suggestions(ui_commands, stripped)
 
         return []
 
@@ -716,12 +950,22 @@ class TradingBotApp:
         normalized = str(command or "").lower()
         if normalized == "buy":
             return len(args) == 2
+        if normalized == "track":
+            return len(args) == 3
         if normalized == "sell":
             return len(args) in {1, 2}
         if normalized == "close":
             return len(args) == 1
         if normalized == "risk":
             return len(args) == 2 and str(args[0] or "").lower() == "set"
+        if normalized == "mode":
+            if len(args) == 1 and str(args[0] or "").lower() in {"standard", "std", "trend", "trend_only", "trendonly", "scalp", "scalper", "scalping", "cycle"}:
+                return True
+            if len(args) == 2 and str(args[0] or "").lower() == "set":
+                return True
+            if len(args) == 2 and str(args[1] or "").lower() == "restart" and str(args[0] or "").lower() in {"standard", "std", "trend", "trend_only", "trendonly", "scalp", "scalper", "scalping", "cycle"}:
+                return True
+            return len(args) == 3 and str(args[0] or "").lower() == "set" and str(args[2] or "").lower() == "restart"
         return False
 
     def _build_cli_confirmation_request(self, command: str, args: List[str], command_text: str) -> Dict[str, Any]:
@@ -729,6 +973,11 @@ class TradingBotApp:
         summary = f"Confirm command: {command_text}"
         if normalized == "buy" and len(args) == 2:
             summary = f"Confirm market BUY {_normalize_cli_pair(args[0])} with {float(args[1]):,.2f} THB"
+        elif normalized == "track" and len(args) == 3:
+            summary = (
+                f"Confirm tracked position {_normalize_cli_pair(args[0])} "
+                f"qty {float(args[1]):,.8f} @ {float(args[2]):,.4f}"
+            )
         elif normalized == "sell" and len(args) == 2:
             summary = f"Confirm market SELL {_normalize_cli_pair(args[0])} amount {float(args[1]):,.8f}"
         elif normalized == "sell" and len(args) == 1:
@@ -737,6 +986,14 @@ class TradingBotApp:
             summary = f"Confirm close active order {args[0]} via market SELL"
         elif normalized == "risk" and len(args) == 2:
             summary = f"Confirm risk change to {float(args[1]):.2f}% per trade"
+        elif normalized == "mode" and len(args) == 1:
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[0])} (restart required)"
+        elif normalized == "mode" and len(args) == 2 and str(args[1] or "").lower() == "restart":
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[0])} and restart bot"
+        elif normalized == "mode" and len(args) == 2 and str(args[0] or "").lower() == "set":
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[1])} (restart required)"
+        elif normalized == "mode" and len(args) == 3 and str(args[0] or "").lower() == "set" and str(args[2] or "").lower() == "restart":
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[1])} and restart bot"
 
         return {
             "command": normalized,
@@ -791,6 +1048,120 @@ class TradingBotApp:
             "risk_pct": normalized,
             "risk_level": self._derive_risk_level()[0],
         }
+
+    @staticmethod
+    def _normalize_strategy_mode(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        valid_modes = {"standard", "trend_only", "scalping"}
+        if normalized not in valid_modes:
+            raise ValueError("Mode must be one of: standard, trend_only, scalping")
+        return normalized
+
+    def get_runtime_mode_status(self) -> Dict[str, Any]:
+        strategy_mode_cfg = dict(self.config.get("strategy_mode", {}) or {})
+        active_mode = str(self.config.get("active_strategy_mode") or strategy_mode_cfg.get("active") or "standard").lower()
+        return {
+            "status": "ok",
+            "active_mode": active_mode,
+            "config_path": str(self._config_path),
+            "timeframe": str((self.config.get("trading", {}) or {}).get("timeframe") or "-"),
+            "enabled_strategies": list((self.config.get("strategies", {}) or {}).get("enabled") or []),
+        }
+
+    def _resolve_target_strategy_mode(self, selector: Any) -> str:
+        normalized = str(selector or "").strip().lower()
+        alias_map = {
+            "std": "standard",
+            "standard": "standard",
+            "trend": "trend_only",
+            "trendonly": "trend_only",
+            "trend_only": "trend_only",
+            "scalp": "scalping",
+            "scalper": "scalping",
+            "scalping": "scalping",
+        }
+        if normalized == "cycle":
+            current = str(self.get_runtime_mode_status().get("active_mode") or "standard").lower()
+            rotation = ["standard", "trend_only", "scalping"]
+            try:
+                current_index = rotation.index(current)
+            except ValueError:
+                current_index = 0
+            return rotation[(current_index + 1) % len(rotation)]
+        if normalized in alias_map:
+            return alias_map[normalized]
+        return self._normalize_strategy_mode(normalized)
+
+    def set_runtime_strategy_mode(self, mode: str) -> Dict[str, Any]:
+        normalized_mode = self._resolve_target_strategy_mode(mode)
+        config_path = self._config_path
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if config_path.suffix.lower() == ".json":
+            existing: Dict[str, Any] = {}
+            if config_path.exists():
+                try:
+                    existing = json.loads(config_path.read_text(encoding="utf-8")) or {}
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to parse config JSON: {exc}") from exc
+            existing.setdefault("strategy_mode", {})["active"] = normalized_mode
+            config_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        else:
+            yaml_text = ""
+            if config_path.exists():
+                yaml_text = config_path.read_text(encoding="utf-8")
+            if yaml_text and re.search(r"(?m)^strategy_mode:\s*$", yaml_text):
+                if re.search(r"(?m)^\s{2}active:\s*['\"]?[^#\r\n]+['\"]?", yaml_text):
+                    yaml_text = re.sub(
+                        r"(?m)^(\s{2}active:\s*)['\"]?[^#\r\n]+(['\"]?)(\s*(?:#.*)?)$",
+                        rf'\1"{normalized_mode}"\3',
+                        yaml_text,
+                        count=1,
+                    )
+                else:
+                    yaml_text = re.sub(
+                        r"(?m)^(strategy_mode:\s*)$",
+                        rf"\1\n  active: \"{normalized_mode}\"",
+                        yaml_text,
+                        count=1,
+                    )
+            else:
+                prefix = yaml_text.rstrip() + ("\n\n" if yaml_text.strip() else "")
+                yaml_text = prefix + f"strategy_mode:\n  active: \"{normalized_mode}\"\n"
+            config_path.write_text(yaml_text if yaml_text.endswith("\n") else yaml_text + "\n", encoding="utf-8")
+
+        self.config.setdefault("strategy_mode", {})["active"] = normalized_mode
+        self.config["active_strategy_mode"] = normalized_mode
+        logger.warning("[CLI] Strategy mode persisted to %s: active=%s (restart required)", config_path, normalized_mode)
+        return {
+            "status": "ok",
+            "active_mode": normalized_mode,
+            "config_path": str(config_path),
+            "restart_required": True,
+        }
+
+    def request_process_restart(self, reason: str = "runtime cli request") -> Dict[str, Any]:
+        with self._restart_lock:
+            self._restart_requested = True
+            self._restart_reason = str(reason or "runtime cli request")
+
+        def _async_stop() -> None:
+            try:
+                self.stop()
+            except Exception as exc:
+                logger.error("Failed to stop app during restart request: %s", exc, exc_info=True)
+
+        threading.Thread(target=_async_stop, daemon=True, name="CLIProcessRestart").start()
+        logger.warning("[CLI] Restart requested: %s", self._restart_reason)
+        return {"status": "ok", "restart_requested": True, "reason": self._restart_reason}
+
+    def _perform_requested_restart(self) -> None:
+        with self._restart_lock:
+            if not self._restart_requested:
+                return
+            restart_reason = self._restart_reason or "runtime cli request"
+        logger.warning("Restarting process in-place: %s", restart_reason)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
 
     def _load_runtime_pairlist_document(self) -> tuple[Path, Dict[str, Any], List[str]]:
         data_config = self.config.setdefault("data", {})
@@ -990,6 +1361,105 @@ class TradingBotApp:
             "filled_price": reference_price,
         }
 
+    def _build_manual_position_sl_tp(self, symbol: str, entry_price: float) -> tuple[Optional[float], Optional[float]]:
+        if entry_price <= 0:
+            return None, None
+
+        default_sl_pct, default_tp_pct = get_default_sl_tp(symbol)
+        risk_cfg = (self.config.get("risk", {}) or {})
+
+        try:
+            stop_loss_pct = float(risk_cfg.get("stop_loss_pct", default_sl_pct) or default_sl_pct)
+        except (TypeError, ValueError):
+            stop_loss_pct = float(default_sl_pct)
+        try:
+            take_profit_pct = float(risk_cfg.get("take_profit_pct", default_tp_pct) or default_tp_pct)
+        except (TypeError, ValueError):
+            take_profit_pct = float(default_tp_pct)
+
+        stop_loss_pct = -abs(stop_loss_pct) if stop_loss_pct else float(default_sl_pct)
+        take_profit_pct = abs(take_profit_pct) if take_profit_pct else float(default_tp_pct)
+
+        stop_loss = round(entry_price * (1 + (stop_loss_pct / 100.0)), 6)
+        take_profit = round(entry_price * (1 + (take_profit_pct / 100.0)), 6)
+        return stop_loss, take_profit
+
+    def track_manual_position(self, pair: str, coin_amount: float, entry_price: float) -> Dict[str, Any]:
+        """Register a manually held coin with its real average cost for SL/TP management."""
+        self._ensure_manual_trade_allowed()
+
+        symbol = _normalize_cli_pair(pair)
+        try:
+            quantity = float(coin_amount)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Tracked amount must be a number") from exc
+        try:
+            avg_cost = float(entry_price)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Tracked entry price must be a number") from exc
+
+        if quantity <= 0:
+            raise ValueError("Tracked amount must be greater than 0")
+        if avg_cost <= 0:
+            raise ValueError("Tracked entry price must be greater than 0")
+        if (quantity * avg_cost) < 15.0:
+            raise ValueError("Tracked position value must be at least 15 THB")
+
+        active_orders = self.list_active_orders()
+        existing = next((order for order in active_orders if order.get("symbol") == symbol), None)
+        if existing is not None:
+            raise ValueError(f"Symbol already tracked: {symbol} ({existing.get('order_id')})")
+
+        stop_loss, take_profit = self._build_manual_position_sl_tp(symbol, avg_cost)
+        position_id = f"manual_{symbol}_{int(time.time())}"
+        tracked_payload = {
+            "symbol": symbol,
+            "side": "buy",
+            "amount": quantity,
+            "entry_price": avg_cost,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "timestamp": datetime.now(),
+            "is_partial_fill": False,
+            "remaining_amount": quantity,
+            "total_entry_cost": round(quantity * avg_cost, 8),
+            "filled": True,
+            "filled_amount": quantity,
+            "filled_price": avg_cost,
+            "trigger": "manual_import",
+            "notes": "cli_manual_track",
+        }
+        executor = self.executor
+        if not executor:
+            raise RuntimeError("Trading executor is not available")
+        executor.register_tracked_position(position_id, tracked_payload)
+        if self.api_client:
+            try:
+                self.api_client.get_balances(force_refresh=True, allow_stale=False)
+            except Exception:
+                logger.debug("[CLI] Balance refresh failed after track command", exc_info=True)
+        self._sync_runtime_position_state()
+        logger.warning(
+            "[CLI] Manual position tracked: %s %.8f @ %.4f | order_id=%s | SL=%.4f | TP=%.4f",
+            symbol,
+            quantity,
+            avg_cost,
+            position_id,
+            float(stop_loss or 0.0),
+            float(take_profit or 0.0),
+        )
+        return {
+            "status": "ok",
+            "side": "buy",
+            "symbol": symbol,
+            "amount": quantity,
+            "entry_price": avg_cost,
+            "order_id": position_id,
+            "stop_loss": float(stop_loss or 0.0),
+            "take_profit": float(take_profit or 0.0),
+            "total_entry_cost": round(quantity * avg_cost, 8),
+        }
+
     def submit_manual_market_sell(self, target: str, amount: Optional[float] = None) -> Dict[str, Any]:
         """Submit a market sell either by pair+amount or by tracked order id."""
         self._ensure_manual_trade_allowed()
@@ -1054,11 +1524,21 @@ class TradingBotApp:
             "  help\n"
             "  status\n"
             "  orders\n"
+            "  mode show\n"
+            "  mode cycle\n"
+            "  mode <standard|trend|scalp>\n"
+            "  mode set <standard|trend_only|scalping>\n"
+            "  mode <standard|trend|scalp> restart\n"
+            "  mode set <standard|trend_only|scalping> restart\n"
             "  confirm\n"
             "  cancel\n"
             "  risk show\n"
             "  risk set <percent>\n"
+            "  ui\n"
+            "  ui log <debug|info|warning|error|critical>\n"
+            "  ui footer <compact|verbose>\n"
             "  buy <PAIR> <THB_AMOUNT>\n"
+            "  track <PAIR> <COIN_AMOUNT> <ENTRY_PRICE>\n"
             "  sell <PAIR> <COIN_AMOUNT>\n"
             "  close <ORDER_ID>\n"
             "  pairs list\n"
@@ -1097,6 +1577,42 @@ class TradingBotApp:
                 )
             return "\n".join(lines)
 
+        if command == "mode":
+            if not args or args[0].lower() == "show":
+                result = self.get_runtime_mode_status()
+                enabled = ", ".join(result["enabled_strategies"]) or "NONE"
+                return (
+                    f"Strategy mode: {result['active_mode']} | timeframe={result['timeframe']} | "
+                    f"strategies={enabled} | path={result['config_path']}"
+                )
+            if len(args) == 1:
+                result = self.set_runtime_strategy_mode(args[0])
+                return (
+                    f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
+                    "restart bot to apply fully"
+                )
+            if len(args) == 2 and args[1].lower() == "restart":
+                result = self.set_runtime_strategy_mode(args[0])
+                self.request_process_restart(reason=f"mode change to {result['active_mode']}")
+                return (
+                    f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
+                    "restarting now"
+                )
+            if len(args) == 2 and args[0].lower() == "set":
+                result = self.set_runtime_strategy_mode(args[1])
+                return (
+                    f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
+                    "restart bot to apply fully"
+                )
+            if len(args) == 3 and args[0].lower() == "set" and args[2].lower() == "restart":
+                result = self.set_runtime_strategy_mode(args[1])
+                self.request_process_restart(reason=f"mode change to {result['active_mode']}")
+                return (
+                    f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
+                    "restarting now"
+                )
+            return "Usage: mode show | mode cycle | mode <standard|trend|scalp> [restart] | mode set <standard|trend_only|scalping> [restart]"
+
         if command == "risk":
             if not args or args[0].lower() == "show":
                 risk = float((self.config.get("risk", {}) or {}).get("max_risk_per_trade_pct", 0.0) or 0.0)
@@ -1121,6 +1637,30 @@ class TradingBotApp:
                 return f"Runtime risk updated to {result['risk_pct']:.2f}% per trade ({result['risk_level']})"
             return "Usage: risk show | risk set <percent>"
 
+        if command == "ui":
+            if not args:
+                return (
+                    f"UI settings: log={self._cli_log_level_filter}+ | footer={self._cli_footer_mode}. "
+                    "Use: ui log <debug|info|warning|error|critical> | ui footer <compact|verbose>"
+                )
+
+            if len(args) == 2 and args[0].lower() == "log":
+                selected = self._normalize_cli_log_level(args[1])
+                valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+                if selected not in valid_levels:
+                    return "Usage: ui log <debug|info|warning|error|critical>"
+                self._cli_log_level_filter = selected
+                return f"UI log filter set to {selected}+"
+
+            if len(args) == 2 and args[0].lower() == "footer":
+                mode = self._normalize_cli_footer_mode(args[1])
+                if mode not in {"compact", "verbose"}:
+                    return "Usage: ui footer <compact|verbose>"
+                self._cli_footer_mode = mode
+                return f"UI footer mode set to {mode}"
+
+            return "Usage: ui | ui log <debug|info|warning|error|critical> | ui footer <compact|verbose>"
+
         if command == "buy":
             if len(args) != 2:
                 return "Usage: buy <PAIR> <THB_AMOUNT>"
@@ -1128,6 +1668,15 @@ class TradingBotApp:
             return (
                 f"Market BUY submitted: {result['symbol']} {result['thb_amount']:.2f} THB | "
                 f"order_id={result['order_id']} | filled_price={result['filled_price']:,.4f}"
+            )
+
+        if command == "track":
+            if len(args) != 3:
+                return "Usage: track <PAIR> <COIN_AMOUNT> <ENTRY_PRICE>"
+            result = self.track_manual_position(args[0], float(args[1]), float(args[2]))
+            return (
+                f"Tracked position: {result['symbol']} {result['amount']:.8f} @ {result['entry_price']:,.4f} | "
+                f"order_id={result['order_id']} | SL={result['stop_loss']:,.4f} | TP={result['take_profit']:,.4f}"
             )
 
         if command == "sell":
@@ -1255,6 +1804,7 @@ class TradingBotApp:
             logger.info("CLI command listener ready in Rich footer chat. Type 'help'.")
 
             if msvcrt is not None and self._live_dashboard_active:
+                # ── Windows: char-by-char via msvcrt ──
                 while not self._shutdown_event.is_set():
                     if not msvcrt.kbhit():
                         time.sleep(0.05)
@@ -1301,6 +1851,27 @@ class TradingBotApp:
                             self._cli_chat_input += key
                             self._cli_history_index = None
                             self._cli_chat_status = "Typing..."
+                return
+
+            if _termios is not None and self._live_dashboard_active:
+                # ── Linux: line-buffered input (typed chars echo, Rich overwrites on refresh) ──
+                while not self._shutdown_event.is_set():
+                    try:
+                        line = sys.stdin.readline()
+                    except EOFError:
+                        break
+                    except OSError:
+                        time.sleep(2)
+                        continue
+                    if not line:
+                        time.sleep(0.1)
+                        continue
+                    raw_command = line.strip()
+                    if not raw_command:
+                        continue
+                    result = self._submit_cli_chat_command(raw_command)
+                    if result:
+                        logger.info("[CLI] %s", result.replace("\n", "\n[CLI] "))
                 return
 
             while not self._shutdown_event.is_set():
@@ -1357,15 +1928,7 @@ class TradingBotApp:
 
     @staticmethod
     def _format_cli_timestamp(value: Any) -> str:
-        if not value:
-            return "-"
-        if isinstance(value, datetime):
-            return value.strftime("%H:%M:%S")
-        text = str(value)
-        try:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%H:%M:%S")
-        except ValueError:
-            return text
+        return format_bitkub_time(value)
 
     def _sample_api_latency(self, symbol: str) -> Optional[float]:
         now = time.time()
@@ -1465,11 +2028,51 @@ class TradingBotApp:
             return None
         return match.group(1) == "True"
 
-    def _build_cli_signal_alignment(self, trading_pairs: List[str]) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _describe_signal_alignment_status(record: Dict[str, Any], steps: Dict[str, Any]) -> str:
+        data_check = steps.get("Sniper:DataCheck", {})
+        data_check_result = str(data_check.get("result") or "").upper()
+        data_check_reason = str(data_check.get("reason") or "").strip()
+
+        if not record:
+            return "Waiting for first signal flow"
+        if data_check_result == "REJECT" and data_check_reason:
+            return f"Waiting: {data_check_reason}"
+        if data_check_result == "REJECT":
+            return "Waiting for market data"
+        return "Ready"
+
+    @staticmethod
+    def _build_pair_runtime_context(multi_timeframe_status: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, str]]:
+        context: Dict[str, Dict[str, str]] = {}
+        for row in list((multi_timeframe_status or {}).get("pairs") or []):
+            pair = str(row.get("pair") or "").upper()
+            if not pair:
+                continue
+
+            timeframe_rows = list(row.get("timeframes") or [])
+            ready_count = sum(1 for item in timeframe_rows if int(item.get("count", 0) or 0) > 0)
+            total_count = len(timeframe_rows)
+            latest_raw = next((item.get("latest") for item in reversed(timeframe_rows) if item.get("latest")), None)
+
+            context[pair] = {
+                "tf_ready": f"{ready_count}/{total_count}" if total_count else "-",
+                "pair_state": "Ready" if bool(row.get("ready")) else "Collecting",
+                "market_update": TradingBotApp._format_cli_timestamp(latest_raw),
+            }
+        return context
+
+    def _build_cli_signal_alignment(
+        self,
+        trading_pairs: List[str],
+        multi_timeframe_status: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         flow = get_latest_signal_flow_snapshot()
+        pair_runtime_context = self._build_pair_runtime_context(multi_timeframe_status)
         rows: List[Dict[str, Any]] = []
         for pair in trading_pairs:
             record = flow.get(str(pair or "").upper(), {})
+            runtime_context = pair_runtime_context.get(str(pair or "").upper(), {})
             steps = dict(record.get("steps") or {})
             macro = steps.get("Sniper:MacroTrend", {})
             micro = steps.get("Sniper:MicroTrend", {})
@@ -1499,6 +2102,10 @@ class TradingBotApp:
             elif trend_sell and trigger_sell:
                 final_action = "SELL"
 
+            status = self._describe_signal_alignment_status(record, steps)
+            if status != "Ready" and final_action == "HOLD":
+                final_action = "WAIT"
+
             rows.append(
                 {
                     "symbol": pair,
@@ -1508,7 +2115,11 @@ class TradingBotApp:
                     "trend": "BUY" if trend_buy else ("SELL" if trend_sell else "MIXED"),
                     "trigger_side": "BUY" if trigger_buy else ("SELL" if trigger_sell else "NONE"),
                     "action": final_action,
-                    "updated_at": str(record.get("updated_at") or "-"),
+                    "tf_ready": str(runtime_context.get("tf_ready") or "-"),
+                    "pair_state": str(runtime_context.get("pair_state") or "-"),
+                    "market_update": str(runtime_context.get("market_update") or "-"),
+                    "status": status,
+                    "updated_at": self._format_cli_timestamp(record.get("updated_at")),
                 }
             )
         return rows
@@ -1518,7 +2129,7 @@ class TradingBotApp:
         events: List[Dict[str, str]] = []
 
         for item in list(bot_status.get("recent_trades") or []):
-            timestamp = str(item.get("timestamp") or "-")
+            timestamp = TradingBotApp._format_cli_timestamp(item.get("timestamp"))
             symbol = str(item.get("symbol") or "-")
             side = str(item.get("side") or "-").upper()
             status = str(item.get("status") or "-").upper()
@@ -1533,7 +2144,7 @@ class TradingBotApp:
         for item in list(bot_status.get("balance_events") or []):
             events.append(
                 {
-                    "timestamp": str(item.get("timestamp") or "-"),
+                    "timestamp": TradingBotApp._format_cli_timestamp(item.get("timestamp")),
                     "type": str(item.get("type") or "BAL"),
                     "message": str(item.get("message") or "-")[:120],
                 }
@@ -1598,20 +2209,13 @@ class TradingBotApp:
         trading_pairs = list(bot_status.get("trading_pairs") or self.config.get("data", {}).get("pairs") or [])
         primary_symbol = trading_pairs[0] if trading_pairs else ""
         api_latency_ms = self._sample_api_latency(primary_symbol)
-        now_dt = datetime.now()
+        now_dt = now_bitkub()
         last_market_raw = bot_status.get("last_loop") or portfolio_state.get("timestamp")
-        last_market_dt: Optional[datetime] = None
-        if isinstance(last_market_raw, datetime):
-            last_market_dt = last_market_raw
-        elif last_market_raw:
-            try:
-                last_market_dt = datetime.fromisoformat(str(last_market_raw).replace("Z", "+00:00"))
-            except ValueError:
-                last_market_dt = None
+        last_market_dt = parse_as_bitkub_time(last_market_raw)
         market_age_seconds: Optional[int] = None
         if last_market_dt is not None:
             try:
-                market_age_seconds = max(0, int((now_dt - last_market_dt.replace(tzinfo=None)).total_seconds()))
+                market_age_seconds = max(0, int((now_dt - last_market_dt).total_seconds()))
             except Exception:
                 market_age_seconds = None
         refresh_baseline = max(1.0, float(getattr(self, "_cli_refresh_interval_seconds", 2.0) or 2.0))
@@ -1621,7 +2225,10 @@ class TradingBotApp:
         elif market_age_seconds is not None and market_age_seconds > int(refresh_baseline * 2):
             freshness = "warning"
 
-        signal_alignment = self._build_cli_signal_alignment(trading_pairs)
+        signal_alignment = self._build_cli_signal_alignment(
+            trading_pairs,
+            bot_status.get("multi_timeframe"),
+        )
         recent_events = self._format_cli_recent_events(bot_status, limit=5)
         risk_summary = dict(bot_status.get("risk_summary") or {})
         balance_summary = self._get_cli_balance_summary(portfolio_state)
@@ -1642,6 +2249,7 @@ class TradingBotApp:
         return {
             "bot_name": bot_name or self._cli_bot_name,
             "mode": self._derive_cli_mode(bot_status),
+            "strategy_mode": str(self.config.get("active_strategy_mode") or self.config.get("strategy_mode", {}).get("active") or "standard"),
             "risk_level": risk_level,
             "risk_style": risk_style,
             "positions": positions,
@@ -1649,7 +2257,11 @@ class TradingBotApp:
             "strategies": ", ".join((bot_status.get("strategy_engine") or {}).get("strategies") or []),
             "commands_hint": "Type in footer chat",
             "chat": self._get_cli_chat_snapshot(),
-            "updated_at": datetime.now().strftime("%H:%M:%S"),
+            "ui": {
+                "log_level_filter": str(self._cli_log_level_filter or "INFO"),
+                "footer_mode": str(self._cli_footer_mode or "compact"),
+            },
+            "updated_at": now_bitkub().strftime("%H:%M:%S"),
             "signal_alignment": signal_alignment,
             "recent_events": recent_events,
             "system": {
@@ -1997,6 +2609,10 @@ class TradingBotApp:
             max_risk_per_trade_pct=risk_config.get("max_risk_per_trade_pct", 4.0),
             max_daily_loss_pct=risk_config.get("max_daily_loss_pct", 10.0),
             max_position_per_trade_pct=risk_config.get("max_position_per_trade_pct", 10.0),
+            max_drawdown_threshold_pct=risk_config.get("max_drawdown_threshold_pct", 12.0),
+            drawdown_soft_reduce_start_pct=risk_config.get("drawdown_soft_reduce_start_pct", 5.0),
+            min_drawdown_risk_multiplier=risk_config.get("min_drawdown_risk_multiplier", 0.35),
+            drawdown_block_new_entries=risk_config.get("drawdown_block_new_entries", True),
             stop_loss_pct=risk_config.get("stop_loss_pct", -4.5),
             take_profit_pct=risk_config.get("take_profit_pct", 10.0),
             atr_multiplier=risk_config.get("atr_multiplier", 3.0),
@@ -2006,7 +2622,8 @@ class TradingBotApp:
             min_balance_threshold=self.config.get("portfolio", {}).get("min_balance_threshold", 100.0),
             max_open_positions=risk_config.get("max_open_positions", 3),
             max_daily_trades=risk_config.get("max_daily_trades", 10),
-            cool_down_minutes=risk_config.get("cool_down_minutes", 5)
+            cool_down_minutes=risk_config.get("cool_down_minutes", 5),
+            min_order_amount=self.config.get("trading", {}).get("min_order_amount", 15.0),
         )
         self.risk_manager = RiskManager(risk_params)
         logger.info("ระบบจัดการความเสี่ยงพร้อมทำงาน (Risk Manager initialized)")
@@ -2017,7 +2634,8 @@ class TradingBotApp:
             "min_confidence": strategies_config.get("min_confidence", 0.5),
             "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
             "max_open_positions": risk_config.get("max_open_positions", 3),
-            "max_daily_trades": risk_config.get("max_daily_trades", 10)
+            "max_daily_trades": risk_config.get("max_daily_trades", 10),
+            "scalping": strategies_config.get("scalping", {}),
         })
         logger.info("ระบบสร้างสัญญาณเทรดพร้อมทำงาน (Signal Generator initialized)")
         
@@ -2196,6 +2814,7 @@ class TradingBotApp:
             if command_center:
                 self._live_dashboard_active = True
                 logger.info("CLI dashboard enabled — starting Rich Live display")
+                command_center.start_log_capture()
                 with command_center.create_live() as live:
                     self.start(register_signal_handlers=register_signal_handlers)
                     self._start_cli_command_listener()
@@ -2222,6 +2841,10 @@ class TradingBotApp:
                                     logger.error("CLI render failed %d times — disabling Live dashboard", _render_failure_count)
                                     break
                             next_refresh_at = now + command_center.refresh_interval_seconds
+                        # Auto-restart CLI listener if thread died
+                        if self._cli_command_thread and not self._cli_command_thread.is_alive():
+                            self._cli_command_thread = None
+                            self._start_cli_command_listener()
                         time.sleep(1)
                 # Fallback: if Live dashboard broke, continue running without it
                 if self.bot and self.bot.running and _render_failure_count >= 10:
@@ -2260,7 +2883,10 @@ class TradingBotApp:
             logger.info("Keyboard interrupt received")
         finally:
             self._live_dashboard_active = False
+            if command_center:
+                command_center.stop_log_capture()
             self.stop()
+            self._perform_requested_restart()
 
 
 def main():
@@ -2323,7 +2949,7 @@ def main():
         logger.debug("IP check skipped: %s", exc)
 
     # Create and run app
-    app = TradingBotApp(config)
+    app = TradingBotApp(config, config_path=config_path)
     
     try:
         app.run()
