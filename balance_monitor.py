@@ -107,6 +107,7 @@ class BalanceMonitor:
 
         self.enabled = bool(self.config.get("enabled", True))
         self.poll_interval_seconds = max(5, int(self.config.get("poll_interval_seconds", 30) or 30))
+        self.api_timeout_seconds = max(1.0, float(self.config.get("api_timeout_seconds", 10.0) or 10.0))
         self.persist_path = Path(self.config.get("persist_path") or "balance_monitor_state.json")
         self.thb_min_threshold = _safe_float(
             os.environ.get("THB_MIN_THRESHOLD", self.config.get("thb_min_threshold", 0.0)),
@@ -136,7 +137,6 @@ class BalanceMonitor:
         self._seen_crypto_deposits: set[str] = set()
         self._crypto_withdraw_status: Dict[str, str] = {}
         self._low_balance_alerts: set[str] = set()
-        self._seen_set_max = 5000
         self._history_bootstrapped = False
         self._load_state()
 
@@ -156,6 +156,7 @@ class BalanceMonitor:
             self._thread.join(timeout=10)
             if self._thread.is_alive():
                 logger.warning("BalanceMonitor thread did not stop within 10 seconds")
+        self._thread = None
         logger.info("BalanceMonitor stopped")
 
     def get_state(self) -> Dict[str, Any]:
@@ -165,27 +166,31 @@ class BalanceMonitor:
     def poll_once(self) -> List[BalanceEvent]:
         self._raise_if_stopping()
         balances = self._call_with_retries(
-            lambda: self.api_client.get_balances(force_refresh=True, allow_stale=False),
+            lambda: self.api_client.get_balances(
+                force_refresh=True,
+                allow_stale=False,
+                timeout=self.api_timeout_seconds,
+            ),
             "market.balances",
         )
         self._raise_if_stopping()
         fiat_deposits = self._call_with_retries(
-            lambda: self.api_client.get_fiat_deposit_history(limit=50),
+            lambda: self.api_client.get_fiat_deposit_history(limit=50, timeout=self.api_timeout_seconds),
             "fiat.deposit_history",
         )
         self._raise_if_stopping()
         fiat_withdrawals = self._call_with_retries(
-            lambda: self.api_client.get_fiat_withdraw_history(limit=50),
+            lambda: self.api_client.get_fiat_withdraw_history(limit=50, timeout=self.api_timeout_seconds),
             "fiat.withdraw_history",
         )
         self._raise_if_stopping()
         crypto_deposits = self._call_with_retries(
-            lambda: self.api_client.get_crypto_deposit_history(limit=100),
+            lambda: self.api_client.get_crypto_deposit_history(limit=100, timeout=self.api_timeout_seconds),
             "crypto.deposit_history",
         )
         self._raise_if_stopping()
         crypto_withdrawals = self._call_with_retries(
-            lambda: self.api_client.get_crypto_withdraw_history(limit=100),
+            lambda: self.api_client.get_crypto_withdraw_history(limit=100, timeout=self.api_timeout_seconds),
             "crypto.withdraw_history",
         )
         self._raise_if_stopping()
@@ -228,46 +233,40 @@ class BalanceMonitor:
         self._save_state()
 
         for event in events:
+            if self._stop_event.is_set():
+                break
             self._log_event(event)
+            if self._stop_event.is_set():
+                break
             self._notify_event(event)
+            if self._stop_event.is_set():
+                break
             if self.on_event:
                 try:
                     self.on_event(event, self.get_state())
                 except Exception as exc:
                     logger.error("Balance event callback failed: %s", exc, exc_info=True)
+                if self._stop_event.is_set():
+                    break
 
-        self._trim_seen_sets()
         return events
 
-    def _trim_seen_sets(self) -> None:
-        """Prevent unbounded growth of deduplication sets."""
-        cap = self._seen_set_max
-        for s in (self._seen_fiat_deposits, self._seen_fiat_withdrawals, self._seen_crypto_deposits):
-            if len(s) > cap:
-                excess = len(s) - cap
-                # Remove arbitrary `excess` items (oldest are unknowable in a set)
-                it = iter(s)
-                to_remove = [next(it) for _ in range(excess)]
-                s.difference_update(to_remove)
-        if len(self._crypto_withdraw_status) > cap:
-            excess = len(self._crypto_withdraw_status) - cap
-            keys = list(self._crypto_withdraw_status.keys())[:excess]
-            for k in keys:
-                del self._crypto_withdraw_status[k]
-
     def _monitor_loop(self) -> None:
-        while self.running and not self._stop_event.is_set():
-            started_at = time.time()
-            try:
-                self.poll_once()
-            except _MonitorStopping:
-                break
-            except Exception as exc:
-                logger.error("Balance monitor poll failed: %s", exc, exc_info=True)
-            elapsed = time.time() - started_at
-            sleep_for = max(1.0, self.poll_interval_seconds - elapsed)
-            if self._stop_event.wait(sleep_for):
-                break
+        try:
+            while self.running and not self._stop_event.is_set():
+                started_at = time.time()
+                try:
+                    self.poll_once()
+                except _MonitorStopping:
+                    break
+                except Exception as exc:
+                    logger.error("Balance monitor poll failed: %s", exc, exc_info=True)
+                elapsed = time.time() - started_at
+                sleep_for = max(1.0, self.poll_interval_seconds - elapsed)
+                if self._stop_event.wait(sleep_for):
+                    break
+        finally:
+            self.running = False
 
     def _call_with_retries(self, func: Callable[[], Any], label: str) -> Any:
         last_error: Optional[Exception] = None

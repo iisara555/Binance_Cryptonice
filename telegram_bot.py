@@ -336,8 +336,8 @@ class TelegramBotHandler:
                 tick = get_latest_ticker(pair)
                 if tick and getattr(tick, "last", None) is not None:
                     return float(tick.last)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Telegram cached price lookup failed for %s: %s", pair, exc)
 
         cache = getattr(self.app_ref, "_cli_price_cache", {}) or {}
         cached = cache.get(pair)
@@ -621,8 +621,8 @@ class TelegramBotHandler:
         try:
             if hasattr(self.app_ref, "alert_sender") and self.app_ref.alert_sender:
                 self.app_ref.alert_sender(summary)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Emergency kill alert callback failed: %s", exc)
 
     def _execute_resume(self, msg: Dict[str, Any]):
         """Re-enable trading."""

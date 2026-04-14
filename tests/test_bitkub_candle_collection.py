@@ -156,3 +156,90 @@ def test_bitkub_collector_collect_multi_timeframe_uses_detail_results(monkeypatc
 
     assert results == {"1m": 1, "5m": 5, "15m": 15}
     assert collector._log_ohlc_collection_result.call_count == 3
+
+
+def test_bitkub_collector_set_pairs_warms_new_pairs_when_running(monkeypatch):
+    collector = BitkubCollector.__new__(BitkubCollector)
+    collector._pairs_lock = Mock()
+    collector._pairs_lock.__enter__ = Mock(return_value=collector._pairs_lock)
+    collector._pairs_lock.__exit__ = Mock(return_value=False)
+    collector.pairs = ["THB_BTC"]
+    collector.running = True
+    collector.multi_timeframe_enabled = True
+    collector._warm_pairs_multi_timeframe = Mock()
+
+    BitkubCollector.set_pairs(collector, ["THB_BTC", "THB_SOL"])
+
+    assert collector.pairs == ["THB_BTC", "THB_SOL"]
+    collector._warm_pairs_multi_timeframe.assert_called_once_with(["THB_SOL"])
+
+
+def test_bitkub_collector_start_primes_multi_timeframe_before_background_thread(monkeypatch):
+    collector = BitkubCollector.__new__(BitkubCollector)
+    collector.running = False
+    collector.multi_timeframe_enabled = True
+    collector._warm_pairs_multi_timeframe = Mock()
+    collector._collector_loop = Mock()
+    collector._thread = None
+
+    started = {}
+
+    class _FakeThread:
+        def __init__(self, target=None, daemon=None):
+            started["target"] = target
+            started["daemon"] = daemon
+
+        def start(self):
+            started["started"] = True
+
+    monkeypatch.setattr(data_collector.threading, "Thread", _FakeThread)
+
+    BitkubCollector.start(collector, blocking=False)
+
+    assert collector.running is True
+    collector._warm_pairs_multi_timeframe.assert_called_once_with()
+    assert started["target"] == collector._collector_loop
+    assert started["daemon"] is True
+    assert started["started"] is True
+
+
+def test_bitkub_collector_warm_pairs_uses_dedicated_pair_executor(monkeypatch):
+    collector = BitkubCollector.__new__(BitkubCollector)
+    collector.multi_timeframe_enabled = True
+    collector.multi_timeframes = ["1m", "5m"]
+    collector._last_multi_timeframe_results = {}
+    collector.multi_timeframe_interval = 60
+
+    seen_workers = []
+
+    class _ImmediatePairExecutor:
+        def __init__(self, max_workers=None):
+            seen_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, func, *args, **kwargs):
+            future = Future()
+            try:
+                future.set_result(func(*args, **kwargs))
+            except Exception as exc:  # pragma: no cover
+                future.set_exception(exc)
+            return future
+
+    monkeypatch.setattr(data_collector, "ThreadPoolExecutor", _ImmediatePairExecutor)
+    collector.collect_multi_timeframe = Mock(
+        side_effect=lambda pair, timeframes: {tf: len(pair) for tf in timeframes}
+    )
+
+    results = BitkubCollector._warm_pairs_multi_timeframe(collector, ["THB_BTC", "THB_SOL"])
+
+    assert seen_workers == [2]
+    assert results == {
+        "THB_BTC": {"1m": 7, "5m": 7},
+        "THB_SOL": {"1m": 7, "5m": 7},
+    }
+    assert collector._last_multi_timeframe_results == results

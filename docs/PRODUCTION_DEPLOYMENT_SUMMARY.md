@@ -6,6 +6,8 @@
 
 เอกสารฉบับนี้แทนที่ summary รุ่นเก่าที่อ้าง dashboard, frontend, `start.py` และ AI/ML runtime ซึ่งไม่มีอยู่ใน repo ปัจจุบันแล้ว
 
+ณ วันที่ 14 เมษายน 2569 ระบบนี้ผ่าน final verification รอบล่าสุดแล้ว ทั้งใน local suite และ live VPS runtime โดยดูรายละเอียดเต็มได้ที่ [FINAL_VERIFICATION_20260414_TH.md](FINAL_VERIFICATION_20260414_TH.md)
+
 ## Production Scope ที่ยังมีอยู่จริง
 
 - Strategy-based signal generation
@@ -76,6 +78,14 @@ $env:BOT_STARTUP_TEST_MODE = "1"
 - bot health does not report `status: degraded` for real live deployment
 - `LIVE_TRADING` is enabled intentionally, not by accident
 
+## Latest Verified Evidence
+
+- full repo tests ล่าสุดผ่าน `333 passed, 11 skipped, 2 warnings`
+- post-fix CLI lifecycle regression tests ผ่าน `33 passed`
+- broader integration หลัง fix ผ่าน `84 passed`
+- live VPS health ล่าสุดอยู่ที่ `healthy: true`, `auth_degraded.active: false`, `tradable_pairs` ครบ 9 คู่
+- live close-by-id path ถูกพิสูจน์จริงหลัง redeploy และจบด้วย `Active orders: none` และ `open_positions: 0`
+
 ## Important Operational Notes
 
 - Runtime path resolution is now project-root based, so folder rename or drive move is supported for standalone usage
@@ -86,6 +96,7 @@ $env:BOT_STARTUP_TEST_MODE = "1"
 ## Recommended Docs
 
 - [README.md](../README.md)
+- [FINAL_VERIFICATION_20260414_TH.md](FINAL_VERIFICATION_20260414_TH.md)
 - [DAILY_QUICK_START_TH.md](DAILY_QUICK_START_TH.md)
 - [WINDOWS_ALWAYS_ON_SETUP_TH.md](WINDOWS_ALWAYS_ON_SETUP_TH.md)
 - [VPS_PREFLIGHT_CHECKLIST.md](VPS_PREFLIGHT_CHECKLIST.md)

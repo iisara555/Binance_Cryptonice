@@ -5,11 +5,10 @@ Full end-to-end integration tests for the trading system.
 Tests signal → risk → execution flow with mocked API responses.
 """
 import asyncio
-import io
+from decimal import Decimal
 import logging
 import json
 import requests
-import sys
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -22,7 +21,7 @@ from rich.console import Console
 from alerts import AlertLevel, AlertSystem, TelegramSender
 from signal_generator import SignalGenerator, AggregatedSignal
 from risk_management import RiskManager, RiskConfig
-from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult, OrderStatus
+from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult, OrderStatus, BITKUB_FEE_PCT
 from api_client import BitkubAPIError, BitkubClient
 from dynamic_coin_config import JsonCoinWhitelistRepository
 from telegram_bot import TelegramBotHandler
@@ -198,6 +197,61 @@ class TestFullIntegrationFlow:
         assert applied["trading"]["timeframe"] == "15m"
         assert applied["strategies"]["enabled"] == ["trend_following", "mean_reversion", "breakout"]
         assert applied["strategies"]["min_strategies_agree"] == 2
+
+    def test_strategy_mode_profile_scalping_respects_configured_primary_timeframe(self):
+        config = {
+            "trading": {"timeframe": "15m"},
+            "strategies": {"enabled": ["scalping"]},
+            "strategy_mode": {
+                "active": "scalping",
+                "scalping": {
+                    "primary_timeframe": "15m",
+                    "confirm_timeframe": "15m",
+                    "trend_timeframe": "1h",
+                },
+            },
+        }
+
+        applied = _apply_strategy_mode_profile(config)
+
+        assert applied["active_strategy_mode"] == "scalping"
+        assert applied["trading"]["timeframe"] == "15m"
+        assert applied["strategies"]["scalping"]["primary_timeframe"] == "15m"
+
+    def test_strategy_mode_profile_scalping_applies_larger_position_cap(self):
+        config = {
+            "trading": {"timeframe": "15m"},
+            "risk": {
+                "max_position_per_trade_pct": 8.0,
+                "max_risk_per_trade_pct": 1.0,
+            },
+            "auto_trader": {
+                "position_sizing": {
+                    "max_position_pct": 8.0,
+                    "risk_per_trade_pct": 0.75,
+                }
+            },
+            "strategies": {"enabled": ["scalping"]},
+            "strategy_mode": {
+                "active": "scalping",
+                "scalping": {
+                    "primary_timeframe": "15m",
+                    "confirm_timeframe": "15m",
+                    "trend_timeframe": "1h",
+                    "max_position_per_trade_pct": 15.0,
+                    "max_risk_per_trade_pct": 1.0,
+                    "position_risk_per_trade_pct": 0.75,
+                    "position_size_cap_pct": 15.0,
+                },
+            },
+        }
+
+        applied = _apply_strategy_mode_profile(config)
+
+        assert applied["risk"]["max_position_per_trade_pct"] == 15.0
+        assert applied["risk"]["max_risk_per_trade_pct"] == 1.0
+        assert applied["auto_trader"]["position_sizing"]["max_position_pct"] == 15.0
+        assert applied["auto_trader"]["position_sizing"]["risk_per_trade_pct"] == 0.75
 
     def test_enable_startup_auth_degraded_mode_forces_safe_config(self):
         """Startup auth failures should force a safe, non-trading runtime config."""
@@ -471,25 +525,63 @@ class TestFullIntegrationFlow:
         assert app.config['data']['pairs'] == ['THB_BTC', 'THB_ETH', 'THB_DOGE']
         assert app.telegram_handler.pairs == ['THB_BTC', 'THB_ETH', 'THB_DOGE']
 
+    def test_refresh_runtime_pairs_honors_enabled_whitelist_assets(self, tmp_path):
+        whitelist_path = tmp_path / 'coin_whitelist.json'
+        whitelist_path.write_text(json.dumps({
+            'version': 1,
+            'assets': [
+                {'symbol': 'BTC', 'enabled': True},
+                {'symbol': 'SOL', 'enabled': True},
+                {'symbol': 'LINK', 'enabled': True},
+            ],
+        }), encoding='utf-8')
+
+        client = Mock()
+        client.get_balances.return_value = {
+            'THB': {'available': 500.0, 'reserved': 0.0},
+            'BTC': {'available': 0.0, 'reserved': 0.0},
+            'SOL': {'available': 0.0, 'reserved': 0.0},
+            'LINK': {'available': 0.0, 'reserved': 0.0},
+        }
+        client.get_symbols.return_value = [
+            {'symbol': 'BTC_THB'},
+            {'symbol': 'SOL_THB'},
+            {'symbol': 'LINK_THB'},
+        ]
+
+        pairs = resolve_runtime_trading_pairs(
+            client,
+            data_config={
+                'hybrid_dynamic_coin_config': {
+                    'whitelist_json_path': str(whitelist_path),
+                    'min_quote_balance_thb': 100.0,
+                },
+            },
+            project_root=tmp_path,
+        )
+
+        assert pairs == ['THB_BTC', 'THB_SOL', 'THB_LINK']
+
     def test_start_skips_private_bootstrap_when_auth_degraded(self):
         """The bot should not reconcile or bootstrap live balances in degraded auth mode."""
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.running = False
         bot._auth_degraded = True
         bot._auth_degraded_reason = 'auth error 5'
+        bot._candle_retention_enabled = False
+        bot._candle_retention_run_on_startup = False
+        bot._last_candle_retention_cleanup_at = 0
         bot._reconcile_on_startup = Mock()
         bot.executor = Mock()
         bot.executor.sync_open_orders_from_db = Mock()
         bot.executor.get_open_orders.return_value = []
         bot._bootstrap_held_coin_history = Mock()
+        bot._bootstrap_held_positions = Mock()
+        bot._balance_monitor = None
         bot._state_machine_enabled = True
         bot._state_manager = Mock()
         bot._state_manager.sync_in_position_states = Mock()
         bot._main_loop = Mock()
-        bot._candle_retention_enabled = False
-        bot._candle_retention_run_on_startup = False
-        bot._last_candle_retention_cleanup_at = 0
-        bot._bootstrap_held_positions = Mock()
 
         fake_thread = Mock()
         with patch('trading_bot.threading.Thread', return_value=fake_thread):
@@ -566,13 +658,13 @@ class TestFullIntegrationFlow:
         bot._pending_decisions_lock = threading.Lock()
         bot._executed_today = []
         bot._ws_enabled = False
+        bot._pause_state_lock = threading.Lock()
+        bot._trading_paused = False
+        bot._pause_reason = ''
+        bot._monitoring = None
         bot.risk_manager = Mock()
         bot.risk_manager.get_risk_summary.return_value = {'ok': True}
         bot._get_portfolio_state = Mock(return_value={'balance': 0.0})
-        bot._pause_state_lock = threading.Lock()
-        bot._paused = False
-        bot._pause_reason = ''
-        bot._reconcile_in_progress = False
 
         status = TradingBotOrchestrator.get_status(bot)
 
@@ -582,6 +674,123 @@ class TestFullIntegrationFlow:
             'public_only': True,
         }
         assert status['mode'] == 'dry_run'
+
+    def test_get_status_lightweight_avoids_heavy_refresh_paths(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._ws_client = None
+        bot.trading_pairs = ['THB_BTC']
+        bot.trading_pair = 'THB_BTC'
+        bot.running = True
+        bot.mode = BotMode.DRY_RUN
+        bot.signal_source = SignalSource.STRATEGY
+        bot.ml_enabled = False
+        bot.paused = False
+        bot.pause_reason = ''
+        bot._reconciling_orders = False
+        bot._pause_state_lock = threading.Lock()
+        bot._auth_degraded = False
+        bot._auth_degraded_reason = ''
+        bot.interval_seconds = 60
+        bot._loop_count = 1
+        bot._last_loop_time = None
+        bot._pending_decisions = []
+        bot._pending_decisions_lock = threading.Lock()
+        bot._executed_today = []
+        bot._ws_enabled = False
+        bot._last_mtf_status = {}
+        bot._mtf_confirmation_required = False
+        bot.mtf_enabled = True
+        bot.mtf_timeframes = ['1h']
+        bot.timeframe = '1h'
+        bot.enabled_strategies = []
+        bot.executor = Mock()
+        bot.executor.get_open_orders.return_value = []
+        bot.risk_manager = Mock()
+        bot.risk_manager.get_risk_summary.return_value = {'ok': True}
+        bot._get_portfolio_state = Mock(return_value={'balance': 321.0, 'timestamp': None, 'positions': []})
+        bot._get_dashboard_multi_timeframe_status = Mock(return_value={'enabled': True, 'pairs': []})
+
+        status = TradingBotOrchestrator.get_status(bot, lightweight=True)
+
+        bot._get_portfolio_state.assert_called_once_with(allow_refresh=False)
+        assert bot._get_dashboard_multi_timeframe_status.call_count == 2
+        assert status['multi_timeframe'] == {'enabled': True, 'pairs': []}
+        assert status['tradable_pairs'] == ['THB_BTC']
+
+    def test_filter_pairs_by_candle_readiness_keeps_only_ready_pairs(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.mtf_enabled = True
+        bot._last_candle_readiness_skipped = None
+        bot._get_dashboard_multi_timeframe_status = Mock(return_value={
+            'pairs': [
+                {'pair': 'THB_BTC', 'ready': True},
+                {'pair': 'THB_SOL', 'ready': False},
+            ]
+        })
+
+        filtered = TradingBotOrchestrator._filter_pairs_by_candle_readiness(bot, ['THB_BTC', 'THB_SOL'])
+
+        assert filtered == ['THB_BTC']
+
+    def test_build_multi_timeframe_status_reports_waiting_candles_per_pair(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.mtf_enabled = True
+        bot.mtf_timeframes = ['1m', '5m']
+        bot.timeframe = '5m'
+        bot._mtf_confirmation_required = False
+        bot._last_mtf_status = {}
+        bot.trading_pairs = ['THB_BTC', 'THB_SOL']
+
+        cursor = Mock()
+        cursor.fetchone.side_effect = [
+            (35, '2026-04-13 12:00:00'),
+            (35, '2026-04-13 12:00:00'),
+            (10, '2026-04-13 11:59:00'),
+            (20, '2026-04-13 11:55:00'),
+        ]
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        db = Mock()
+        db.get_connection.return_value = conn
+        bot.db = db
+
+        status = TradingBotOrchestrator._build_multi_timeframe_status(bot)
+
+        assert status['required_candles'] == 35
+        assert status['pairs'][0]['pair'] == 'THB_BTC'
+        assert status['pairs'][0]['ready'] is True
+        assert status['pairs'][0]['waiting_candles'] == 0
+        assert status['pairs'][1]['pair'] == 'THB_SOL'
+        assert status['pairs'][1]['ready'] is False
+        assert status['pairs'][1]['waiting_candles'] == 40
+        assert status['pairs'][1]['waiting_summary'] == '1m:25, 5m:15'
+        assert status['pairs'][1]['timeframes'][0]['waiting_candles'] == 25
+        assert status['pairs'][1]['timeframes'][1]['waiting_candles'] == 15
+
+    def test_run_iteration_skips_pairs_without_candle_readiness(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._auth_degraded = False
+        bot.api_client = Mock()
+        bot.api_client._clock = None
+        bot.api_client.is_circuit_open.return_value = False
+        bot.api_client.check_clock_sync.return_value = True
+        bot._reconcile_tracked_positions_with_balance_state = Mock()
+        bot._is_paused = Mock(return_value=(False, ''))
+        bot._trading_disabled = threading.Event()
+        bot._state_machine_enabled = False
+        bot._check_positions_for_sl_tp = Mock()
+        bot._advance_managed_trade_states = Mock()
+        bot._get_trading_pairs = Mock(return_value=['THB_BTC', 'THB_SOL'])
+        bot._held_coins_only = False
+        bot._last_portfolio_guard_skipped = ()
+        bot._last_candle_readiness_skipped = None
+        bot._filter_pairs_by_candle_readiness = Mock(return_value=['THB_BTC'])
+        bot._process_pair_iteration = Mock()
+
+        TradingBotOrchestrator._run_iteration(bot)
+
+        bot._filter_pairs_by_candle_readiness.assert_called_once_with(['THB_BTC', 'THB_SOL'], allow_refresh=True)
+        bot._process_pair_iteration.assert_called_once_with('THB_BTC')
 
     def test_telegram_status_shows_auth_degraded_banner_without_balance_call(self, tmp_path):
         """Telegram /status should report degraded mode and avoid private balance calls."""
@@ -951,8 +1160,104 @@ class TestFullIntegrationFlow:
         alert_args, alert_kwargs = bot._send_alert.call_args
         assert '<b>Position Closed</b>' in alert_args[0]
         assert 'BTC' in alert_args[0]
+        assert 'Buy <code>100.00</code> THB' in alert_args[0]
+        assert 'Sell <code>120.00</code> THB' in alert_args[0]
         assert '+19.70%' in alert_args[0]
         assert alert_kwargs == {'to_telegram': True}
+
+    def test_report_completed_exit_preserves_expected_fee_and_pnl_arithmetic(self):
+        db = Mock()
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.db = db
+        bot._log_filled_order = Mock()
+        bot._format_exit_alert = Mock(return_value="alert")
+        bot._send_alert = Mock()
+
+        snapshot = TradeStateSnapshot(
+            symbol='THB_BTC',
+            state=TradeLifecycleState.PENDING_SELL,
+            side='buy',
+            entry_order_id='buy-precise-1',
+            exit_order_id='sell-precise-1',
+            active_order_id='sell-precise-1',
+            requested_amount=0.12345678,
+            filled_amount=0.12345678,
+            entry_price=10000.0,
+            exit_price=0.0,
+            stop_loss=9800.0,
+            take_profit=11200.0,
+            total_entry_cost=1234.5678,
+            signal_confidence=0.0,
+            signal_source='strategy',
+            trigger='TP',
+            notes='price_source=order',
+            opened_at=datetime.utcnow() - timedelta(minutes=3),
+        )
+
+        bot._report_completed_exit(snapshot, exit_price=11111.11, price_source='order')
+
+        fee_rate = Decimal(str(BITKUB_FEE_PCT))
+        amount = Decimal('0.12345678')
+        entry_cost = Decimal('1234.5678')
+        exit_price = Decimal('11111.11')
+        expected_entry_fee = entry_cost * fee_rate
+        expected_gross_exit = exit_price * amount
+        expected_exit_fee = expected_gross_exit * fee_rate
+        expected_total_fees = expected_entry_fee + expected_exit_fee
+        expected_net_exit = expected_gross_exit - expected_exit_fee
+        expected_net_pnl = expected_net_exit - entry_cost
+        expected_net_pnl_pct = (expected_net_pnl / entry_cost) * Decimal('100')
+
+        db.log_closed_trade.assert_called_once()
+        trade_log = db.log_closed_trade.call_args.args[0]
+        assert trade_log['entry_fee'] == pytest.approx(float(expected_entry_fee))
+        assert trade_log['gross_exit'] == pytest.approx(float(expected_gross_exit))
+        assert trade_log['exit_fee'] == pytest.approx(float(expected_exit_fee))
+        assert trade_log['total_fees'] == pytest.approx(float(expected_total_fees))
+        assert trade_log['net_pnl'] == pytest.approx(float(expected_net_pnl))
+        assert trade_log['net_pnl_pct'] == pytest.approx(float(expected_net_pnl_pct))
+        bot._log_filled_order.assert_called_once()
+        assert bot._log_filled_order.call_args.kwargs['fee'] == pytest.approx(float(expected_exit_fee))
+        bot._send_alert.assert_called_once_with('alert', to_telegram=True)
+        format_args = bot._format_exit_alert.call_args.args
+        assert format_args[2] == pytest.approx(float(amount))
+        assert format_args[5] == pytest.approx(float(entry_cost))
+        assert format_args[6] == pytest.approx(float(expected_gross_exit))
+
+    def test_log_filled_order_persists_both_order_and_trade_rows(self):
+        db = Mock()
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.db = db
+        ts = datetime.utcnow()
+
+        TradingBotOrchestrator._log_filled_order(
+            bot,
+            'THB_BTC',
+            'buy',
+            0.1234,
+            2_300_000.0,
+            fee=12.34,
+            timestamp=ts,
+        )
+
+        db.insert_order.assert_called_once_with(
+            pair='THB_BTC',
+            side='buy',
+            quantity=0.1234,
+            price=2_300_000.0,
+            status='filled',
+            order_type='limit',
+            fee=12.34,
+            timestamp=ts,
+        )
+        db.insert_trade.assert_called_once_with(
+            pair='THB_BTC',
+            side='buy',
+            quantity=0.1234,
+            price=2_300_000.0,
+            fee=12.34,
+            timestamp=ts,
+        )
 
     def test_resolve_fill_amount_normalizes_pending_buy_thb_sized_fill(self):
         """Pending BUY fills reported as THB spend should be converted to coin quantity."""
@@ -1459,59 +1764,6 @@ class TestCliSnapshot:
             {"asset": "THB", "amount": 1_750.0, "value_thb": 1_750.0},
         ]
 
-    def test_cli_balance_summary_avoids_rest_balance_calls_during_live_dashboard(self):
-        app = TradingBotApp.__new__(TradingBotApp)
-        app.config = {"auth_degraded": False}
-        app._live_dashboard_active = True
-        app._cli_balance_summary_cache = None
-        app.api_client = Mock()
-        app.api_client.get_balances.side_effect = AssertionError("REST balances should not be used in live dashboard")
-        app.bot = Mock()
-        app.bot._balance_monitor = Mock()
-        app.bot.get_balance_state.return_value = {
-            "balances": {
-                "THB": {"available": 500.0, "reserved": 0.0},
-                "BTC": {"available": 0.01, "reserved": 0.0},
-            }
-        }
-        app._get_cli_price = Mock(side_effect=lambda symbol, allow_rest_fallback=True: {
-            "THB_BTC": 2_000_000.0,
-        }.get(symbol))
-
-        summary = TradingBotApp._get_cli_balance_summary(app, {"balance": 500.0})
-
-        assert summary["total_balance"] == pytest.approx(20_500.0)
-        app.api_client.get_balances.assert_not_called()
-
-    def test_cli_command_center_mutes_and_restores_console_handlers(self):
-        app = Mock()
-        command_center = CLICommandCenter(app)
-        root = logging.getLogger()
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(logging.INFO)
-        file_like_handler = logging.StreamHandler(io.StringIO())
-        file_like_handler.setLevel(logging.INFO)
-        original_console_level = console_handler.level
-        original_file_like_level = file_like_handler.level
-        root.addHandler(console_handler)
-        root.addHandler(file_like_handler)
-
-        try:
-            command_center.start_log_capture()
-
-            assert console_handler.level > logging.CRITICAL
-            assert file_like_handler.level == original_file_like_level
-
-            command_center.stop_log_capture()
-
-            assert console_handler.level == original_console_level
-            assert file_like_handler.level == original_file_like_level
-        finally:
-            root.removeHandler(console_handler)
-            root.removeHandler(file_like_handler)
-            if command_center._log_handler is not None:
-                command_center.stop_log_capture()
-
     def test_cli_snapshot_exposes_total_balance_field(self):
         app = TradingBotApp.__new__(TradingBotApp)
         app.config = {
@@ -1552,6 +1804,90 @@ class TestCliSnapshot:
             "THB 500.00 = 500.00 THB (2.44%)",
         ]
         assert snapshot["system"]["trade_count"] == "3"
+
+    def test_sample_api_latency_still_probes_in_live_dashboard_mode(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {"auth_degraded": False}
+        app.api_client = Mock()
+        app.api_client.get_ticker.return_value = {"last": 1.0}
+        app._live_dashboard_active = True
+        app._api_latency_ms = None
+        app._api_latency_checked_at = 0.0
+        app._api_latency_cache_seconds = 15.0
+
+        latency = TradingBotApp._sample_api_latency(app, "THB_BTC")
+
+        assert latency is not None
+        assert latency >= 0.0
+        app.api_client.get_ticker.assert_called_once_with("THB_BTC")
+
+    def test_cli_balance_summary_falls_back_to_tracked_position_price_when_live_price_missing(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {"auth_degraded": False}
+        app.api_client = Mock()
+        app.api_client.get_balances.return_value = {
+            "THB": {"available": 500.0, "reserved": 0.0},
+            "BTC": {"available": 0.01, "reserved": 0.0},
+        }
+        app.executor = Mock()
+        app.executor.get_open_orders.return_value = [
+            {"symbol": "THB_BTC", "entry_price": 2_100_000.0, "filled_price": 0.0}
+        ]
+        app._get_cli_price = Mock(return_value=None)
+
+        summary = TradingBotApp._get_cli_balance_summary(app, {"balance": 500.0})
+
+        assert summary["total_balance"] == pytest.approx(21_500.0)
+        assert summary["breakdown"] == [
+            {"asset": "BTC", "amount": 0.01, "value_thb": 21_000.0},
+            {"asset": "THB", "amount": 500.0, "value_thb": 500.0},
+        ]
+
+    def test_cli_snapshot_falls_back_to_tracked_position_price_for_current_price(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {
+            "mode": "full_auto",
+            "simulate_only": False,
+            "read_only": False,
+            "auth_degraded": False,
+            "data": {"pairs": ["THB_BTC"]},
+        }
+        app._cli_bot_name = "Test Bot"
+        app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
+        app._sample_api_latency = Mock(return_value=25.0)
+        app._format_cli_timestamp = Mock(return_value="12:34:56")
+        app._get_cli_price = Mock(return_value=None)
+        app.api_client = Mock()
+        app.api_client.get_balances.return_value = {
+            "THB": {"available": 500.0, "reserved": 0.0},
+            "BTC": {"available": 0.01, "reserved": 0.0},
+        }
+        app.executor = Mock()
+        app.executor.get_open_orders.return_value = [
+            {
+                "symbol": "THB_BTC",
+                "side": "buy",
+                "entry_price": 2_100_000.0,
+                "stop_loss": 2_000_000.0,
+                "take_profit": 2_200_000.0,
+            }
+        ]
+        app.bot = Mock()
+        app.bot.get_status.return_value = {
+            "mode": "full_auto",
+            "trading_pairs": ["THB_BTC"],
+            "strategy_engine": {"strategies": ["trend_following"]},
+            "risk_summary": {"trades_today": 3},
+            "last_loop": None,
+            "multi_timeframe": {"pairs": []},
+        }
+        app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+
+        snapshot = TradingBotApp.get_cli_snapshot(app)
+
+        # Positions panel must not use entry_price as a current-price fallback.
+        assert snapshot["positions"][0]["current_price"] is None
+        assert snapshot["system"]["total_balance"] == "21,500.00 THB"
 
     def test_format_cli_timestamp_converts_runtime_utc_to_bitkub_time(self):
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00") == "22:35:00"
@@ -1597,14 +1933,14 @@ class TestCliUi:
         assert len(eth_text.spans) == 2
         assert len(xrp_text.spans) == 2
         assert len(thb_text.spans) == 2
-        assert btc_text.spans[0].style == "bold bright_green"
-        assert btc_text.spans[1].style == "bright_black"
-        assert eth_text.spans[0].style == "bold cyan"
-        assert eth_text.spans[1].style == "bright_black"
-        assert xrp_text.spans[0].style == "bold white"
-        assert xrp_text.spans[1].style == "bright_black"
-        assert thb_text.spans[0].style == "bold yellow"
-        assert thb_text.spans[1].style == "bright_black"
+        assert btc_text.spans[0].style == f"bold {CLICommandCenter._GREEN}"
+        assert btc_text.spans[1].style == CLICommandCenter._DIM
+        assert eth_text.spans[0].style == f"bold {CLICommandCenter._MINT}"
+        assert eth_text.spans[1].style == CLICommandCenter._DIM
+        assert xrp_text.spans[0].style == f"bold {CLICommandCenter._WHITE}"
+        assert xrp_text.spans[1].style == CLICommandCenter._DIM
+        assert thb_text.spans[0].style == f"bold {CLICommandCenter._EMBER}"
+        assert thb_text.spans[1].style == CLICommandCenter._DIM
 
     def test_allocation_bar_text_uses_threshold_styles(self):
         btc_bar = CLICommandCenter._allocation_bar_text(97.56, asset="BTC")
@@ -1616,10 +1952,10 @@ class TestCliUi:
         assert eth_bar.plain == "[#####---------------] 24.39%"
         assert xrp_bar.plain == "[#-------------------]  1.22%"
         assert thb_bar.plain == "[#-------------------]  2.44%"
-        assert btc_bar.spans[1].style == "bold bright_green"
-        assert eth_bar.spans[1].style == "bold cyan"
-        assert xrp_bar.spans[2].style == "bright_black"
-        assert thb_bar.spans[1].style == "bold yellow"
+        assert btc_bar.spans[1].style == f"bold {CLICommandCenter._GREEN}"
+        assert eth_bar.spans[1].style == f"bold {CLICommandCenter._MINT}"
+        assert xrp_bar.spans[2].style == CLICommandCenter._DIM
+        assert thb_bar.spans[1].style == f"bold {CLICommandCenter._EMBER}"
 
     def test_system_status_panel_keeps_only_core_metrics(self):
         app = Mock()
@@ -1635,6 +1971,7 @@ class TestCliUi:
             "system": {
                 "last_market_update": "12:34:00",
                 "api_latency": "15 ms",
+                "candle_readiness": "3/4 ready (1 lagging)",
                 "available_balance": "500.00 THB",
                 "total_balance": "20,500.00 THB",
                 "balance_breakdown": ["BTC 0.01000000 = 20,000.00 THB (97.56%)", "THB 500.00 = 500.00 THB (2.44%)"],
@@ -1652,7 +1989,55 @@ class TestCliUi:
         assert "Portfolio Breakdown" not in rendered
         assert "Total Balance" in rendered
         assert "Today's Trades" in rendered
+        assert "Candle Readiness" in rendered
         assert "BTC 0.01000000 = 20,000.00 THB (97.56%)" not in rendered
+
+    def test_cli_candle_readiness_summary_reports_ready_and_lagging_pairs(self):
+        summary = TradingBotApp._summarize_cli_candle_readiness(
+            {
+                "pairs": [
+                    {"pair": "THB_BTC", "ready": True},
+                    {"pair": "THB_ETH", "ready": True},
+                    {"pair": "THB_SOL", "ready": False},
+                ]
+            }
+        )
+
+        assert summary == "2/3 ready (1 lagging)"
+
+    def test_cli_candle_waiting_summary_reports_missing_counts(self):
+        summary = TradingBotApp._summarize_cli_candle_waiting(
+            {
+                'pairs': [
+                    {'pair': 'THB_BTC', 'ready': True, 'waiting_summary': 'ready', 'waiting_candles': 0},
+                    {'pair': 'THB_SOL', 'ready': False, 'waiting_summary': '1m:25, 5m:15', 'waiting_candles': 40},
+                    {'pair': 'THB_XRP', 'ready': False, 'waiting_summary': '15m:7', 'waiting_candles': 7},
+                ]
+            }
+        )
+
+        assert summary == 'SOL 1m:25, 5m:15; XRP 15m:7'
+
+    def test_build_pair_runtime_context_shows_collecting_waiting_summary(self):
+        context = TradingBotApp._build_pair_runtime_context(
+            {
+                'pairs': [
+                    {
+                        'pair': 'THB_SOL',
+                        'ready': False,
+                        'waiting_summary': '1m:25, 5m:15',
+                        'timeframes': [
+                            {'timeframe': '1m', 'count': 10, 'waiting_candles': 25, 'latest': '2026-04-13T12:00:00'},
+                            {'timeframe': '5m', 'count': 20, 'waiting_candles': 15, 'latest': '2026-04-13T11:55:00'},
+                        ],
+                    }
+                ]
+            }
+        )
+
+        assert context['THB_SOL']['tf_ready'] == '0/2'
+        assert context['THB_SOL']['pair_state'] == 'Collecting 1m:25, 5m:15'
+        assert context['THB_SOL']['wait_detail'] == '1m:25, 5m:15'
 
     def test_portfolio_breakdown_panel_renders_separately(self):
         app = Mock()
@@ -1729,11 +2114,11 @@ class TestCliUi:
         rendered = console.export_text()
 
         assert "Command Chat" in rendered
-        assert "Pending Confirm market BUY THB_BTC with 500.00 THB" in rendered
+        assert "Pending: Confirm market BUY THB_BTC with 500.00 THB" in rendered
         assert "You: risk show" in rendered
         assert "Bot: Runtime risk: 2.00% per trade (MEDIUM)" in rendered
-        assert "Tips confirm | cancel" in rendered
-        assert "> pairs add BTC" in rendered
+        assert "Suggestions: confirm | cancel" in rendered
+        assert "Input> pairs add BTC_" in rendered
 
     def test_log_buffer_uses_bitkub_time(self):
         app = Mock()
@@ -1753,6 +2138,35 @@ class TestCliUi:
 
         assert command_center._log_lines[-1]["timestamp"] == "22:35:00"
 
+    def test_log_buffer_skips_noisy_info_logs_but_keeps_warnings(self):
+        app = Mock()
+        command_center = CLICommandCenter(app)
+
+        noisy_info = logging.LogRecord(
+            name="bitkub_websocket",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="noise",
+            args=(),
+            exc_info=None,
+        )
+        important_warning = logging.LogRecord(
+            name="bitkub_websocket",
+            level=logging.WARNING,
+            pathname=__file__,
+            lineno=1,
+            msg="warning",
+            args=(),
+            exc_info=None,
+        )
+
+        command_center._append_log_record(noisy_info)
+        command_center._append_log_record(important_warning)
+
+        assert list(command_center._log_lines)[-1]['message'] == 'warning'
+        assert all(row['message'] != 'noise' for row in command_center._log_lines)
+
     def test_signal_alignment_panel_renders_pair_runtime_context(self):
         app = Mock()
         command_center = CLICommandCenter(app)
@@ -1764,6 +2178,7 @@ class TestCliUi:
                         "symbol": "THB_BTC",
                         "tf_ready": "4/6",
                         "market_update": "22:35:00",
+                        "wait_detail": "1m:8, 5m:2",
                         "macro": "BUY",
                         "micro": "BUY",
                         "trigger": "HOLD",
@@ -1780,9 +2195,10 @@ class TestCliUi:
         rendered = console.export_text()
 
         assert "TF" in rendered
-        assert "Upd" in rendered
+        assert "Wait" in rendered
         assert "4/6" in rendered
-        assert "22:35:00" in rendered
+        assert "1m:8, 5m:2" in rendered
+        assert "BTC" in rendered
 
 
 def test_format_bitkub_time_normalizes_to_thailand_timezone():

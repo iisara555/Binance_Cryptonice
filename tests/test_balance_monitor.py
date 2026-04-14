@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import Mock
 
 import pytest
@@ -6,7 +7,7 @@ from alerts import AlertLevel
 from balance_monitor import BalanceMonitor, _MonitorStopping
 
 
-def _build_monitor(tmp_path, alert_system=None, config=None):
+def _build_monitor(tmp_path, alert_system=None, config=None, on_event=None):
     api_client = Mock()
     api_client.get_balances.return_value = {}
     api_client.get_fiat_deposit_history.return_value = []
@@ -15,7 +16,7 @@ def _build_monitor(tmp_path, alert_system=None, config=None):
     api_client.get_crypto_withdraw_history.return_value = {"items": []}
     monitor_config = {"persist_path": str(tmp_path / "balance-monitor-state.json")}
     monitor_config.update(config or {})
-    return BalanceMonitor(api_client, monitor_config, alert_system=alert_system or Mock())
+    return BalanceMonitor(api_client, monitor_config, alert_system=alert_system or Mock(), on_event=on_event)
 
 
 def test_detect_fiat_deposit_and_withdrawal_events(tmp_path):
@@ -222,3 +223,75 @@ def test_stop_requested_aborts_retry_without_critical_alert(tmp_path):
     assert attempt_count["value"] == 1
     critical_calls = [call for call in alert_system.send.call_args_list if call.args[0] == AlertLevel.CRITICAL]
     assert critical_calls == []
+
+
+def test_poll_once_stops_dispatch_after_callback_requests_shutdown(tmp_path):
+    seen_events = []
+
+    def on_event(event, state):
+        seen_events.append((event.transaction_id, state["balances"]["THB"]["available"]))
+        monitor.stop()
+
+    monitor = _build_monitor(tmp_path, on_event=on_event, config={"bootstrap_history_on_startup": False})
+    monitor.api_client.get_balances.return_value = {
+        "THB": {"available": 500.0, "reserved": 0.0, "total": 500.0}
+    }
+    monitor.api_client.get_fiat_deposit_history.return_value = [
+        {"txn_id": "dep-1", "status": "complete", "amount": "100", "time": "2024-01-01T00:00:00Z"},
+        {"txn_id": "dep-2", "status": "complete", "amount": "200", "time": "2024-01-01T00:01:00Z"},
+    ]
+    monitor.api_client.get_fiat_withdraw_history.return_value = []
+    monitor.api_client.get_crypto_deposit_history.return_value = {"items": []}
+    monitor.api_client.get_crypto_withdraw_history.return_value = {"items": []}
+
+    events = monitor.poll_once()
+
+    assert [event.transaction_id for event in events] == ["dep-1", "dep-2"]
+    assert seen_events == [("dep-1", 500.0)]
+
+
+def test_stop_clears_thread_handle_even_when_thread_is_not_alive(tmp_path):
+    monitor = _build_monitor(tmp_path)
+    monitor.running = True
+    monitor._thread = Mock()
+    monitor._thread.is_alive.return_value = False
+
+    monitor.stop()
+
+    assert monitor.running is False
+    assert monitor._thread is None
+
+
+def test_poll_once_uses_balance_monitor_timeout_profile(tmp_path):
+    monitor = _build_monitor(tmp_path, config={"api_timeout_seconds": 7.5, "bootstrap_history_on_startup": False})
+
+    monitor.poll_once()
+
+    monitor.api_client.get_balances.assert_called_once_with(force_refresh=True, allow_stale=False, timeout=7.5)
+    monitor.api_client.get_fiat_deposit_history.assert_called_once_with(limit=50, timeout=7.5)
+    monitor.api_client.get_fiat_withdraw_history.assert_called_once_with(limit=50, timeout=7.5)
+    monitor.api_client.get_crypto_deposit_history.assert_called_once_with(limit=100, timeout=7.5)
+    monitor.api_client.get_crypto_withdraw_history.assert_called_once_with(limit=100, timeout=7.5)
+
+
+def test_start_stop_joins_monitor_thread_and_clears_handle(tmp_path):
+    entered_poll = threading.Event()
+    release_poll = threading.Event()
+    monitor = _build_monitor(tmp_path)
+
+    def blocking_poll_once():
+        entered_poll.set()
+        release_poll.wait(timeout=1.0)
+        return []
+
+    monitor.poll_once = blocking_poll_once
+    monitor.poll_interval_seconds = 5
+
+    monitor.start()
+
+    assert entered_poll.wait(timeout=1.0)
+    release_poll.set()
+    monitor.stop()
+
+    assert monitor.running is False
+    assert monitor._thread is None

@@ -26,7 +26,7 @@ import pytest
 
 from trade_executor import (
     TradeExecutor, ExecutionPlan, OrderRequest, OrderResult,
-    OrderSide, OrderStatus,
+    OrderSide, OrderStatus, PartialFillInfo, PartialFillTracker,
 )
 
 
@@ -265,6 +265,37 @@ class TestConcurrentIdempotency:
         )
         assert len(successes) == 1, f"Expected 1 success, got {len(successes)}"
         assert len(rejections) == 9, f"Expected 9 rejections, got {len(rejections)}"
+
+
+class TestPartialFillArithmetic:
+
+    def test_partial_fill_tracker_maintains_weighted_average_across_repeated_updates(self):
+        tracker = PartialFillTracker(max_wait_seconds=60.0)
+        tracker.start_tracking(
+            "ord-pf",
+            PartialFillInfo(
+                order_id="ord-pf",
+                symbol="THB_BTC",
+                side=OrderSide.BUY,
+                original_amount=1.0,
+            ),
+        )
+
+        tracker.update_fill("ord-pf", 0.33333333, 100.01)
+        tracker.update_fill("ord-pf", 0.33333333, 100.02)
+        updated = tracker.update_fill("ord-pf", 0.33333334, 99.99)
+        position = tracker.get_actual_position("ord-pf")
+
+        expected_avg = ((0.33333333 * 100.01) + (0.33333333 * 100.02) + (0.33333334 * 99.99)) / 1.0
+
+        assert updated.filled_amount == pytest.approx(1.0)
+        assert updated.avg_fill_price == pytest.approx(expected_avg)
+        assert updated.is_complete is True
+        assert position is not None
+        assert position["filled_amount"] == pytest.approx(1.0)
+        assert position["avg_price"] == pytest.approx(expected_avg)
+        assert position["remaining"] == pytest.approx(0.0)
+        assert position["is_complete"] is True
 
 
 class TestOpenOrdersLockIntegrity:

@@ -84,9 +84,13 @@ class BitkubCollector:
     def set_pairs(self, pairs: List[str]):
         """Update the collector pair set safely at runtime."""
         normalized = [str(pair).upper() for pair in (pairs or []) if str(pair).strip()]
+        previous_pairs = self.get_pairs()
         with self._pairs_lock:
             self.pairs = normalized
         logger.info("Collector pairs updated: %s", normalized)
+        added_pairs = [pair for pair in normalized if pair not in previous_pairs]
+        if self.running and self.multi_timeframe_enabled and added_pairs:
+            self._warm_pairs_multi_timeframe(added_pairs)
 
     def get_pairs(self) -> List[str]:
         """Return a snapshot of the current collector pairs."""
@@ -404,20 +408,56 @@ class BitkubCollector:
 
         return results
 
+    def _collect_multi_timeframe_for_pairs(self, pairs: Optional[List[str]] = None) -> Dict[str, Dict[str, int]]:
+        """Collect multi-timeframe candles across pairs without nesting the shared executor."""
+        target_pairs = [str(pair).upper() for pair in (pairs or self.get_pairs()) if str(pair).strip()]
+        if not target_pairs:
+            return {}
+
+        if len(target_pairs) == 1:
+            pair = target_pairs[0]
+            try:
+                return {pair: self.collect_multi_timeframe(pair, self.multi_timeframes)}
+            except Exception as e:
+                logger.error("collect_multi_timeframe(%s) failed: %s", pair, e)
+                return {pair: {tf: 0 for tf in self.multi_timeframes}}
+
+        results: Dict[str, Dict[str, int]] = {}
+        max_workers = min(len(target_pairs), 4)
+        with ThreadPoolExecutor(max_workers=max_workers) as pair_executor:
+            futures = {
+                pair: pair_executor.submit(self.collect_multi_timeframe, pair, self.multi_timeframes)
+                for pair in target_pairs
+            }
+            for pair, future in futures.items():
+                try:
+                    results[pair] = future.result()
+                except Exception as e:
+                    logger.error("collect_multi_timeframe(%s) failed: %s", pair, e)
+                    results[pair] = {tf: 0 for tf in self.multi_timeframes}
+
+        return results
+
     def collect_all_multi_timeframe(self) -> Dict[str, Dict[str, int]]:
         """Collect multi-timeframe OHLC data for all configured pairs in parallel."""
-        results: Dict[str, Dict[str, int]] = {}
-        pairs = self.get_pairs()
-        futures = {
-            pair: _executor.submit(self.collect_multi_timeframe, pair, self.multi_timeframes)
-            for pair in pairs
-        }
-        for pair, future in futures.items():
-            try:
-                results[pair] = future.result()
-            except Exception as e:
-                logger.error(f"collect_multi_timeframe({pair}) failed: {e}")
-                results[pair] = {tf: 0 for tf in self.multi_timeframes}
+        return self._collect_multi_timeframe_for_pairs(self.get_pairs())
+
+    def _warm_pairs_multi_timeframe(self, pairs: Optional[List[str]] = None) -> Dict[str, Dict[str, int]]:
+        """Prime missing multi-timeframe candles immediately for startup or newly added pairs."""
+        if not self.multi_timeframe_enabled:
+            return {}
+
+        target_pairs = [str(pair).upper() for pair in (pairs or self.get_pairs()) if str(pair).strip()]
+        if not target_pairs:
+            return {}
+
+        results = self._collect_multi_timeframe_for_pairs(target_pairs)
+
+        merged_results = dict(getattr(self, "_last_multi_timeframe_results", {}) or {})
+        merged_results.update(results)
+        self._last_multi_timeframe_results = merged_results
+        self._last_multi_timeframe_run = datetime.now(timezone.utc)
+        self._next_multi_timeframe_collect_at = time.time() + self.multi_timeframe_interval
         return results
 
     def collect_all(self) -> Dict[str, bool]:
@@ -485,10 +525,13 @@ class BitkubCollector:
         Args:
             blocking: If True, run in current thread. If False, run in background.
         """
+        self.running = True
+        if self.multi_timeframe_enabled:
+            self._warm_pairs_multi_timeframe()
+
         if blocking:
             self._collector_loop()
         else:
-            self.running = True
             self._thread = threading.Thread(target=self._collector_loop, daemon=True)
             self._thread.start()
 

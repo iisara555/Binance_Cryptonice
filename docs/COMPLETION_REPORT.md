@@ -36,6 +36,14 @@
 - stale references ไปยัง dashboard, frontend, `start.py`, และ AI/ML runtime ถูกลบจากเอกสารใช้งานหลัก
 - historical reports ถูกปรับให้เป็น archival summaries ที่ไม่หลอกว่าระบบเก่ายังอยู่
 
+### Final Verification (14 เมษายน 2569)
+
+- รัน full repo test suite ผ่าน: `333 passed, 11 skipped, 2 warnings`
+- รัน post-fix validation เพิ่ม: `tests/test_runtime_cli_commands.py` ผ่าน `33 passed` และ `tests/test_integration.py` ผ่าน `84 passed`
+- deploy patch ล่าสุดขึ้น VPS สำเร็จและ health กลับ `healthy: true`
+- live operational drill ตรวจจริงเจอ bug ใน manual market BUY/close lifecycle แล้วแก้ root cause ใน `main.py`
+- หลัง redeploy, close-by-id บน runtime จริงทำงานครบ, `orders` กลับ `none`, และ `open_positions` กลับ `0`
+
 ## What This Repo Is Now
 
 โปรเจกต์นี้คือ standalone Bitkub trading runtime ที่ใช้ terminal-first workflow และมี deploy path สำหรับ Windows service กับ Linux systemd โดยไม่มี dashboard dependency ใน workflow หลักแล้ว
@@ -48,6 +56,7 @@
 ## Recommended Primary Docs
 
 - [README.md](../README.md)
+- [FINAL_VERIFICATION_20260414_TH.md](FINAL_VERIFICATION_20260414_TH.md)
 - [DAILY_QUICK_START_TH.md](DAILY_QUICK_START_TH.md)
 - [WINDOWS_ALWAYS_ON_SETUP_TH.md](WINDOWS_ALWAYS_ON_SETUP_TH.md)
 - [WINDOWS_TRANSFER_WITH_STATE_TH.md](WINDOWS_TRANSFER_WITH_STATE_TH.md)

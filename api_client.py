@@ -549,6 +549,7 @@ class BitkubClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         query_params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         """Authenticated helper for non-trading endpoints.
 
@@ -598,7 +599,7 @@ class BitkubClient:
             url,
             headers=headers,
             data=body if body else None,
-            timeout=self.TIMEOUT,
+            timeout=self.TIMEOUT if timeout is None else timeout,
         )
         if response.status_code >= 400:
             logger.warning(
@@ -622,6 +623,7 @@ class BitkubClient:
         authenticated: bool = False,
         params: Optional[Dict[str, Any]] = None,
         query_params: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Core request wrapper with circuit breaker and clock sync.
@@ -693,7 +695,7 @@ class BitkubClient:
                 url,
                 headers=headers,
                 data=body if body else None,
-                timeout=self.TIMEOUT,
+                timeout=self.TIMEOUT if timeout is None else timeout,
             )
             
             # Log raw body on non-200 BEFORE parsing, so we see the exact Bitkub error
@@ -1050,6 +1052,7 @@ class BitkubClient:
         *,
         force_refresh: bool = False,
         allow_stale: bool = True,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Dict[str, float]]:
         """
         POST /api/v3/market/balances
@@ -1073,7 +1076,7 @@ class BitkubClient:
         # Fetch *outside* the lock — blocking I/O must not hold _state_lock.
         try:
             fresh = self._request(
-                "POST", "/api/v3/market/balances", authenticated=True
+                "POST", "/api/v3/market/balances", authenticated=True, timeout=timeout
             )
             with self._state_lock:
                 self._balances_cache = fresh
@@ -1304,12 +1307,14 @@ class BitkubClient:
         self,
         page: int = 1,
         limit: int = 50,
+        timeout: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """POST /api/v3/fiat/deposit-history — fiat deposit history."""
         data = self._request_aux(
             "POST",
             "/api/v3/fiat/deposit-history",
             query_params={"p": page, "lmt": limit},
+            timeout=timeout,
         )
         return data if isinstance(data, list) else []
 
@@ -1317,12 +1322,14 @@ class BitkubClient:
         self,
         page: int = 1,
         limit: int = 50,
+        timeout: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """POST /api/v3/fiat/withdraw-history — fiat withdrawal history."""
         data = self._request_aux(
             "POST",
             "/api/v3/fiat/withdraw-history",
             query_params={"p": page, "lmt": limit},
+            timeout=timeout,
         )
         return data if isinstance(data, list) else []
 
@@ -1333,6 +1340,7 @@ class BitkubClient:
         limit: int = 100,
         symbol: Optional[str] = None,
         status: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """GET /api/v4/crypto/deposits — crypto deposit history."""
         query_params: Dict[str, Any] = {"page": page, "limit": limit}
@@ -1344,6 +1352,7 @@ class BitkubClient:
             "GET",
             "/api/v4/crypto/deposits",
             query_params=query_params,
+            timeout=timeout,
         )
         return data if isinstance(data, dict) else {"items": []}
 
@@ -1354,6 +1363,7 @@ class BitkubClient:
         limit: int = 100,
         symbol: Optional[str] = None,
         status: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         """GET /api/v4/crypto/withdraws — crypto withdrawal history."""
         query_params: Dict[str, Any] = {"page": page, "limit": limit}
@@ -1365,6 +1375,7 @@ class BitkubClient:
             "GET",
             "/api/v4/crypto/withdraws",
             query_params=query_params,
+            timeout=timeout,
         )
         return data if isinstance(data, dict) else {"items": []}
 

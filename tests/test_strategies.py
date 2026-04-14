@@ -711,6 +711,34 @@ class TestSignalGenerator:
         assert signals[0].signals[0].metadata['macd_cross_bar'] == 'current'
         assert signals[0].signals[0].metadata['macd_cross_direction'] == 'sell'
 
+    def test_sniper_accepts_recent_macd_cross_with_configured_lookback(self):
+        """A crossover a few confirmed candles back should trigger when lookback is widened."""
+        from signal_generator import SignalGenerator
+        from strategy_base import SignalType
+
+        data = self._make_sniper_test_data(trend='down')
+        generator = SignalGenerator({"sniper": {"macd_trigger_lookback_bars": 3}})
+
+        full_macd = pd.Series([2.0, -1.0, -1.1, -1.2])
+        full_signal = pd.Series([1.5, -0.5, -0.6, -0.7])
+        confirmed_macd = pd.Series([2.0, -1.0, -1.1, -1.2])
+        confirmed_signal = pd.Series([1.5, -0.5, -0.6, -0.7])
+
+        def macd_side_effect(prices, fast=12, slow=26, signal=9):
+            if len(prices) == len(data):
+                return full_macd, full_signal, full_macd - full_signal
+            if len(prices) == len(data) - 1:
+                return confirmed_macd, confirmed_signal, confirmed_macd - confirmed_signal
+            raise AssertionError(f"Unexpected MACD input length: {len(prices)}")
+
+        with patch('signal_generator.TechnicalIndicators.calculate_macd', side_effect=macd_side_effect), \
+             patch('signal_generator.TechnicalIndicators.calculate_atr', return_value=pd.Series(np.full(len(data), 5.0))):
+            signals = generator.generate_sniper_signal(data=data, symbol='THB_BTC')
+
+        assert len(signals) == 1
+        assert signals[0].signal_type is SignalType.SELL
+        assert signals[0].signals[0].metadata['macd_cross_bar'] == '2_bars_ago'
+
 
 # ============================================================================
 # WEBSOCKET TESTS

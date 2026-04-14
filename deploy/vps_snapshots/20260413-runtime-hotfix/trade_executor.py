@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from state_management import normalize_buy_quantity
-from risk_management import precise_add, precise_multiply, precise_divide
+from risk_management import precise_add, precise_subtract, precise_multiply, precise_divide, precise_round
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,6 @@ BITKUB_FEE_PCT = 0.0025
 
 # Late-bound WS import (avoids circular dep at module load)
 _ws_mod = None
-
 
 def _ws_ticker(symbol: str):
     """Get latest WS ticker, lazy-loading the module on first call."""
@@ -157,10 +156,6 @@ class PartialFillTracker:
     def get_all_pending(self) -> List[PartialFillInfo]:
         with self._lock:
             return [v for v in self._fills.values() if not v.is_complete]
-
-
-def _is_bootstrap_order_id(order_id: Optional[str]) -> bool:
-    return str(order_id or "").startswith("bootstrap_")
 
 
 @dataclass
@@ -315,11 +310,6 @@ class TradeExecutor:
         self.sync_open_orders_from_db()
 
         # ── H3/H4: Reconciliation gate ─────────────────────────────────
-        # The OMS thread starts immediately so it can warm up, but it MUST
-        # NOT cancel, reprice or otherwise mutate order state until the bot
-        # has completed its full startup reconciliation with Bitkub.
-        # trading_bot.start() calls set_reconcile_complete() after
-        # _reconcile_on_startup() and sync_open_orders_from_db() finish.
         self._reconcile_done = threading.Event()
 
         self._oms_running = True
@@ -469,9 +459,7 @@ class TradeExecutor:
     def stop(self):
         """Stop the OMS background thread gracefully."""
         self._oms_running = False
-        stop_event = getattr(self, "_oms_stop_event", None)
-        if stop_event is not None:
-            stop_event.set()
+        self._oms_stop_event.set()
         # Unblock _oms_monitor_loop if it is waiting for reconciliation.
         self._reconcile_done.set()
         if self._oms_thread and self._oms_thread.is_alive():
@@ -493,21 +481,6 @@ class TradeExecutor:
         """Background Order Management System loop."""
         while getattr(self, "_oms_running", True):
             try:
-                stop_event = getattr(self, "_oms_stop_event", None)
-                # Poll in short slices so stop() can terminate quickly.
-                slept = 0.0
-                while slept < getattr(self, '_oms_poll_interval', 5.0) and getattr(self, "_oms_running", True):
-                    if stop_event is not None:
-                        if stop_event.wait(timeout=0.1):
-                            break
-                    else:
-                        time.sleep(0.1)
-                    slept += 0.1
-                if not getattr(self, "_oms_running", True):
-                    break
-                if stop_event is not None and stop_event.is_set():
-                    break
-
                 # ── H3/H4: Block until reconciliation is complete ─────────────
                 # The bot may still be running _reconcile_on_startup() while
                 # this loop ticks.  Acting on pre-reconciliation state risks
@@ -516,30 +489,24 @@ class TradeExecutor:
                 # if reconciliation hasn't finished yet.
                 if not self._reconcile_done.is_set():
                     logger.debug("[OMS] Waiting for startup reconciliation before processing orders.")
+                    self._oms_stop_event.wait(timeout=1.0)
                     continue
 
                 if self.api_client.is_circuit_open():
                     logger.debug("Circuit breaker is OPEN. Skipping OMS cleanup routine.")
+                    self._oms_stop_event.wait(timeout=5.0)
                     continue
 
                 with self._orders_lock:
-                    if not self._open_orders:
-                        continue
                     orders_to_check = list(self._open_orders.values())
+
+                if not orders_to_check:
+                    self._oms_stop_event.wait(timeout=5.0)
+                    continue
 
                 for order_info in orders_to_check:
                     order_id = order_info.get("order_id")
                     if not order_id:
-                        continue
-
-                    if _is_bootstrap_order_id(order_id):
-                        if order_info.get("filled", False):
-                            self._apply_trailing_stop(order_info)
-                        else:
-                            logger.debug(
-                                "[OMS] Skipping exchange timeout/status checks for synthetic bootstrap position %s",
-                                order_id,
-                            )
                         continue
                     
                     # Skip orders already being processed/replaced
@@ -654,21 +621,20 @@ class TradeExecutor:
                                 logger.warning("[OMS] Balance check failed: %s — proceeding", bal_err, exc_info=True)
 
                         try:
+                            tick = _ws_ticker(symbol)
+                            if tick and tick.last > 0:
+                                new_price = float(tick.last)
+                            else:
+                                raise ValueError("Empty WS cache")
+                        except Exception:
                             try:
-                                tick = _ws_ticker(symbol)
-                                if tick and tick.last > 0:
-                                    new_price = float(tick.last)
-                                else:
-                                    raise ValueError("Empty WS cache")
-                            except Exception:
-                                try:
-                                    from helpers import parse_ticker_last
-                                    ticker = self.api_client.get_ticker(symbol)
-                                    parsed = parse_ticker_last(ticker)
-                                    new_price = parsed if parsed is not None else order_info["entry_price"]
-                                except Exception as tick_e:
-                                    logger.error("[OMS] API ticker error %s. Using old price.", tick_e, exc_info=True)
-                                    new_price = order_info["entry_price"]
+                                from helpers import parse_ticker_last
+                                ticker = self.api_client.get_ticker(symbol)
+                                parsed = parse_ticker_last(ticker)
+                                new_price = parsed if parsed is not None else order_info["entry_price"]
+                            except Exception as tick_e:
+                                logger.error("[OMS] API ticker error %s. Using old price.", tick_e, exc_info=True)
+                                new_price = order_info["entry_price"]
 
                             if amount <= 0:
                                 logger.warning(
@@ -740,6 +706,8 @@ class TradeExecutor:
                         except Exception as e:
                             logger.error("[OMS] Loop error: %s", e, exc_info=True)
 
+                # Interruptible sleep between cycles — exits on stop signal.
+                self._oms_stop_event.wait(timeout=5.0)
             except Exception as e:
                 logger.error("[OMS] Loop error: %s", e, exc_info=True)
 
@@ -892,6 +860,8 @@ class TradeExecutor:
                     )
                     with self._orders_lock:
                         self._order_history.append(result)
+                        if len(self._order_history) > 500:
+                            self._order_history = self._order_history[-500:]
                     if order.side == OrderSide.BUY and result.filled_amount > 0 and self._db:
                         try:
                             self._db.record_held_coin(order.symbol, result.filled_amount)

@@ -156,8 +156,8 @@ class TelegramSender:
                     try:
                         body = response.json()
                         retry_after = body.get("parameters", {}).get("retry_after", retry_after)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to parse Telegram 429 response body: %s", exc)
                     logger.warning(
                         "Telegram rate-limited (429). Waiting %s seconds before retry.",
                         retry_after,
@@ -178,8 +178,8 @@ class TelegramSender:
                         retry_after = 5
                         try:
                             retry_after = data.get("parameters", {}).get("retry_after", retry_after)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Failed to parse Telegram flood-control retry_after: %s", exc)
                         logger.warning(
                             "Telegram flood control (error_code 429): %s. Waiting %s seconds.",
                             description_text,

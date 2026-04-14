@@ -29,7 +29,10 @@ import os
 
 from signal_generator import SignalGenerator, AggregatedSignal, SignalRiskCheck
 from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult, OrderStatus
-from risk_management import RiskManager, RiskConfig, calculate_atr, get_default_sl_tp, check_pair_correlation
+from risk_management import (
+    RiskManager, RiskConfig, calculate_atr, get_default_sl_tp, check_pair_correlation,
+    precise_multiply, precise_subtract, precise_add, precise_divide,
+)
 from api_client import BitkubClient
 from balance_monitor import BalanceEvent, BalanceMonitor
 from database import get_database
@@ -54,8 +57,6 @@ except ImportError:
     _MONITORING_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
-
-_MIN_CANDLES_FOR_TRADING_READINESS = 35
 
 
 def _coerce_trade_float(val, default: float = 0.0) -> float:
@@ -243,6 +244,7 @@ class TradingBotOrchestrator:
         self._pending_decisions: List[TradeDecision] = []
         self._pending_decisions_lock = threading.Lock()
         self._executed_today: List[Dict] = []
+        self._executed_today_max = 200
         self._last_loop_time: Optional[datetime] = None
         self._loop_count = 0
         self._last_state_gate_logged: Dict[str, str] = {}
@@ -315,7 +317,6 @@ class TradingBotOrchestrator:
         self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}
         self._symbol_market_cache: Dict[str, Dict] = {}
         self._last_portfolio_guard_skipped: Optional[tuple[str, ...]] = None
-        self._last_candle_readiness_skipped: Optional[tuple[str, ...]] = None
 
         self._prune_invalid_btc_positions()
         # Important startup order:
@@ -572,6 +573,7 @@ class TradingBotOrchestrator:
                 exc,
             )
 
+        if external_excess > 1e-8:
             logger.warning(
                 "[Reconcile] Live %s balance exceeds tracked bootstrap size by %.8f. "
                 "Keeping tracked entry/SL/TP unchanged and not averaging external coins into position %s.",
@@ -613,77 +615,6 @@ class TradingBotOrchestrator:
         stop_loss = round(entry_price * (1 + (stop_loss_pct / 100.0)), 6)
         take_profit = round(entry_price * (1 + (take_profit_pct / 100.0)), 6)
         return stop_loss, take_profit
-
-    def _resolve_bootstrap_position_context(
-        self,
-        symbol: str,
-        quantity: float,
-    ) -> Dict[str, Any]:
-        """Recover bootstrap entry context from persisted position/state before estimating from market price."""
-        symbol_key = str(symbol or "").upper()
-        if not symbol_key:
-            return {}
-
-        best: Dict[str, Any] = {}
-
-        db = getattr(self, "db", None)
-        if db is not None and hasattr(db, "load_all_positions"):
-            try:
-                rows = list(db.load_all_positions() or [])
-            except Exception as exc:
-                logger.debug("[Bootstrap Positions] Failed to load persisted positions for %s: %s", symbol_key, exc)
-                rows = []
-
-            matching_rows = []
-            for row in rows:
-                row_symbol = str(row.get("symbol") or "").upper()
-                row_side = row.get("side", "buy")
-                if hasattr(row_side, "value"):
-                    row_side = row_side.value
-                if row_symbol != symbol_key or str(row_side or "").lower() != "buy":
-                    continue
-
-                entry_price = _coerce_trade_float(row.get("entry_price"), 0.0)
-                if entry_price <= 0:
-                    continue
-                matching_rows.append(row)
-
-            if matching_rows:
-                matching_rows.sort(key=lambda row: row.get("timestamp") or datetime.min, reverse=True)
-                row = matching_rows[0]
-                entry_price = _coerce_trade_float(row.get("entry_price"), 0.0)
-                total_entry_cost = _coerce_trade_float(row.get("total_entry_cost"), 0.0)
-                if entry_price > 0:
-                    best = {
-                        "entry_price": entry_price,
-                        "stop_loss": row.get("stop_loss"),
-                        "take_profit": row.get("take_profit"),
-                        "total_entry_cost": total_entry_cost if total_entry_cost > 0 else (quantity * entry_price),
-                        "source": "persisted_position",
-                    }
-
-        if db is not None and hasattr(db, "get_trade_state"):
-            try:
-                state_row = db.get_trade_state(symbol_key)
-            except Exception as exc:
-                logger.debug("[Bootstrap Positions] Failed to load trade state for %s: %s", symbol_key, exc)
-                state_row = None
-
-            state_value = str((state_row or {}).get("state") or "").lower()
-            state_entry = _coerce_trade_float((state_row or {}).get("entry_price"), 0.0)
-            if state_entry > 0 and state_value in (
-                TradeLifecycleState.IN_POSITION.value,
-                TradeLifecycleState.PENDING_SELL.value,
-            ):
-                best = {
-                    "entry_price": state_entry,
-                    "stop_loss": (state_row or {}).get("stop_loss"),
-                    "take_profit": (state_row or {}).get("take_profit"),
-                    "total_entry_cost": _coerce_trade_float((state_row or {}).get("total_entry_cost"), 0.0) or (quantity * state_entry),
-                    "source": "trade_state",
-                }
-
-        return best
 
     @staticmethod
     def _default_candle_retention_policy() -> Dict[str, int]:
@@ -975,25 +906,19 @@ class TradingBotOrchestrator:
             if total_qty <= 0:
                 continue
 
-            restored_context = self._resolve_bootstrap_position_context(pair, total_qty)
-
-            # Get current market price as fallback when no persisted cost basis exists.
+            # Get current market price as best-effort entry price estimate
             try:
                 ticker = self.api_client.get_ticker(pair)
                 current_price = parse_ticker_last(ticker) or 0.0
             except Exception:
                 current_price = 0.0
 
-            entry_price = _coerce_trade_float(restored_context.get("entry_price"), 0.0)
-            if entry_price <= 0:
-                entry_price = current_price
-
-            if entry_price <= 0:
+            if current_price <= 0:
                 logger.debug("[Bootstrap Positions] Skipping %s: no price available", pair)
                 continue
 
             # Minimum value check (Bitkub minimum ~10-15 THB)
-            position_value = total_qty * entry_price
+            position_value = total_qty * current_price
             if position_value < self.min_trade_value_thb:
                 logger.debug(
                     "[Bootstrap Positions] Skipping %s: value %.2f THB < min %.2f THB",
@@ -1001,16 +926,7 @@ class TradingBotOrchestrator:
                 )
                 continue
 
-            stop_loss = restored_context.get("stop_loss")
-            take_profit = restored_context.get("take_profit")
-            if not stop_loss or not take_profit:
-                stop_loss, take_profit = self._build_bootstrap_position_sl_tp(pair, entry_price)
-            total_entry_cost = _coerce_trade_float(restored_context.get("total_entry_cost"), 0.0)
-            if total_entry_cost <= 0:
-                total_entry_cost = total_qty * entry_price
-
-            # Determine bootstrap source label
-            bootstrap_source = restored_context.get("source") or "estimated_from_ticker"
+            stop_loss, take_profit = self._build_bootstrap_position_sl_tp(pair, current_price)
 
             # Create synthetic position
             synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
@@ -1018,34 +934,25 @@ class TradingBotOrchestrator:
                 "symbol": pair,
                 "side": OrderSide.BUY,
                 "amount": total_qty,
-                "entry_price": entry_price,
+                "entry_price": current_price,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
                 "order_id": synthetic_id,
                 "timestamp": datetime.now(),
                 "is_partial_fill": False,
                 "remaining_amount": total_qty,
-                "total_entry_cost": total_entry_cost,
+                "total_entry_cost": total_qty * current_price,
                 "filled": True,
                 "filled_amount": total_qty,
-                "filled_price": entry_price,
-                "bootstrap_source": bootstrap_source,
+                "filled_price": current_price,
             }
 
             self.executor.register_tracked_position(synthetic_id, pos_data)
             # Ensure held-coin history is also recorded
             self.db.record_held_coin(pair, total_qty)
             registered.append(
-                f"{pair} ({total_qty:.8f} @ {entry_price:,.2f} | SL {float(stop_loss or 0.0):,.2f} TP {float(take_profit or 0.0):,.2f})"
+                f"{pair} ({total_qty:.8f} @ {current_price:,.2f} | SL {float(stop_loss or 0.0):,.2f} TP {float(take_profit or 0.0):,.2f})"
             )
-
-            if restored_context.get("source"):
-                logger.info(
-                    "[Bootstrap Positions] Restored %s entry context for %s @ %.2f",
-                    restored_context.get("source"),
-                    pair,
-                    entry_price,
-                )
 
             time.sleep(0.15)  # rate-limit ticker calls
 
@@ -1179,28 +1086,36 @@ class TradingBotOrchestrator:
                     )
                     continue
 
-                # ── Skip SELL ghosts that match an existing filled BUY position ──
-                # A live TP/SL exit order placed by the bot before crash should
-                # not be imported as a new ghost — doing so would overwrite the
+                # Skip ghost SELL orders that are the exit (TP/SL) of an existing
+                # filled BUY position — importing them would overwrite the
                 # original entry price with the exit price.
                 if side_str == "sell":
-                    has_matching_position = False
+                    ghost_price = float(ghost.get("entry_price", 0) or 0)
+                    _is_exit_of_existing = False
                     with self.executor._orders_lock:
-                        for existing in self.executor._open_orders.values():
-                            ex_sym = str(existing.get("symbol", "")).upper()
-                            ex_side = existing.get("side")
-                            if isinstance(ex_side, Enum):
-                                ex_side = ex_side.value
-                            ex_side = str(ex_side).lower()
-                            if ex_sym == local_sym and ex_side == "buy" and existing.get("filled"):
-                                has_matching_position = True
-                                break
-                    if has_matching_position:
+                        for _pos in self.executor._open_orders.values():
+                            if (
+                                str(_pos.get("symbol", "")).upper() == local_sym
+                                and _pos.get("filled")
+                                and str(
+                                    _pos.get("side").value
+                                    if isinstance(_pos.get("side"), Enum)
+                                    else _pos.get("side", "")
+                                ).lower() == "buy"
+                            ):
+                                _tp = float(_pos.get("take_profit") or 0)
+                                _sl = float(_pos.get("stop_loss") or 0)
+                                if (_tp and abs(ghost_price - _tp) < 0.01) or (
+                                    _sl and abs(ghost_price - _sl) < 0.01
+                                ):
+                                    _is_exit_of_existing = True
+                                    break
+                    if _is_exit_of_existing:
                         skipped_ghost_counts[(local_sym, side_str)] += 1
                         logger.info(
-                            "[Reconcile] Ghost SELL %s for %s — skipping ghost import to preserve entry price "
-                            "(matched existing filled BUY position)",
-                            ghost.get("order_id"), local_sym,
+                            "[Reconcile] Ghost SELL %s @ %.2f matches existing position exit — "
+                            "skipping ghost import to preserve entry price",
+                            ghost.get("order_id"), ghost_price,
                         )
                         continue
 
@@ -1332,8 +1247,8 @@ class TradingBotOrchestrator:
                                     self.executor._open_orders.pop(missing_oid, None)
                                 try:
                                     self.db.delete_position(missing_oid)
-                                except Exception as exc:
-                                    logger.warning("[Reconcile] Failed to delete DB position %s after fill: %s", missing_oid, exc)
+                                except Exception:
+                                    pass
                         elif self._history_status_is_cancelled(matched):
                             logger.info(
                                 f"🗑️ [Reconcile] Order {missing_oid} was CANCELLED on Bitkub. "
@@ -1343,8 +1258,8 @@ class TradingBotOrchestrator:
                                 self.executor._open_orders.pop(missing_oid, None)
                             try:
                                 self.db.delete_position(missing_oid)
-                            except Exception as exc:
-                                logger.warning("[Reconcile] Failed to delete cancelled DB position %s: %s", missing_oid, exc)
+                            except Exception:
+                                pass
                         else:
                             logger.warning(
                                 f"[Reconcile] Order {missing_oid} has unusual status '{status_str}' "
@@ -1363,8 +1278,8 @@ class TradingBotOrchestrator:
                             self.executor._open_orders.pop(missing_oid, None)
                         try:
                             self.db.delete_position(missing_oid)
-                        except Exception as exc:
-                            logger.warning("[Reconcile] Failed to delete stale DB position %s: %s", missing_oid, exc)
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     logger.error(f"[Reconcile] Failed to check history for {missing_oid}: {e}")
@@ -1494,43 +1409,8 @@ class TradingBotOrchestrator:
             except Exception as exc:
                 logger.error("Failed to refresh WebSocket subscriptions for %s: %s", normalized, exc)
 
-        self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}
-
         logger.info("[Pairs] Runtime pairs updated via %s: %s -> %s", reason, current_pairs, normalized)
         return normalized
-
-    def _filter_pairs_by_candle_readiness(self, pairs: List[str], allow_refresh: bool = True) -> List[str]:
-        if not pairs or not bool(getattr(self, "mtf_enabled", False)):
-            self._last_candle_readiness_skipped = ()
-            return list(pairs)
-
-        try:
-            mtf_status = self._get_dashboard_multi_timeframe_status(allow_refresh=allow_refresh) or {}
-        except Exception as exc:
-            logger.debug("Failed to evaluate candle readiness filter: %s", exc)
-            return list(pairs)
-
-        pair_rows = list(mtf_status.get("pairs") or [])
-        if not pair_rows:
-            self._last_candle_readiness_skipped = ()
-            return list(pairs)
-
-        ready_pairs = {
-            str(row.get("pair") or "").upper()
-            for row in pair_rows
-            if row.get("ready")
-        }
-        filtered_pairs = [pair for pair in pairs if str(pair).upper() in ready_pairs]
-        skipped = tuple(pair for pair in pairs if pair not in filtered_pairs)
-
-        if skipped:
-            if skipped != getattr(self, "_last_candle_readiness_skipped", None):
-                logger.info("[Candle Guard] Skipping pairs without complete candle readiness: %s", list(skipped))
-                self._last_candle_readiness_skipped = skipped
-        else:
-            self._last_candle_readiness_skipped = ()
-
-        return filtered_pairs
 
     def _lookup_order_history_status(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
         """Fallback history lookup for an order when the info endpoint is inconclusive."""
@@ -1604,7 +1484,6 @@ class TradingBotOrchestrator:
     ) -> None:
         if not getattr(self, "db", None) or quantity <= 0 or price <= 0:
             return
-        logged_at = timestamp or datetime.utcnow()
         try:
             self.db.insert_order(
                 pair=symbol,
@@ -1614,21 +1493,10 @@ class TradingBotOrchestrator:
                 status="filled",
                 order_type=order_type,
                 fee=fee,
-                timestamp=logged_at,
+                timestamp=timestamp or datetime.utcnow(),
             )
         except Exception as exc:
             logger.error("[State] Failed to log filled %s order for %s: %s", side, symbol, exc, exc_info=True)
-        try:
-            self.db.insert_trade(
-                pair=symbol,
-                side=side,
-                quantity=quantity,
-                price=price,
-                fee=fee,
-                timestamp=logged_at,
-            )
-        except Exception as exc:
-            logger.error("[State] Failed to log filled %s trade for %s: %s", side, symbol, exc, exc_info=True)
 
     def _reconcile_pending_trade_states(self, remote_order_ids: set[str]) -> set[str]:
         handled_order_ids: set[str] = set()
@@ -1784,13 +1652,13 @@ class TradingBotOrchestrator:
             return
 
         entry_cost = float(snapshot.total_entry_cost or (snapshot.entry_price * amount) or 0.0)
-        entry_fee = entry_cost * BITKUB_FEE_PCT
-        gross_exit = exit_price * amount
-        exit_fee = gross_exit * BITKUB_FEE_PCT
-        net_exit = gross_exit - exit_fee
-        total_fees = entry_fee + exit_fee
-        net_pnl = net_exit - entry_cost
-        net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0.0
+        entry_fee = precise_multiply(entry_cost, BITKUB_FEE_PCT)
+        gross_exit = precise_multiply(exit_price, amount)
+        exit_fee = precise_multiply(gross_exit, BITKUB_FEE_PCT)
+        net_exit = precise_subtract(gross_exit, exit_fee)
+        total_fees = precise_add(entry_fee, exit_fee)
+        net_pnl = precise_subtract(net_exit, entry_cost)
+        net_pnl_pct = precise_multiply(precise_divide(net_pnl, entry_cost), 100) if entry_cost > 0 else 0.0
         now = datetime.now()
 
         self._log_filled_order(
@@ -1828,11 +1696,8 @@ class TradingBotOrchestrator:
         msg = self._format_exit_alert(
             snapshot.symbol,
             trigger_label,
-            amount,
             snapshot.entry_price,
             exit_price,
-            entry_cost,
-            gross_exit,
             net_pnl,
             net_pnl_pct,
             total_fees,
@@ -1864,12 +1729,13 @@ class TradingBotOrchestrator:
             "result": result,
             "timestamp": datetime.now(),
         })
+        if len(self._executed_today) > self._executed_today_max:
+            self._executed_today = self._executed_today[-self._executed_today_max:]
         coin = self._format_coin_symbol(decision.plan.symbol)
         msg = self._format_alert_block(
             f"📥 <b>ส่งคำสั่งซื้อ</b>  {coin}",
             [
                 f"ราคา  <code>{decision.plan.entry_price:,.0f}</code> THB  ({decision.plan.confidence:.0%})",
-                f"ขนาดไม้จะคำนวณตามยอดคงเหลือ/ความเสี่ยงตอนส่งออเดอร์",
                 f"SL <code>{decision.plan.stop_loss:,.0f}</code>  TP <code>{decision.plan.take_profit:,.0f}</code>",
             ],
         )
@@ -1999,7 +1865,6 @@ class TradingBotOrchestrator:
                                 [
                                     f"ได้ของจำนวน: <code>{filled_amount:.6f}</code>",
                                     f"ที่ราคา: <code>{filled_price:,.2f}</code> THB",
-                                    f"มูลค่าไม้: <code>{filled_amount * filled_price:,.2f}</code> THB",
                                 ]
                             )
                             self._send_alert(msg, to_telegram=True)
@@ -2165,8 +2030,6 @@ class TradingBotOrchestrator:
                 self._last_portfolio_guard_skipped = ()
         else:
             self._last_portfolio_guard_skipped = ()
-
-        active_pairs = self._filter_pairs_by_candle_readiness(active_pairs, allow_refresh=True)
 
         logger.debug(f"Actual pairs to process: {active_pairs}")
 
@@ -2576,6 +2439,12 @@ class TradingBotOrchestrator:
         df.attrs["_data_source"] = "db"
         
         self._symbol_market_cache[cache_key] = {"data": df, "timestamp": now}
+        # Evict stale entries to prevent cache growth
+        if len(self._symbol_market_cache) > 100:
+            stale_cutoff = now - self._cache_ttl['market_data'] * 3
+            stale_keys = [k for k, v in self._symbol_market_cache.items() if v["timestamp"] < stale_cutoff]
+            for k in stale_keys:
+                del self._symbol_market_cache[k]
         return df
     
     def _create_execution_plan_for_symbol(self, signal: AggregatedSignal, symbol: str) -> Optional[ExecutionPlan]:
@@ -2864,20 +2733,20 @@ class TradingBotOrchestrator:
                 price=current_price,
             )
             if result.success:
-                # ── Net P/L with Bitkub 0.25% fees ────────────────
+                # ── Net P/L with Bitkub 0.25% fees (Decimal precision) ──
                 from trade_executor import BITKUB_FEE_PCT
                 now = datetime.now()
                 
-                entry_cost = total_entry_cost if total_entry_cost > 0 else (entry_price * amount)
-                entry_fee = entry_cost * BITKUB_FEE_PCT
+                entry_cost = total_entry_cost if total_entry_cost > 0 else precise_multiply(entry_price, amount)
+                entry_fee = precise_multiply(entry_cost, BITKUB_FEE_PCT)
                 
-                gross_exit = current_price * amount
-                exit_fee = gross_exit * BITKUB_FEE_PCT
-                net_exit = gross_exit - exit_fee
+                gross_exit = precise_multiply(current_price, amount)
+                exit_fee = precise_multiply(gross_exit, BITKUB_FEE_PCT)
+                net_exit = precise_subtract(gross_exit, exit_fee)
                 
-                total_fees = entry_fee + exit_fee
-                net_pnl = net_exit - entry_cost
-                net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
+                total_fees = precise_add(entry_fee, exit_fee)
+                net_pnl = precise_subtract(net_exit, entry_cost)
+                net_pnl_pct = precise_multiply(precise_divide(net_pnl, entry_cost), 100) if entry_cost > 0 else 0
                 
                 pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
                 coin = symbol.replace("THB_", "")
@@ -2901,11 +2770,8 @@ class TradingBotOrchestrator:
                 msg = self._format_exit_alert(
                     symbol,
                     trigger_label,
-                    amount,
                     entry_price,
                     current_price,
-                    entry_cost,
-                    gross_exit,
                     net_pnl,
                     net_pnl_pct,
                     total_fees,
@@ -3136,6 +3002,8 @@ class TradingBotOrchestrator:
                 "result": result,
                 "timestamp": datetime.now()
             })
+            if len(self._executed_today) > self._executed_today_max:
+                self._executed_today = self._executed_today[-self._executed_today_max:]
             
             # Log order to database
             try:
@@ -3251,6 +3119,8 @@ class TradingBotOrchestrator:
                 "result": result,
                 "timestamp": datetime.now()
             })
+            if len(self._executed_today) > self._executed_today_max:
+                self._executed_today = self._executed_today[-self._executed_today_max:]
             with self._pending_decisions_lock:
                 self._pending_decisions.pop(decision_id)
             return True
@@ -3364,11 +3234,8 @@ class TradingBotOrchestrator:
         self,
         symbol: str,
         trigger_label: str,
-        amount: float,
         entry_price: float,
         exit_price: float,
-        entry_cost: float,
-        gross_exit: float,
         net_pnl: float,
         net_pnl_pct: float,
         total_fees: float,
@@ -3379,9 +3246,7 @@ class TradingBotOrchestrator:
         return self._format_alert_block(
             f"📤 <b>Position Closed</b>  {coin}  ({trigger_label})",
             [
-                f"Size <code>{amount:.8f}</code> {coin}",
-                f"Buy <code>{entry_cost:,.2f}</code> THB @ <code>{entry_price:,.2f}</code>",
-                f"Sell <code>{gross_exit:,.2f}</code> THB @ <code>{exit_price:,.2f}</code>",
+                f"Entry <code>{entry_price:,.0f}</code> -> Exit <code>{exit_price:,.0f}</code>",
                 f"{pnl_emoji} PnL <code>{net_pnl:+,.0f}</code> THB ({net_pnl_pct:+.2f}%)",
                 f"Fees <code>{total_fees:,.0f}</code> THB",
             ],
@@ -3405,7 +3270,6 @@ class TradingBotOrchestrator:
         return self._format_alert_block(
             f"📥 <b>Position Opened</b>  {coin}",
             [
-                f"Size <code>{float(result.filled_amount or 0.0):.8f}</code> {coin}",
                 f"Fill Price <code>{fill_price:,.0f}</code> THB",
                 f"Notional <code>{size_thb:,.0f}</code> THB  |  Confidence {conf:.0%}",
                 f"SL <code>{sl:,.0f}</code>  |  TP <code>{tp:,.0f}</code>",
@@ -3484,7 +3348,6 @@ class TradingBotOrchestrator:
             "enabled": bool(getattr(self, "mtf_enabled", False)),
             "mode": "confirmation",
             "timeframes": timeframes,
-            "required_candles": _MIN_CANDLES_FOR_TRADING_READINESS,
             "require_htf_confirmation": bool(getattr(self, "_mtf_confirmation_required", False)),
             "primary_timeframe": getattr(self, "timeframe", "1h"),
             "pairs": [],
@@ -3503,34 +3366,22 @@ class TradingBotOrchestrator:
             pair_summaries = []
             for pair in list(getattr(self, "trading_pairs", []) or []):
                 timeframe_rows = []
-                waiting_total = 0
-                blocking_timeframes: List[str] = []
                 for timeframe in timeframes:
                     cursor.execute(
                         "SELECT COUNT(*), MAX(timestamp) FROM prices WHERE pair = ? AND COALESCE(timeframe, '1h') = ?",
                         (pair, timeframe),
                     )
                     count, latest = cursor.fetchone()
-                    count_value = int(count or 0)
-                    waiting_candles = max(0, _MIN_CANDLES_FOR_TRADING_READINESS - count_value)
-                    waiting_total += waiting_candles
-                    if waiting_candles > 0:
-                        blocking_timeframes.append(f"{timeframe}:{waiting_candles}")
                     timeframe_rows.append({
                         "timeframe": timeframe,
-                        "count": count_value,
-                        "required_candles": _MIN_CANDLES_FOR_TRADING_READINESS,
-                        "waiting_candles": waiting_candles,
+                        "count": int(count or 0),
                         "latest": latest.isoformat() if hasattr(latest, "isoformat") else (str(latest) if latest else None),
                     })
 
                 pair_summaries.append({
                     "pair": pair,
                     "timeframes": timeframe_rows,
-                    "required_candles": _MIN_CANDLES_FOR_TRADING_READINESS,
-                    "waiting_candles": waiting_total,
-                    "waiting_summary": ", ".join(blocking_timeframes) if blocking_timeframes else "ready",
-                    "ready": all((row["waiting_candles"] or 0) <= 0 for row in timeframe_rows),
+                    "ready": all((row["count"] or 0) > 0 for row in timeframe_rows),
                 })
 
             status["pairs"] = pair_summaries
@@ -3541,8 +3392,8 @@ class TradingBotOrchestrator:
             try:
                 cursor.close()
                 conn.close()
-            except Exception as exc:
-                logger.debug("Failed to close MTF status DB resources: %s", exc)
+            except Exception:
+                pass
 
         return status
     
@@ -3605,7 +3456,6 @@ class TradingBotOrchestrator:
             )
 
         mtf_status = self._get_dashboard_multi_timeframe_status(allow_refresh=not lightweight)
-        tradable_pairs = self._filter_pairs_by_candle_readiness(list(trading_pairs), allow_refresh=not lightweight)
         executor = getattr(self, "executor", None)
         open_positions = 0
         if executor and hasattr(executor, "get_open_orders"):
@@ -3629,7 +3479,6 @@ class TradingBotOrchestrator:
                 "public_only": getattr(self, "_auth_degraded", False),
             },
             "trading_pairs": trading_pairs,
-            "tradable_pairs": tradable_pairs,
             "trading_paused": {
                 "active": paused,
                 "reason": pause_reason,
@@ -3805,15 +3654,15 @@ class TradingBotOrchestrator:
                     now = datetime.now()
                     
                     entry_cost = pos.get("total_entry_cost", entry_price * amount)
-                    entry_fee = entry_cost * BITKUB_FEE_PCT
+                    entry_fee = precise_multiply(entry_cost, BITKUB_FEE_PCT)
                     
-                    gross_exit = exit_price * amount
-                    exit_fee = gross_exit * BITKUB_FEE_PCT
-                    net_exit = gross_exit - exit_fee
+                    gross_exit = precise_multiply(exit_price, amount)
+                    exit_fee = precise_multiply(gross_exit, BITKUB_FEE_PCT)
+                    net_exit = precise_subtract(gross_exit, exit_fee)
                     
-                    total_fees = entry_fee + exit_fee
-                    net_pnl = net_exit - entry_cost
-                    net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
+                    total_fees = precise_add(entry_fee, exit_fee)
+                    net_pnl = precise_subtract(net_exit, entry_cost)
+                    net_pnl_pct = precise_multiply(precise_divide(net_pnl, entry_cost), 100) if entry_cost > 0 else 0
                     
                     pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
                     trigger_emoji = "🎯" if triggered == "TP" else "🛑"
@@ -3838,11 +3687,8 @@ class TradingBotOrchestrator:
                     msg = self._format_exit_alert(
                         pos_symbol,
                         trigger_label,
-                        amount,
                         entry_price,
                         exit_price,
-                        entry_cost,
-                        gross_exit,
                         net_pnl,
                         net_pnl_pct,
                         total_fees,

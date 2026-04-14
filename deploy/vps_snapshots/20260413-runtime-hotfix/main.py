@@ -28,6 +28,7 @@ try:
 except ImportError:  # pragma: no cover - non-Windows fallback
     msvcrt = None  # type: ignore[assignment]
 
+# Linux raw terminal input support
 _termios = None
 try:
     import termios as _termios  # type: ignore[import-untyped]
@@ -59,7 +60,6 @@ from logger_setup import get_shared_console
 from health_server import BotHealthServer
 from process_guard import acquire_bot_lock, release_bot_lock, get_lock_status
 from helpers import format_bitkub_time, get_current_price, now_bitkub, parse_as_bitkub_time
-from state_management import normalize_buy_quantity
 from cli_ui import CLICommandCenter
 
 logger = logging.getLogger(__name__)
@@ -241,7 +241,7 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
 
     scalping_mode = dict(strategy_mode.get("scalping", {}) or {})
 
-    primary_tf = str(scalping_mode.get("primary_timeframe") or trading_cfg.get("timeframe") or "15m")
+    primary_tf = str(scalping_mode.get("primary_timeframe") or "5m")
     confirm_tf = str(scalping_mode.get("confirm_timeframe") or "15m")
     trend_tf = str(scalping_mode.get("trend_timeframe") or "1h")
     max_hold_minutes = int(scalping_mode.get("position_timeout_minutes", 30) or 30)
@@ -677,6 +677,25 @@ class TradingBotApp:
         return "Enter=send | Tab=autocomplete | Up/Down=history | Backspace=edit | Esc=clear"
 
 
+    def _get_cli_footer_shortcuts_text(self) -> str:
+        lines = [
+            "Footer chat shortcuts:",
+            "  Enter send command",
+            "  Tab autocomplete",
+        ]
+        if _termios is not None and self._live_dashboard_active:
+            lines.extend([
+                "  Backspace edit current line",
+                "  Arrow keys ignored in Linux tmux",
+            ])
+        else:
+            lines.extend([
+                "  Up/Down recall history",
+                "  Esc clear current input",
+            ])
+        return "\n".join(lines)
+
+
     def _ensure_cli_chat_runtime_state(self) -> None:
         if getattr(self, "_cli_chat_lock", None) is None:
             self._cli_chat_lock = threading.Lock()
@@ -864,6 +883,10 @@ class TradingBotApp:
                 "status",
                 "orders",
                 "mode show",
+                "mode cycle",
+                "mode standard",
+                "mode trend",
+                "mode scalp",
                 "mode set standard",
                 "mode set standard restart",
                 "risk show",
@@ -902,12 +925,19 @@ class TradingBotApp:
         if first == "mode":
             return self._match_cli_suggestions([
                 "mode show",
+                "mode cycle",
+                "mode standard",
                 "mode set standard",
                 "mode set standard restart",
+                "mode trend",
+                "mode trend_only",
                 "mode set trend_only",
                 "mode set trend_only restart",
+                "mode scalp",
+                "mode scalping",
                 "mode set scalping",
                 "mode set scalping restart",
+                "mode cycle restart",
             ], stripped)
 
         if pending and first in {"c", "co", "con", "conf", "confi", "confirm", "ca", "can", "canc", "cance", "cancel"}:
@@ -990,7 +1020,11 @@ class TradingBotApp:
         if normalized == "risk":
             return len(args) == 2 and str(args[0] or "").lower() == "set"
         if normalized == "mode":
+            if len(args) == 1 and str(args[0] or "").lower() in {"standard", "std", "trend", "trend_only", "trendonly", "scalp", "scalper", "scalping", "cycle"}:
+                return True
             if len(args) == 2 and str(args[0] or "").lower() == "set":
+                return True
+            if len(args) == 2 and str(args[1] or "").lower() == "restart" and str(args[0] or "").lower() in {"standard", "std", "trend", "trend_only", "trendonly", "scalp", "scalper", "scalping", "cycle"}:
                 return True
             return len(args) == 3 and str(args[0] or "").lower() == "set" and str(args[2] or "").lower() == "restart"
         return False
@@ -1013,10 +1047,14 @@ class TradingBotApp:
             summary = f"Confirm close active order {args[0]} via market SELL"
         elif normalized == "risk" and len(args) == 2:
             summary = f"Confirm risk change to {float(args[1]):.2f}% per trade"
+        elif normalized == "mode" and len(args) == 1:
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[0])} (restart required)"
+        elif normalized == "mode" and len(args) == 2 and str(args[1] or "").lower() == "restart":
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[0])} and restart bot"
         elif normalized == "mode" and len(args) == 2 and str(args[0] or "").lower() == "set":
-            summary = f"Confirm strategy mode change to {str(args[1] or '').lower()} (restart required)"
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[1])} (restart required)"
         elif normalized == "mode" and len(args) == 3 and str(args[0] or "").lower() == "set" and str(args[2] or "").lower() == "restart":
-            summary = f"Confirm strategy mode change to {str(args[1] or '').lower()} and restart bot"
+            summary = f"Confirm strategy mode change to {self._resolve_target_strategy_mode(args[1])} and restart bot"
 
         return {
             "command": normalized,
@@ -1091,8 +1129,32 @@ class TradingBotApp:
             "enabled_strategies": list((self.config.get("strategies", {}) or {}).get("enabled") or []),
         }
 
+    def _resolve_target_strategy_mode(self, selector: Any) -> str:
+        normalized = str(selector or "").strip().lower()
+        alias_map = {
+            "std": "standard",
+            "standard": "standard",
+            "trend": "trend_only",
+            "trendonly": "trend_only",
+            "trend_only": "trend_only",
+            "scalp": "scalping",
+            "scalper": "scalping",
+            "scalping": "scalping",
+        }
+        if normalized == "cycle":
+            current = str(self.get_runtime_mode_status().get("active_mode") or "standard").lower()
+            rotation = ["standard", "trend_only", "scalping"]
+            try:
+                current_index = rotation.index(current)
+            except ValueError:
+                current_index = 0
+            return rotation[(current_index + 1) % len(rotation)]
+        if normalized in alias_map:
+            return alias_map[normalized]
+        return self._normalize_strategy_mode(normalized)
+
     def set_runtime_strategy_mode(self, mode: str) -> Dict[str, Any]:
-        normalized_mode = self._normalize_strategy_mode(mode)
+        normalized_mode = self._resolve_target_strategy_mode(mode)
         config_path = self._config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1332,21 +1394,19 @@ class TradingBotApp:
             raise RuntimeError(result.message or "Market BUY failed")
 
         reference_price = float(result.filled_price or self._get_cli_price(symbol) or 0.0)
-        filled_amount = normalize_buy_quantity(float(result.filled_amount or amount_value), reference_price, amount_value)
-        market_buy_filled = filled_amount > 0.0 and reference_price > 0.0
         tracked_payload = {
             "symbol": symbol,
             "side": OrderSide.BUY,
-            "amount": filled_amount,
+            "amount": round(amount_value, 2),
             "entry_price": reference_price,
             "stop_loss": None,
             "take_profit": None,
             "timestamp": datetime.now(),
             "is_partial_fill": result.status == OrderStatus.PARTIAL,
-            "remaining_amount": 0.0 if market_buy_filled else float(result.remaining_amount or 0.0),
+            "remaining_amount": float(result.remaining_amount or 0.0),
             "total_entry_cost": round(amount_value, 2),
-            "filled": result.status == OrderStatus.FILLED or market_buy_filled,
-            "filled_amount": filled_amount,
+            "filled": result.status == OrderStatus.FILLED,
+            "filled_amount": float(result.filled_amount or 0.0),
             "filled_price": reference_price,
         }
         executor.register_tracked_position(result.order_id, tracked_payload)
@@ -1430,7 +1490,10 @@ class TradingBotApp:
             "trigger": "manual_import",
             "notes": "cli_manual_track",
         }
-        self.executor.register_tracked_position(position_id, tracked_payload)
+        executor = self.executor
+        if not executor:
+            raise RuntimeError("Trading executor is not available")
+        executor.register_tracked_position(position_id, tracked_payload)
         if self.api_client:
             try:
                 self.api_client.get_balances(force_refresh=True, allow_stale=False)
@@ -1467,24 +1530,13 @@ class TradingBotApp:
             if amount is not None:
                 raise ValueError("Use close <order_id> for active orders or sell <pair> <amount> for manual quantity sells")
             symbol = tracked_order["symbol"]
-            raw_side = tracked_order.get("side")
-            side_value = raw_side.value if hasattr(raw_side, "value") else str(raw_side or "").lower()
-            if str(side_value).lower() == "buy":
-                sell_amount = float(
-                    tracked_order.get("filled_amount")
-                    or tracked_order.get("amount")
-                    or 0.0
-                )
-            else:
-                sell_amount = float(tracked_order.get("remaining_amount") or tracked_order.get("amount") or 0.0)
+            sell_amount = float(tracked_order.get("remaining_amount") or tracked_order.get("amount") or 0.0)
             tracked_order_id = tracked_order["order_id"]
         else:
             symbol = _normalize_cli_pair(target)
             tracked_order_id = ""
             if amount is None:
-                if re.fullmatch(r"[A-Za-z]+(?:_[A-Za-z]+)?", str(target or "").strip()):
-                    raise ValueError("SELL amount must be provided when selling by pair")
-                raise ValueError(f"Active order not found: {target}")
+                raise ValueError("SELL amount must be provided when selling by pair")
             try:
                 sell_amount = float(amount)
             except (TypeError, ValueError) as exc:
@@ -1534,7 +1586,10 @@ class TradingBotApp:
             "  status\n"
             "  orders\n"
             "  mode show\n"
+            "  mode cycle\n"
+            "  mode <standard|trend|scalp>\n"
             "  mode set <standard|trend_only|scalping>\n"
+            "  mode <standard|trend|scalp> restart\n"
             "  mode set <standard|trend_only|scalping> restart\n"
             "  confirm\n"
             "  cancel\n"
@@ -1551,11 +1606,7 @@ class TradingBotApp:
             "  pairs add <PAIR|ASSET> [MORE...]\n"
             "  pairs remove <PAIR|ASSET> [MORE...]\n"
             "  pairs reload\n\n"
-            "Footer chat shortcuts:\n"
-            "  Enter send command\n"
-            "  Tab autocomplete\n"
-            "  Up/Down recall history\n"
-            "  Esc clear current input"
+            f"{self._get_cli_footer_shortcuts_text()}"
         )
 
     def _execute_cli_command(self, command: str, args: List[str]) -> str:
@@ -1591,6 +1642,19 @@ class TradingBotApp:
                     f"Strategy mode: {result['active_mode']} | timeframe={result['timeframe']} | "
                     f"strategies={enabled} | path={result['config_path']}"
                 )
+            if len(args) == 1:
+                result = self.set_runtime_strategy_mode(args[0])
+                return (
+                    f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
+                    "restart bot to apply fully"
+                )
+            if len(args) == 2 and args[1].lower() == "restart":
+                result = self.set_runtime_strategy_mode(args[0])
+                self.request_process_restart(reason=f"mode change to {result['active_mode']}")
+                return (
+                    f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
+                    "restarting now"
+                )
             if len(args) == 2 and args[0].lower() == "set":
                 result = self.set_runtime_strategy_mode(args[1])
                 return (
@@ -1604,7 +1668,7 @@ class TradingBotApp:
                     f"Strategy mode saved: {result['active_mode']} | path={result['config_path']} | "
                     "restarting now"
                 )
-            return "Usage: mode show | mode set <standard|trend_only|scalping>"
+            return "Usage: mode show | mode cycle | mode <standard|trend|scalp> [restart] | mode set <standard|trend_only|scalping> [restart]"
 
         if command == "risk":
             if not args or args[0].lower() == "show":
@@ -1797,6 +1861,7 @@ class TradingBotApp:
             logger.info("CLI command listener ready in Rich footer chat. Type 'help'.")
 
             if msvcrt is not None and self._live_dashboard_active:
+                # ── Windows: char-by-char via msvcrt ──
                 while not self._shutdown_event.is_set():
                     if not msvcrt.kbhit():
                         time.sleep(0.05)
@@ -1846,6 +1911,7 @@ class TradingBotApp:
                 return
 
             if _termios is not None and self._live_dashboard_active:
+                # ── Linux/tmux: canonical input with shell-level `stty -echo` ──
                 self._set_cli_chat_status("Linux tmux mode: Enter=send | Backspace=edit | arrow keys ignored")
                 while not self._shutdown_event.is_set():
                     try:
@@ -1923,6 +1989,8 @@ class TradingBotApp:
         return format_bitkub_time(value)
 
     def _sample_api_latency(self, symbol: str) -> Optional[float]:
+        if getattr(self, "_live_dashboard_active", False):
+            return getattr(self, "_api_latency_ms", None)
         now = time.time()
         if now - self._api_latency_checked_at < self._api_latency_cache_seconds:
             return self._api_latency_ms
@@ -1951,73 +2019,8 @@ class TradingBotApp:
         )
         if price is None and cached:
             return cached[0]
-        if price is not None:
-            self._cli_price_cache[symbol] = (price, now)
+        self._cli_price_cache[symbol] = (price, now)
         return price
-
-    def _get_cli_position_price_hint(self, symbol: str, include_entry_price: bool = True) -> Optional[float]:
-        if not symbol or not self.executor:
-            return None
-
-        try:
-            open_orders = self.executor.get_open_orders() or []
-        except Exception:
-            return None
-
-        hint_keys = ("current_price", "filled_price", "entry_price") if include_entry_price else ("current_price", "filled_price")
-
-        for position in open_orders:
-            if str(position.get("symbol") or "").upper() != str(symbol).upper():
-                continue
-            for key in hint_keys:
-                try:
-                    price = float(position.get(key) or 0.0)
-                except (TypeError, ValueError):
-                    price = 0.0
-                if price > 0:
-                    return price
-        return None
-
-    @staticmethod
-    def _summarize_cli_candle_readiness(multi_timeframe_status: Optional[Dict[str, Any]]) -> str:
-        status = dict(multi_timeframe_status or {})
-        pairs = list(status.get("pairs") or [])
-        if not pairs:
-            return "-"
-
-        total_pairs = len(pairs)
-        ready_pairs = 0
-        lagging_pairs = 0
-        for pair_status in pairs:
-            if pair_status.get("ready"):
-                ready_pairs += 1
-            else:
-                lagging_pairs += 1
-
-        summary = f"{ready_pairs}/{total_pairs} ready"
-        if lagging_pairs:
-            summary += f" ({lagging_pairs} lagging)"
-        return summary
-
-    @staticmethod
-    def _summarize_cli_candle_waiting(multi_timeframe_status: Optional[Dict[str, Any]], limit: int = 3) -> str:
-        status = dict(multi_timeframe_status or {})
-        pairs = list(status.get("pairs") or [])
-        waiting_rows = []
-        for pair_status in pairs:
-            waiting_candles = int(pair_status.get("waiting_candles", 0) or 0)
-            if waiting_candles <= 0:
-                continue
-            pair = str(pair_status.get("pair") or "").replace("THB_", "")
-            waiting_summary = str(pair_status.get("waiting_summary") or "").strip()
-            if waiting_summary and waiting_summary.lower() != "ready":
-                waiting_rows.append(f"{pair} {waiting_summary}")
-            else:
-                waiting_rows.append(f"{pair} {waiting_candles}")
-
-        if not waiting_rows:
-            return "Ready"
-        return "; ".join(waiting_rows[:limit])
 
     def _get_cli_balance_summary(self, portfolio_state: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate total portfolio value in THB and per-asset valuation details."""
@@ -2086,8 +2089,6 @@ class TradingBotApp:
                 if allow_rest_fallback
                 else self._get_cli_price(f"THB_{symbol}", False)
             )
-            if not current_price or current_price <= 0:
-                current_price = self._get_cli_position_price_hint(f"THB_{symbol}")
             if current_price and current_price > 0:
                 value_thb = amount * current_price
                 total_value += value_thb
@@ -2142,24 +2143,13 @@ class TradingBotApp:
                 continue
 
             timeframe_rows = list(row.get("timeframes") or [])
-            ready_count = sum(1 for item in timeframe_rows if int(item.get("waiting_candles", 0) or 0) <= 0)
+            ready_count = sum(1 for item in timeframe_rows if int(item.get("count", 0) or 0) > 0)
             total_count = len(timeframe_rows)
             latest_raw = next((item.get("latest") for item in reversed(timeframe_rows) if item.get("latest")), None)
-            waiting_summary = str(row.get("waiting_summary") or "").strip()
-            if bool(row.get("ready")):
-                pair_state = "Ready"
-                wait_detail = "-"
-            elif waiting_summary and waiting_summary.lower() != "ready":
-                pair_state = f"Collecting {waiting_summary}"
-                wait_detail = waiting_summary
-            else:
-                pair_state = "Collecting"
-                wait_detail = "-"
 
             context[pair] = {
                 "tf_ready": f"{ready_count}/{total_count}" if total_count else "-",
-                "pair_state": pair_state,
-                "wait_detail": wait_detail,
+                "pair_state": "Ready" if bool(row.get("ready")) else "Collecting",
                 "market_update": TradingBotApp._format_cli_timestamp(latest_raw),
             }
         return context
@@ -2219,19 +2209,11 @@ class TradingBotApp:
                     "action": final_action,
                     "tf_ready": str(runtime_context.get("tf_ready") or "-"),
                     "pair_state": str(runtime_context.get("pair_state") or "-"),
-                    "wait_detail": str(runtime_context.get("wait_detail") or "-"),
                     "market_update": str(runtime_context.get("market_update") or "-"),
                     "status": status,
                     "updated_at": self._format_cli_timestamp(record.get("updated_at")),
                 }
             )
-        rows.sort(
-            key=lambda row: (
-                0 if str(row.get("wait_detail") or "-") not in ("", "-") else 1,
-                0 if str(row.get("action") or "").upper() == "WAIT" else 1,
-                str(row.get("symbol") or ""),
-            )
-        )
         return rows
 
     @staticmethod
@@ -2300,10 +2282,6 @@ class TradingBotApp:
                 if symbol and allow_rest_fallback
                 else self._get_cli_price(symbol, False) if symbol else None
             )
-            # Never use entry_price as a current-price fallback in the positions panel.
-            # That masks the preserved cost basis after restart and makes PnL read 0.00%.
-            if (not current_price or current_price <= 0) and symbol:
-                current_price = self._get_cli_position_price_hint(symbol, include_entry_price=False)
             pnl_pct = 0.0
             if current_price and entry_price > 0:
                 if side.lower() == "sell":
@@ -2325,9 +2303,6 @@ class TradingBotApp:
                     except Exception:
                         pass
 
-            # Bootstrap source tag for dashboard clarity
-            bootstrap_src = position.get("bootstrap_source") or ""
-
             positions.append({
                 "symbol": symbol or "-",
                 "side": side or "buy",
@@ -2338,7 +2313,6 @@ class TradingBotApp:
                 "take_profit": pos_tp,
                 "sl_distance_pct": (((float(pos_sl) - float(current_price)) / float(current_price)) * 100.0) if current_price and pos_sl else None,
                 "tp_distance_pct": (((float(pos_tp) - float(current_price)) / float(current_price)) * 100.0) if current_price and pos_tp else None,
-                "bootstrap_source": bootstrap_src,
             })
         _warn_snapshot_step("positions", step_started)
 
@@ -2376,22 +2350,12 @@ class TradingBotApp:
         elif market_age_seconds is not None and market_age_seconds > int(refresh_baseline * 2):
             freshness = "warning"
 
-        # Include ALL whitelist coins in signal alignment, not just tradable ones
-        try:
-            _, _, whitelist_assets = self._load_runtime_pairlist_document()
-            all_signal_pairs = list(dict.fromkeys(
-                trading_pairs + [f"THB_{a}" for a in whitelist_assets if f"THB_{a}" not in trading_pairs]
-            ))
-        except Exception:
-            all_signal_pairs = trading_pairs
         signal_alignment = self._build_cli_signal_alignment(
-            all_signal_pairs,
+            trading_pairs,
             bot_status.get("multi_timeframe"),
         )
         recent_events = self._format_cli_recent_events(bot_status, limit=5)
         risk_summary = dict(bot_status.get("risk_summary") or {})
-        candle_readiness = self._summarize_cli_candle_readiness(bot_status.get("multi_timeframe"))
-        candle_waiting = self._summarize_cli_candle_waiting(bot_status.get("multi_timeframe"))
         balance_summary = self._get_cli_balance_summary(portfolio_state)
         _warn_snapshot_step("snapshot_sections", step_started)
 
@@ -2438,8 +2402,6 @@ class TradingBotApp:
                 "market_age_seconds": market_age_seconds,
                 "freshness": freshness,
                 "api_latency": f"{api_latency_ms:.0f} ms" if api_latency_ms is not None else "-",
-                "candle_readiness": candle_readiness,
-                "candle_waiting": candle_waiting,
                 "available_balance": f"{float(portfolio_state.get('balance', 0.0) or 0.0):,.2f} THB",
                 "total_balance": f"{total_balance_thb:,.2f} THB",
                 "balance_breakdown": balance_breakdown,
@@ -2807,7 +2769,6 @@ class TradingBotApp:
             "max_open_positions": risk_config.get("max_open_positions", 3),
             "max_daily_trades": risk_config.get("max_daily_trades", 10),
             "scalping": strategies_config.get("scalping", {}),
-            "sniper": strategies_config.get("sniper", {}) or strategies_config.get("scalping", {}),
         })
         logger.info("ระบบสร้างสัญญาณเทรดพร้อมทำงาน (Signal Generator initialized)")
         
@@ -2992,7 +2953,6 @@ class TradingBotApp:
                     self.start(register_signal_handlers=register_signal_handlers)
                     self._start_cli_command_listener()
                     next_refresh_at = 0.0
-                    last_render_signature: Optional[str] = None
                     _render_failure_count = 0
                     while self.bot and self.bot.running:
                         from api_client import SHOULD_SHUTDOWN as _shutdown_flag
@@ -3005,14 +2965,11 @@ class TradingBotApp:
                         now = time.time()
                         if now >= next_refresh_at:
                             try:
-                                snapshot, render_signature = command_center.capture_render_state()
-                                if render_signature != last_render_signature:
-                                    render_started = time.perf_counter()
-                                    live.update(command_center.render(snapshot), refresh=True)
-                                    render_elapsed_ms = (time.perf_counter() - render_started) * 1000.0
-                                    if render_elapsed_ms >= 1000.0:
-                                        logger.warning("[CLI PERF] live.update took %.1fms", render_elapsed_ms)
-                                    last_render_signature = render_signature
+                                render_started = time.perf_counter()
+                                live.update(command_center.render(), refresh=True)
+                                render_elapsed_ms = (time.perf_counter() - render_started) * 1000.0
+                                if render_elapsed_ms >= 1000.0:
+                                    logger.warning("[CLI PERF] live.update took %.1fms", render_elapsed_ms)
                                 _render_failure_count = 0
                             except Exception as render_exc:
                                 _render_failure_count += 1

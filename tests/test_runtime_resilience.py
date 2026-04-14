@@ -140,3 +140,13 @@ def test_websocket_recent_messages_count_as_heartbeat_activity():
 
     assert ws._seconds_since_last_activity(now=160.0) == pytest.approx(5.0)
     assert ws._seconds_since_last_activity(now=160.0) < ws.HEARTBEAT_INTERVAL * 2
+
+
+def test_websocket_heartbeat_uses_warning_and_reconnect_grace_windows():
+    ws = BitkubWebSocket(['THB_BTC'], on_tick=None)
+    ws._last_pong_time = 100.0
+    ws._last_activity_time = 100.0
+
+    assert ws._should_warn_heartbeat_stale(now=131.0) is True      # 31s > 15*2=30s warning
+    assert ws._should_force_heartbeat_reconnect(now=159.0) is False  # 59s < 15*4=60s reconnect
+    assert ws._should_force_heartbeat_reconnect(now=161.0) is True   # 61s > 60s reconnect

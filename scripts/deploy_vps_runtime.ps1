@@ -20,19 +20,17 @@ $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 
 $runtimeFiles = @(
     'main.py',
+    'api_client.py',
+    'data_collector.py',
     'trading_bot.py',
     'trade_executor.py',
     'balance_monitor.py',
     'database.py',
-    'helpers.py',
     'risk_management.py',
     'signal_generator.py',
     'cli_ui.py',
-    'strategy_base.py',
-    'portfolio_manager.py',
-    'strategies/base.py',
-    'strategies/scalping.py',
     'bot_config.yaml',
+    'coin_whitelist.json',
     'deploy/systemd/crypto-bot-tmux.sh',
     'deploy/systemd/crypto-bot-tmux.service'
 )
@@ -140,11 +138,8 @@ $backupScript = @'
 set -euo pipefail
 backup_dir='__PRE_DEPLOY_SNAPSHOT__'
 project_root='__REMOTE_PROJECT_ROOT__'
-mkdir -p "$backup_dir/strategies"
 mkdir -p "$backup_dir/deploy/systemd"
-cp "$project_root/main.py" "$project_root/trading_bot.py" "$project_root/trade_executor.py" "$project_root/balance_monitor.py" "$project_root/database.py" "$project_root/risk_management.py" "$project_root/signal_generator.py" "$project_root/cli_ui.py" "$project_root/bot_config.yaml" "$backup_dir/"
-cp "$project_root/helpers.py" "$project_root/strategy_base.py" "$backup_dir/"
-cp "$project_root/strategies/base.py" "$project_root/strategies/scalping.py" "$backup_dir/strategies/"
+cp "$project_root/main.py" "$project_root/api_client.py" "$project_root/data_collector.py" "$project_root/trading_bot.py" "$project_root/trade_executor.py" "$project_root/balance_monitor.py" "$project_root/database.py" "$project_root/risk_management.py" "$project_root/signal_generator.py" "$project_root/cli_ui.py" "$project_root/bot_config.yaml" "$project_root/coin_whitelist.json" "$backup_dir/"
 cp "$project_root/deploy/systemd/crypto-bot-tmux.sh" "$project_root/deploy/systemd/crypto-bot-tmux.service" "$backup_dir/deploy/systemd/" 2>/dev/null || true
 echo "$backup_dir"
 '@
@@ -171,8 +166,7 @@ skip_health='__SKIP_HEALTH__'
 
 chmod +x "$project_root/deploy/systemd/crypto-bot-tmux.sh"
 cd "$project_root"
-./.venv-3/bin/python -m py_compile main.py trading_bot.py trade_executor.py balance_monitor.py database.py risk_management.py signal_generator.py cli_ui.py
-./.venv-3/bin/python -m py_compile helpers.py strategy_base.py strategies/base.py strategies/scalping.py
+./.venv-3/bin/python -m py_compile main.py api_client.py data_collector.py trading_bot.py trade_executor.py balance_monitor.py database.py risk_management.py signal_generator.py cli_ui.py
 systemctl restart "$service_name"
 systemctl status "$service_name" --no-pager -l
 tmux list-sessions
@@ -196,11 +190,8 @@ $snapshotScript = @'
 set -euo pipefail
 snapshot_dir='__POST_DEPLOY_SNAPSHOT__'
 project_root='__REMOTE_PROJECT_ROOT__'
-mkdir -p "$snapshot_dir/strategies"
 mkdir -p "$snapshot_dir/deploy/systemd"
-cp "$project_root/main.py" "$project_root/trading_bot.py" "$project_root/trade_executor.py" "$project_root/balance_monitor.py" "$project_root/database.py" "$project_root/risk_management.py" "$project_root/signal_generator.py" "$project_root/cli_ui.py" "$project_root/bot_config.yaml" "$snapshot_dir/"
-cp "$project_root/helpers.py" "$project_root/strategy_base.py" "$snapshot_dir/"
-cp "$project_root/strategies/base.py" "$project_root/strategies/scalping.py" "$snapshot_dir/strategies/"
+cp "$project_root/main.py" "$project_root/api_client.py" "$project_root/data_collector.py" "$project_root/trading_bot.py" "$project_root/trade_executor.py" "$project_root/balance_monitor.py" "$project_root/database.py" "$project_root/risk_management.py" "$project_root/signal_generator.py" "$project_root/cli_ui.py" "$project_root/bot_config.yaml" "$project_root/coin_whitelist.json" "$snapshot_dir/"
 cp "$project_root/deploy/systemd/crypto-bot-tmux.sh" "$project_root/deploy/systemd/crypto-bot-tmux.service" "$snapshot_dir/deploy/systemd/"
 echo "$snapshot_dir"
 '@

@@ -13,16 +13,17 @@ Features:
 import json
 import time
 import logging
+import random
 import threading
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Callable, Optional, Dict, Any
 
 try:
-    import websocket
+    import websocket  # type: ignore[import-untyped]
 except ImportError:
+    websocket = None  # type: ignore[assignment]
     logging.error("websocket-client not installed. Please run: pip install websocket-client")
-    websocket = None
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,10 @@ class BitkubWebSocket:
     MAX_RECONNECT_DELAY = 60.0          # maximum delay (60 seconds)
     BACKOFF_MULTIPLIER = 2.0            # exponential backoff multiplier
     MAX_RECONNECT_ATTEMPTS = 10          # max retries before giving up
-    HEARTBEAT_INTERVAL = 30.0            # ping every 30 seconds
-    CONNECTION_TIMEOUT = 10.0            # connection establishment timeout
+    HEARTBEAT_INTERVAL = 15.0            # ping every 15 seconds (Bitkub will drop > 15s)
+    CONNECTION_TIMEOUT = 15.0            # connection establishment timeout
+    HEARTBEAT_WARNING_MULTIPLIER = 2.0   # warn after 60 seconds of silence
+    HEARTBEAT_RECONNECT_MULTIPLIER = 4.0 # force reconnect only after extended silence
     
     def __init__(self, symbols: List[str], on_tick: Callable[[PriceTick], None]):
         """
@@ -107,6 +110,7 @@ class BitkubWebSocket:
         self._last_connection_time: float = 0.0
         self._last_pong_time: float = time.time()
         self._last_activity_time: float = 0.0
+        self._heartbeat_warning_emitted = False
         
         # Circuit breaker
         self._consecutive_failures = 0
@@ -194,7 +198,7 @@ class BitkubWebSocket:
             logger.info(f"[WS] Connecting to: {url}")
             
             try:
-                self.ws = websocket.WebSocketApp(
+                self.ws = websocket.WebSocketApp(  # type: ignore[union-attr]
                     url,
                     on_message=self._on_message,
                     on_error=self._on_error,
@@ -204,9 +208,9 @@ class BitkubWebSocket:
                 )
                 
                 # Run with ping/pong enabled
-                self.ws.run_forever(
+                self.ws.run_forever(  # type: ignore[union-attr]
                     ping_interval=self.HEARTBEAT_INTERVAL,
-                    ping_timeout=5.0,
+                    ping_timeout=10.0,
                     ping_payload="ping",
                 )
                 
@@ -260,13 +264,12 @@ class BitkubWebSocket:
             self._heartbeat_thread.join(timeout=1.0)
         
         # Calculate delay with jitter (random 0.5x to 1.5x)
-        import random
         jitter = random.uniform(0.5, 1.5)
         delay = min(self._reconnect_delay * jitter, self.MAX_RECONNECT_DELAY)
         
         logger.warning(
             f"[WS] Disconnected. Reconnecting in {delay:.1f}s "
-            f"(attempt {self._reconnect_attempts + 1}/{self.MAX_RECONNECT_ATTEMPTS})"
+            f"(failures {self._consecutive_failures}/{self.MAX_RECONNECT_ATTEMPTS})"
         )
         
         if self._wakeup_event.wait(delay):
@@ -289,6 +292,7 @@ class BitkubWebSocket:
         self._last_connection_time = now
         self._last_pong_time = now
         self._last_activity_time = now
+        self._heartbeat_warning_emitted = False
         
         # Reset reconnection state
         self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
@@ -303,7 +307,8 @@ class BitkubWebSocket:
         now = time.time()
         self._last_pong_time = now
         self._last_activity_time = now
-        logger.debug(f"[WS] Pong received - connection healthy")
+        self._heartbeat_warning_emitted = False
+        logger.debug(f"[WS] Pong received (payload: {payload})")
 
     def _seconds_since_last_activity(self, now: Optional[float] = None) -> float:
         """Return age of the newest heartbeat or inbound message activity."""
@@ -313,8 +318,27 @@ class BitkubWebSocket:
             return float('inf')
         return current_time - last_activity
 
+    def _heartbeat_warning_threshold(self) -> float:
+        return self.HEARTBEAT_INTERVAL * self.HEARTBEAT_WARNING_MULTIPLIER
+
+    def _heartbeat_reconnect_threshold(self) -> float:
+        return self.HEARTBEAT_INTERVAL * self.HEARTBEAT_RECONNECT_MULTIPLIER
+
+    def _should_warn_heartbeat_stale(self, now: Optional[float] = None) -> bool:
+        return self._seconds_since_last_activity(now) > self._heartbeat_warning_threshold()
+
+    def _should_force_heartbeat_reconnect(self, now: Optional[float] = None) -> bool:
+        return self._seconds_since_last_activity(now) > self._heartbeat_reconnect_threshold()
+
     def _start_heartbeat_monitor(self):
         """Start background thread to monitor connection health."""
+        # Ensure previous heartbeat thread is fully stopped before starting a new one
+        old_thread = self._heartbeat_thread
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=3.0)
+            if old_thread.is_alive():
+                logger.warning("[WS] Old heartbeat thread still alive — new monitor may overlap")
+
         def heartbeat_monitor():
             while self._running and self.state == ConnectionState.CONNECTED:
                 time.sleep(5.0)  # Check every 5 seconds
@@ -323,17 +347,26 @@ class BitkubWebSocket:
                     break
                 
                 # Treat inbound messages as activity too because some Bitkub streams
-                # stay healthy while skipping explicit pong frames.
+                # stay healthy while skipping explicit pong frames. Warn after a short
+                # silence window, but only force reconnect after a much longer one so
+                # websocket-client's own ping/pong timeout can fail first.
                 time_since_activity = self._seconds_since_last_activity()
-                if time_since_activity > self.HEARTBEAT_INTERVAL * 2:
+                if self._should_warn_heartbeat_stale() and not self._heartbeat_warning_emitted:
                     logger.warning(
                         f"[WS] No pong or inbound message received for {time_since_activity:.1f}s - "
-                        f"connection may be dead, reconnecting..."
+                        "watching connection before forcing reconnect"
+                    )
+                    self._heartbeat_warning_emitted = True
+
+                if self._should_force_heartbeat_reconnect():
+                    logger.warning(
+                        f"[WS] No pong or inbound message received for {time_since_activity:.1f}s - "
+                        "forcing reconnect after extended silence"
                     )
                     if self.ws:
                         try:
                             self.ws.close()
-                        except:
+                        except Exception:
                             pass
                     break
         
@@ -367,6 +400,7 @@ class BitkubWebSocket:
         """Parse and handle incoming WebSocket messages."""
         try:
             self._last_activity_time = time.time()
+            self._heartbeat_warning_emitted = False
             data = json.loads(message)
             self._stats['total_messages'] += 1
             
@@ -376,6 +410,10 @@ class BitkubWebSocket:
                 error_code = data.get("error", "unknown")
                 # Log as DEBUG since these are often harmless (rate limits, subscriptions, heartbeats)
                 logger.debug(f"[WS] Server response with code {error_code}: {error_msg}")
+                return
+            
+            # ป้องกัน Error หาก Bitkub ส่งข้อมูลที่ไม่ใช่ JSON Object (เช่น List)
+            if not isinstance(data, dict):
                 return
             
             # ── Handle ticker data ──────────────────────────────────────────
@@ -482,10 +520,6 @@ class BitkubWebSocket:
             self._heartbeat_thread.join(timeout=2.0)
         
         logger.info("[WS] Stopped")
-        
-        # Clear global cache
-        with _cache_lock:
-            _price_cache.clear()
 
 
 # ── Singleton Interface ────────────────────────────────────────────────────────
@@ -505,7 +539,7 @@ def get_websocket(symbols: List[str], on_tick: Callable[[PriceTick], None]) -> B
         if _global_ws is None:
             _global_ws = BitkubWebSocket(symbols, on_tick)
             _global_ws.start()
-        elif symbols != _global_ws.symbols:
+        elif sorted(symbols) != sorted(_global_ws.symbols):
             # If symbols changed, create new connection
             logger.info(f"[WS] Symbols changed, reconnecting with new symbols: {symbols}")
             _global_ws.stop()

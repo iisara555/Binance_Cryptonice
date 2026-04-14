@@ -93,8 +93,8 @@ def _is_python_bot_process(pid: int) -> bool:
             # Must be a python process running from this project
             project_hint = str(_PROJECT_ROOT).lower()
             return "python" in cmdline.lower() and project_hint in cmdline.lower()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to inspect Windows process command line for PID %s: %s", pid, exc)
     else:
         try:
             cmdline_path = Path(f"/proc/{pid}/cmdline")
@@ -102,8 +102,8 @@ def _is_python_bot_process(pid: int) -> bool:
                 cmdline = cmdline_path.read_bytes().decode("utf-8", errors="replace")
                 project_hint = str(_PROJECT_ROOT).lower()
                 return "python" in cmdline.lower() and project_hint in cmdline.lower()
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to inspect /proc command line for PID %s: %s", pid, exc)
 
     # Fallback: process is alive but we can't verify identity
     return _is_process_alive(pid)
@@ -156,8 +156,8 @@ def _remove_lock_file(lock_path: Path) -> None:
                 "Lock file %s belongs to PID %s (we are %s) — leaving it",
                 lock_path, info.get("pid"), os.getpid(),
             )
-    except OSError:
-        pass
+    except OSError as exc:
+        logger.debug("Failed to remove lock file %s: %s", lock_path, exc)
 
 
 def _force_kill_pid(pid: int, label: str = "process") -> None:
@@ -199,8 +199,8 @@ def kill_stale_bot_process(lock_path: Path = _DEFAULT_LOCK_FILE) -> bool:
         )
         try:
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to remove stale lock file %s: %s", lock_path, exc)
         return True
 
     if not _is_python_bot_process(pid):
@@ -210,8 +210,8 @@ def kill_stale_bot_process(lock_path: Path = _DEFAULT_LOCK_FILE) -> bool:
         )
         try:
             lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("Failed to remove recycled-PID lock file %s: %s", lock_path, exc)
         return True
 
     # Process is alive and is actually a bot → try graceful termination
@@ -243,8 +243,8 @@ def acquire_bot_lock(
             logger.warning("Corrupt lock file %s — removing", lock_path)
             try:
                 lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("Failed to remove corrupt lock file %s: %s", lock_path, exc)
         else:
             pid = info.get("pid", 0)
 
@@ -269,8 +269,8 @@ def acquire_bot_lock(
                     time.sleep(0.3)
                 try:
                     lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.warning("Failed to remove prior lock file %s after takeover: %s", lock_path, exc)
 
             # Stale lock
             if kill_stale:
@@ -280,8 +280,8 @@ def acquire_bot_lock(
                 )
                 try:
                     lock_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                except OSError as exc:
+                    logger.warning("Failed to remove stale lock file %s during acquire: %s", lock_path, exc)
             else:
                 return False
 

@@ -81,8 +81,8 @@ def _make_executor(db: object = _SENTINEL) -> TradeExecutor:
     ex._reconcile_done = threading.Event()
     ex._reconcile_done.set()  # allow OMS ticks in tests that need them
     ex._oms_running = False
-    ex._oms_stop_event = threading.Event()
     ex._oms_thread = None  # type: ignore[assignment]
+    ex._oms_poll_interval = 0.05  # fast poll for tests
     return ex
 
 
@@ -230,7 +230,6 @@ class TestM1AgedOrderOmsPath:
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
-                ex._oms_stop_event.set()
 
             t = threading.Thread(target=_stop, daemon=True)
             t.start()
@@ -258,7 +257,6 @@ class TestM1AgedOrderOmsPath:
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
-                ex._oms_stop_event.set()
 
             t = threading.Thread(target=_stop, daemon=True)
             t.start()
@@ -293,7 +291,6 @@ class TestM1AgedOrderOmsPath:
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
-                ex._oms_stop_event.set()
 
             t = threading.Thread(target=_stop, daemon=True)
             t.start()
@@ -303,6 +300,34 @@ class TestM1AgedOrderOmsPath:
         assert "ord-aged" not in ex._open_orders, (
             "Order must be removed from _open_orders when the aged-order cancel succeeds"
         )
+
+
+def test_bootstrap_position_skips_exchange_timeout_and_cancel_paths():
+    db = Mock()
+    db.load_all_positions.return_value = []
+    ex = _make_executor(db=db)
+
+    bootstrap_order = _pending_order("bootstrap_THB_BTC_1")
+    bootstrap_order["timestamp"] = datetime.utcnow() - timedelta(hours=6)
+    bootstrap_order["filled"] = False
+    ex._open_orders["bootstrap_THB_BTC_1"] = bootstrap_order
+
+    ex._oms_running = True
+    ex._reconcile_done.set()
+
+    with patch.object(ex, "check_order_status") as check_status_mock, patch.object(ex, "cancel_order") as cancel_mock:
+        def _stop():
+            time.sleep(0.2)
+            ex._oms_running = False
+
+        t = threading.Thread(target=_stop, daemon=True)
+        t.start()
+        ex._oms_monitor_loop()
+        t.join(timeout=2)
+
+    check_status_mock.assert_not_called()
+    cancel_mock.assert_not_called()
+    assert "bootstrap_THB_BTC_1" in ex._open_orders
 
 
 # ─────────────────────────────────────────────────────────────────────────────

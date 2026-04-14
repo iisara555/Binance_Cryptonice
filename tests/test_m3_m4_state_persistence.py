@@ -79,7 +79,6 @@ def _make_executor(db: object = _SENTINEL):
     ex._reconcile_done = _t.Event()
     ex._reconcile_done.set()
     ex._oms_running = False
-    ex._oms_stop_event = _t.Event()
     ex._oms_thread = None  # type: ignore[assignment]
     return ex
 

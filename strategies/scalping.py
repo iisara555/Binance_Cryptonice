@@ -145,7 +145,4 @@ class ScalpingStrategy(StrategyBase):
             take_profit=float(take_profit) if take_profit else None,
             metadata=metadata,
         )
-        
-    # NOTE: generate_signal is inherited from StrategyBase
-    # which provides ATR-based SL/TP calculation automatically
-    pass
+

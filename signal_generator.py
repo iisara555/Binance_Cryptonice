@@ -7,7 +7,6 @@ import time
 import logging
 import threading
 import copy
-from functools import partial
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
@@ -143,6 +142,7 @@ class SignalGenerator:
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
+        sniper_cfg = dict(self.config.get("sniper", {}) or {})
         
         # Initialize strategies
         self.strategies: Dict[str, StrategyBase] = {
@@ -186,6 +186,45 @@ class SignalGenerator:
         self._strategy_perf_cache_at: float = 0.0
         self._strategy_perf_cache_ttl: float = 300.0  # refresh every 5 minutes
         self._strategy_perf_lookback_days: int = int(self.config.get("strategy_perf_lookback_days", 30))
+        self._sniper_micro_trend_tolerance_pct: float = max(
+            0.0,
+            float(sniper_cfg.get("micro_trend_tolerance_pct", 0.15) or 0.15),
+        )
+        self._sniper_trigger_lookback_bars: int = max(
+            1,
+            int(sniper_cfg.get("macd_trigger_lookback_bars", 3) or 3),
+        )
+
+    @staticmethod
+    def _find_recent_macd_cross(
+        macd_line: pd.Series,
+        signal_line: pd.Series,
+        *,
+        direction: str,
+        lookback_bars: int,
+    ) -> Optional[int]:
+        """Return how many confirmed bars ago the last crossover happened."""
+        if len(macd_line) < 2 or len(signal_line) < 2:
+            return None
+
+        max_offset = min(max(1, int(lookback_bars or 1)), len(macd_line) - 1)
+        for offset in range(max_offset):
+            idx = len(macd_line) - 1 - offset
+            prev_idx = idx - 1
+            if prev_idx < 0:
+                break
+
+            current_macd = float(macd_line.iloc[idx])
+            previous_macd = float(macd_line.iloc[prev_idx])
+            current_signal = float(signal_line.iloc[idx])
+            previous_signal = float(signal_line.iloc[prev_idx])
+
+            if direction == "buy":
+                if current_macd > current_signal and previous_macd <= previous_signal:
+                    return offset
+            elif current_macd < current_signal and previous_macd >= previous_signal:
+                return offset
+        return None
     
     def set_database(self, db) -> None:
         """Inject the database handle for dynamic strategy performance lookups."""
@@ -379,15 +418,17 @@ class SignalGenerator:
         if not bullish_macro and not bearish_macro:
             return []
 
-        bullish_micro = current_close > current_ema50
-        bearish_micro = current_close < current_ema50
+        micro_tolerance = self._sniper_micro_trend_tolerance_pct / 100.0
+        bullish_micro = current_close >= (current_ema50 * (1.0 - micro_tolerance))
+        bearish_micro = current_close <= (current_ema50 * (1.0 + micro_tolerance))
         _diag(
             symbol,
             "Sniper:MicroTrend",
             "PASS" if bullish_micro or bearish_micro else "REJECT",
             (
                 f"buy_ok={bullish_micro}, sell_ok={bearish_micro}, "
-                f"Close={current_close:,.2f} vs EMA50={current_ema50:,.2f}"
+                f"Close={current_close:,.2f} vs EMA50={current_ema50:,.2f}, "
+                f"tolerance={self._sniper_micro_trend_tolerance_pct:.2f}%"
             ),
         )
 
@@ -402,38 +443,39 @@ class SignalGenerator:
         if "timestamp" in data.columns:
             confirmed_timestamps = pd.to_datetime(data["timestamp"], errors="coerce").iloc[:-1]
         macd_line_conf, signal_line_conf, _ = TechnicalIndicators.calculate_macd(confirmed_close)
-        macd_cross_up_now = (
-            float(macd_line_conf.iloc[-1]) > float(signal_line_conf.iloc[-1])
-            and float(macd_line_conf.iloc[-2]) <= float(signal_line_conf.iloc[-2])
+        buy_cross_offset = self._find_recent_macd_cross(
+            macd_line_conf,
+            signal_line_conf,
+            direction="buy",
+            lookback_bars=self._sniper_trigger_lookback_bars,
         )
-        macd_cross_up_prev = (
-            float(macd_line_conf.iloc[-2]) > float(signal_line_conf.iloc[-2])
-            and float(macd_line_conf.iloc[-3]) <= float(signal_line_conf.iloc[-3])
-        )
-        macd_cross_down_now = (
-            float(macd_line_conf.iloc[-1]) < float(signal_line_conf.iloc[-1])
-            and float(macd_line_conf.iloc[-2]) >= float(signal_line_conf.iloc[-2])
-        )
-        macd_cross_down_prev = (
-            float(macd_line_conf.iloc[-2]) < float(signal_line_conf.iloc[-2])
-            and float(macd_line_conf.iloc[-3]) >= float(signal_line_conf.iloc[-3])
+        sell_cross_offset = self._find_recent_macd_cross(
+            macd_line_conf,
+            signal_line_conf,
+            direction="sell",
+            lookback_bars=self._sniper_trigger_lookback_bars,
         )
 
-        buy_trigger_ok = macd_cross_up_now or macd_cross_up_prev
-        sell_trigger_ok = macd_cross_down_now or macd_cross_down_prev
+        macd_cross_up_now = buy_cross_offset == 0
+        macd_cross_up_prev = buy_cross_offset == 1
+        macd_cross_down_now = sell_cross_offset == 0
+        macd_cross_down_prev = sell_cross_offset == 1
+
+        buy_trigger_ok = buy_cross_offset is not None
+        sell_trigger_ok = sell_cross_offset is not None
 
         trigger_bar = ""
         trigger_timestamp = ""
         if buy_trigger_ok:
-            trigger_bar = "current" if macd_cross_up_now else "previous"
-            if confirmed_timestamps is not None and len(confirmed_timestamps) >= 2:
-                trigger_ts = confirmed_timestamps.iloc[-1] if macd_cross_up_now else confirmed_timestamps.iloc[-2]
+            trigger_bar = "current" if buy_cross_offset == 0 else ("previous" if buy_cross_offset == 1 else f"{buy_cross_offset}_bars_ago")
+            if confirmed_timestamps is not None and len(confirmed_timestamps) >= (buy_cross_offset or 0) + 1:
+                trigger_ts = confirmed_timestamps.iloc[-1 - int(buy_cross_offset or 0)]
                 if pd.notna(trigger_ts):
                     trigger_timestamp = str(trigger_ts)
         elif sell_trigger_ok:
-            trigger_bar = "current" if macd_cross_down_now else "previous"
-            if confirmed_timestamps is not None and len(confirmed_timestamps) >= 2:
-                trigger_ts = confirmed_timestamps.iloc[-1] if macd_cross_down_now else confirmed_timestamps.iloc[-2]
+            trigger_bar = "current" if sell_cross_offset == 0 else ("previous" if sell_cross_offset == 1 else f"{sell_cross_offset}_bars_ago")
+            if confirmed_timestamps is not None and len(confirmed_timestamps) >= (sell_cross_offset or 0) + 1:
+                trigger_ts = confirmed_timestamps.iloc[-1 - int(sell_cross_offset or 0)]
                 if pd.notna(trigger_ts):
                     trigger_timestamp = str(trigger_ts)
 
@@ -444,6 +486,7 @@ class SignalGenerator:
             (
                 f"buy_now={macd_cross_up_now}, buy_prev={macd_cross_up_prev}, "
                 f"sell_now={macd_cross_down_now}, sell_prev={macd_cross_down_prev}, "
+                f"lookback={self._sniper_trigger_lookback_bars}, "
                 f"trigger_bar={trigger_bar or 'none'}, trigger_timestamp={trigger_timestamp or 'n/a'}"
             ),
         )

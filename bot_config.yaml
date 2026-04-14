@@ -17,7 +17,7 @@ trading:
   # Multi-pair support: bot will iterate through all pairs in data.pairs
   # trading_pairs list can be added for specific pairs to trade
   interval_seconds: 60               # Main loop interval in seconds
-  timeframe: "15m"                    # Overridden to 5m automatically when strategy_mode.active=scalping
+  timeframe: "15m"                    # Locked to 15m for runtime trading loop
   mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
   min_order_amount: 15.0            # Bitkub minimum order value in THB
 
@@ -36,9 +36,11 @@ strategy_mode:
     min_time_between_trades_minutes: 5
     mtf_enabled: true
   scalping:
-    primary_timeframe: "5m"
+    primary_timeframe: "15m"
     confirm_timeframe: "15m"
     trend_timeframe: "1h"
+    micro_trend_tolerance_pct: 0.15
+    macd_trigger_lookback_bars: 3
     fast_ema: 9
     slow_ema: 21
     rsi_period: 7
@@ -55,13 +57,13 @@ strategy_mode:
     stop_loss_pct: 0.75
     take_profit_pct: 1.75
     position_timeout_minutes: 30
-    max_trades_per_day: 72
+    max_trades_per_day: 50
     min_time_between_trades_minutes: 2
     monitor_check_interval_seconds: 5
-    max_position_per_trade_pct: 8.0
+    max_position_per_trade_pct: 15.0
     max_risk_per_trade_pct: 1.0
     position_risk_per_trade_pct: 0.75
-    position_size_cap_pct: 8.0
+    position_size_cap_pct: 15.0
 
 # Multi-Timeframe Analysis Settings
 multi_timeframe:

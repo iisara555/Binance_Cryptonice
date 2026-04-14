@@ -304,26 +304,6 @@ class Database:
         """Get a new database session"""
         return self.SessionLocal()
 
-    from contextlib import contextmanager as _contextmanager
-
-    @_contextmanager
-    def session_scope(self):
-        """Context manager for auto-closing sessions — reduces boilerplate.
-
-        Usage::
-
-            with self.session_scope() as session:
-                session.query(Price).filter(...).all()
-        """
-        session = self.SessionLocal()
-        try:
-            yield session
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
-
     def get_connection(self):
         """Get a raw DB-API connection (compatibility wrapper)."""
         return self.engine.raw_connection()
@@ -462,11 +442,14 @@ class Database:
 
     def get_latest_price(self, pair: str, timeframe: str = None) -> Optional[Price]:
         """Get the most recent price for a trading pair"""
-        with self.session_scope() as session:
+        session = self.get_session()
+        try:
             query = session.query(Price).filter(Price.pair == pair)
             if timeframe:
                 query = query.filter(Price.timeframe == timeframe)
             return query.order_by(Price.timestamp.desc()).first()
+        finally:
+            session.close()
 
     def get_price_history(self, pair: str,
                           start_time: datetime = None,
@@ -474,7 +457,8 @@ class Database:
                           limit: int = 1000,
                           timeframe: str = None) -> List[Price]:
         """Get historical prices for a pair"""
-        with self.session_scope() as session:
+        session = self.get_session()
+        try:
             query = session.query(Price).filter(Price.pair == pair)
 
             if timeframe:
@@ -485,6 +469,8 @@ class Database:
                 query = query.filter(Price.timestamp <= end_time)
 
             return query.order_by(Price.timestamp.desc()).limit(limit).all()
+        finally:
+            session.close()
 
     def get_price_df(self, pair: str, days: int = 30, timeframe: str = None) -> List[Dict[str, Any]]:
         """Get price data as list of dicts for analysis (pandas-ready)"""
