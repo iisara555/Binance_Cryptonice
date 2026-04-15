@@ -269,6 +269,31 @@ class ManagedLifecycleHelper:
             exit_trigger=triggered,
         )
         if not result.success or not result.order_id:
+            error_code = getattr(result, "error_code", None)
+            # Permanent failures like "Amount too low" (15) or "Order value below minimum" (18)
+            # should force-close the position as dust to prevent infinite retry loops.
+            if error_code in (15, 18):
+                logger.warning(
+                    "[Dust] Force-closing %s position %s — amount too low to sell (error %s: %s)",
+                    pos_symbol, position_id, error_code, result.message,
+                )
+                self.bot.executor.remove_tracked_position(position_id)
+                self.bot._state_manager._drop(pos_symbol)
+                try:
+                    self.bot.db.log_closed_trade({
+                        "symbol": pos_symbol,
+                        "side": side,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "amount": amount,
+                        "realized_pnl": -(entry_price * amount),
+                        "pnl_pct": -100.0,
+                        "trigger": "DUST",
+                        "status": "dust_closed",
+                    })
+                except Exception as db_exc:
+                    logger.warning("[Dust] DB log failed for %s: %s", pos_symbol, db_exc)
+                return True  # Return True to prevent retry
             logger.error("Failed to submit %s exit for %s: %s", triggered, pos_symbol, result.message)
             return False
 
