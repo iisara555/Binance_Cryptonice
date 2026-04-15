@@ -259,6 +259,33 @@ class ManagedLifecycleHelper:
             return False
 
         exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
+
+        # ── Pre-check: detect dust before hitting the API ──
+        min_order_thb = getattr(self.bot.executor, "_min_order_thb", 15.0)
+        order_value_thb = amount * exit_price
+        if order_value_thb < min_order_thb:
+            logger.warning(
+                "[Dust] Skipping %s exit for %s — value %.2f THB < min %.0f THB. Force-closing as dust.",
+                triggered, pos_symbol, order_value_thb, min_order_thb,
+            )
+            self.bot.executor.remove_tracked_position(position_id)
+            self.bot._state_manager._drop(pos_symbol)
+            try:
+                self.bot.db.log_closed_trade({
+                    "symbol": pos_symbol,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "amount": amount,
+                    "realized_pnl": -(total_entry_cost),
+                    "pnl_pct": -100.0,
+                    "trigger": "DUST",
+                    "status": "dust_closed",
+                })
+            except Exception as db_exc:
+                logger.warning("[Dust] DB log failed for %s: %s", pos_symbol, db_exc)
+            return True
+
         result = self.bot.executor.execute_exit(
             position_id=position_id,
             order_id=position_id,
@@ -270,6 +297,12 @@ class ManagedLifecycleHelper:
         )
         if not result.success or not result.order_id:
             error_code = getattr(result, "error_code", None)
+            # Fallback: parse error code from message like "[15] Amount too low"
+            if error_code is None and result.message:
+                import re
+                _m = re.search(r'\[(15|18)\]', result.message)
+                if _m:
+                    error_code = int(_m.group(1))
             # Permanent failures like "Amount too low" (15) or "Order value below minimum" (18)
             # should force-close the position as dust to prevent infinite retry loops.
             if error_code in (15, 18):

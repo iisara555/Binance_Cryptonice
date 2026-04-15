@@ -983,11 +983,15 @@ class TradeExecutor:
                     time.sleep(self.retry_delay)
 
         execution_time = (time.time() - start_time) * 1000
-        return OrderResult(
+        final_result = OrderResult(
             success=False, status=OrderStatus.ERROR,
             message="Order failed after %d attempts: %s" % (attempts, last_error),
             attempts=attempts, execution_time_ms=execution_time,
         )
+        # Propagate the last known error_code so callers can detect permanent failures
+        if result is not None and getattr(result, "error_code", None) is not None:
+            final_result.error_code = result.error_code
+        return final_result
 
     def _place_order(self, order: OrderRequest) -> OrderResult:
         """Place a single order via API."""
@@ -1166,9 +1170,12 @@ class TradeExecutor:
             return result
         except Exception as e:
             logger.error("Order placement error: %s", e, exc_info=True)
+            # Preserve error code from BitkubAPIError so callers can detect permanent failures
+            _err_code = getattr(e, "code", None)
             return OrderResult(
                 success=False, status=OrderStatus.ERROR,
                 message=str(e), ordered_amount=order.amount,
+                error_code=_err_code,
             )
 
     def execute_entry(
