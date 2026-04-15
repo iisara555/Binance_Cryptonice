@@ -934,6 +934,7 @@ class TradeExecutor:
         start_time = time.time()
         attempts = 0
         last_error: Optional[str] = None
+        result: Optional[OrderResult] = None
 
         while attempts < self.retry_attempts:
             if hasattr(self.api_client, "is_circuit_open") and self.api_client.is_circuit_open():
