@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SESSION_NAME="${TMUX_SESSION_NAME:-crypto}"
-PROJECT_ROOT="${CRYPTO_BOT_ROOT:-/opt/crypto-bot-v1}"
+PROJECT_ROOT="${CRYPTO_BOT_ROOT:-/root/Crypto_Sniper}"
 PYTHON_BIN="${CRYPTO_BOT_PYTHON:-${PROJECT_ROOT}/.venv/bin/python}"
 BOT_ENTRY="${CRYPTO_BOT_ENTRY:-${PROJECT_ROOT}/main.py}"
 

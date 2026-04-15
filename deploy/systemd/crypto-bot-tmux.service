@@ -8,15 +8,15 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=ubuntu
-Group=ubuntu
+User=root
+Group=root
 Environment=TMUX_SESSION_NAME=crypto
-Environment=CRYPTO_BOT_ROOT=/opt/crypto-bot-v1
-Environment=CRYPTO_BOT_PYTHON=/opt/crypto-bot-v1/.venv/bin/python
-Environment=CRYPTO_BOT_ENTRY=/opt/crypto-bot-v1/main.py
-ExecStart=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh start
-ExecStop=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh stop
-ExecReload=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh restart
+Environment=CRYPTO_BOT_ROOT=/root/Crypto_Sniper
+Environment=CRYPTO_BOT_PYTHON=/root/Crypto_Sniper/.venv/bin/python
+Environment=CRYPTO_BOT_ENTRY=/root/Crypto_Sniper/main.py
+ExecStart=/root/Crypto_Sniper/deploy/systemd/crypto-bot-tmux.sh start
+ExecStop=/root/Crypto_Sniper/deploy/systemd/crypto-bot-tmux.sh stop
+ExecReload=/root/Crypto_Sniper/deploy/systemd/crypto-bot-tmux.sh restart
 RemainAfterExit=yes
 
 [Install]

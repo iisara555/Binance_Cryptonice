@@ -8,12 +8,12 @@ After=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/opt/crypto-bot-v1
-EnvironmentFile=/opt/crypto-bot-v1/.env
+User=root
+Group=root
+WorkingDirectory=/root/Crypto_Sniper
+EnvironmentFile=-/root/Crypto_Sniper/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/env bash -lc 'if [ -x /opt/crypto-bot-v1/.venv/bin/python ]; then exec /opt/crypto-bot-v1/.venv/bin/python /opt/crypto-bot-v1/main.py; elif [ -x /opt/crypto-bot-v1/.venv-3/bin/python ]; then exec /opt/crypto-bot-v1/.venv-3/bin/python /opt/crypto-bot-v1/main.py; elif [ -x /opt/crypto-bot-v1/venv/bin/python ]; then exec /opt/crypto-bot-v1/venv/bin/python /opt/crypto-bot-v1/main.py; else echo "Could not locate a project virtualenv under /opt/crypto-bot-v1" >&2; exit 1; fi'
+ExecStart=/root/Crypto_Sniper/.venv/bin/python /root/Crypto_Sniper/main.py
 Restart=always
 RestartSec=10
 StartLimitIntervalSec=300
