@@ -81,6 +81,7 @@ class CLICommandCenter:
         self.bot_name = bot_name
         self.refresh_interval_seconds = max(1.0, float(refresh_interval_seconds))
         self.console = console or get_shared_console() or Console(stderr=True, soft_wrap=True)
+        self._start_time = datetime.now(timezone.utc)
         self._log_lines: deque[Dict[str, str]] = deque(maxlen=140)
         self._last_log_rows_snapshot: List[Dict[str, str]] = []
         self._log_lock = threading.Lock()
@@ -230,6 +231,15 @@ class CLICommandCenter:
 
     def render(self, snapshot: Optional[Dict[str, Any]] = None) -> Layout:
         """Build the latest dashboard layout from the app snapshot."""
+        try:
+            return self._render_inner(snapshot)
+        except Exception as exc:
+            self._safe_stderr_write(f"[cli_ui] render error: {exc}\n")
+            layout = Layout(name="root")
+            layout.update(Panel(Text(f"Dashboard render error: {exc}", style=f"bold {self._RED}"), title="ERROR"))
+            return layout
+
+    def _render_inner(self, snapshot: Optional[Dict[str, Any]] = None) -> Layout:
         snapshot = snapshot or self.app.get_cli_snapshot(bot_name=self.bot_name)
         self._record_metric_history(snapshot)
         ui_cfg = dict(snapshot.get("ui") or {})
@@ -455,6 +465,24 @@ class CLICommandCenter:
         risk_text = Text(str(snapshot.get("risk_level", "UNKNOWN")), style=self._risk_style(snapshot.get("risk_level")))
         pair_count = self._pair_count(snapshot)
         open_positions = len(list(snapshot.get("positions") or []))
+        # Uptime
+        uptime_delta = datetime.now(timezone.utc) - self._start_time
+        total_secs = int(uptime_delta.total_seconds())
+        days, remainder = divmod(total_secs, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours:02d}h {minutes:02d}m" if days else f"{hours}h {minutes:02d}m"
+        # Data freshness for header
+        system = snapshot.get("system", {}) or {}
+        freshness_state = str(system.get("freshness") or "fresh").lower()
+        freshness_icon = "\u25cf"  # ●
+        if freshness_state == "critical":
+            freshness_style = f"bold {self._RED}"
+        elif freshness_state == "warning":
+            freshness_style = f"bold {self._EMBER}"
+        else:
+            freshness_style = f"bold {self._GREEN}"
+
         header = Text.assemble(
             ("> ", f"bold {self._WHITE}"),
             (snapshot.get("bot_name", self.bot_name), f"bold {self._WHITE}"),
@@ -473,6 +501,10 @@ class CLICommandCenter:
             (" :: ", self._DIM),
             ("OPEN ", f"bold {self._WHITE}"),
             (str(open_positions), f"bold {self._GREEN}" if open_positions == 0 else f"bold {self._EMBER}"),
+            (" :: ", self._DIM),
+            (f"{freshness_icon} ", freshness_style),
+            ("UP ", f"bold {self._WHITE}"),
+            (uptime_str, f"bold {self._GREEN}"),
         )
         return self._panel(Align.left(header), title="Terminal Deck", theme="header")
 
@@ -559,12 +591,14 @@ class CLICommandCenter:
                     )
 
         summary_lines: List[Text] = []
+        total_wl = winners + losers
+        win_rate_str = f" ({100 * winners / total_wl:.0f}%)" if total_wl > 0 else ""
         summary_lines.append(
             Text.assemble(
                 ("BOOK ", "bold white"),
                 (f"open {len(positions)}", f"bold {self._EMBER}" if positions else f"bold {self._GREEN}"),
                 ("  W/L ", "bold white"),
-                (f"{winners}/{losers}", f"bold {self._GREEN}" if winners >= losers else f"bold {self._RED}"),
+                (f"{winners}/{losers}{win_rate_str}", f"bold {self._GREEN}" if winners >= losers else f"bold {self._RED}"),
             )
         )
         summary_lines.append(
@@ -683,7 +717,7 @@ class CLICommandCenter:
         left_lines = [
             Text.assemble(("Last Market Update ", "bold white"), (str(system.get("last_market_update", "-")), self._WHITE)),
             Text.assemble(("Data Freshness ", "bold white"), self._freshness_text(system.get("freshness"), system.get("market_age_seconds"))),
-            Text.assemble(("API Latency ", "bold white"), (str(system.get("api_latency", "-")), self._WHITE)),
+            Text.assemble(("API Latency ", "bold white"), self._api_latency_text(system.get("api_latency"))),
             Text.assemble(("Candle Readiness ", "bold white"), (str(system.get("candle_readiness", "-")), self._WHITE)),
             Text.assemble(("Candle Waiting ", "bold white"), (str(system.get("candle_waiting", "-")), self._DIM)),
         ]
@@ -1322,3 +1356,16 @@ class CLICommandCenter:
         if label == "warning":
             return Text(f"DELAYED{suffix}", style=f"bold {CLICommandCenter._EMBER}")
         return Text(f"FRESH{suffix}", style=f"bold {CLICommandCenter._GREEN}")
+
+    @staticmethod
+    def _api_latency_text(value: Any) -> Text:
+        raw = str(value or "-")
+        try:
+            ms = int(raw.replace("ms", "").replace(" ", "").strip())
+        except (TypeError, ValueError):
+            return Text(raw, style=CLICommandCenter._WHITE)
+        if ms >= 2000:
+            return Text(f"{ms} ms", style=f"bold {CLICommandCenter._RED}")
+        if ms >= 800:
+            return Text(f"{ms} ms", style=f"bold {CLICommandCenter._EMBER}")
+        return Text(f"{ms} ms", style=f"bold {CLICommandCenter._GREEN}")
