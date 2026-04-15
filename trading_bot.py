@@ -29,6 +29,7 @@ import os
 from signal_generator import SignalGenerator, AggregatedSignal
 from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult
 from risk_management import RiskManager, resolve_effective_sl_tp_percentages
+from indicators import calculate_atr, calculate_adx
 from api_client import BitkubClient, FatalAuthException
 from balance_monitor import BalanceEvent, BalanceMonitor
 from database import get_database
@@ -638,11 +639,57 @@ class TradingBotOrchestrator:
         if entry_price <= 0:
             return None, None
 
+        # --- Attempt dynamic ATR × ADX calculation ---
+        db = getattr(self, "db", None)
+        if db is not None:
+            try:
+                candles = db.get_candles(symbol, interval="1h", limit=50)
+                if candles is not None and len(candles) >= 15:
+                    high = candles["high"].astype(float)
+                    low = candles["low"].astype(float)
+                    close = candles["close"].astype(float)
+
+                    atr_series = calculate_atr(high, low, close, period=14)
+                    current_atr = float(atr_series.iloc[-1]) if len(atr_series) > 0 else 0.0
+
+                    if current_atr > 0:
+                        adx_series = calculate_adx(high, low, close, period=14)
+                        current_adx = float(adx_series.iloc[-1]) if len(adx_series) > 0 and not adx_series.empty else 25.0
+                        if not (0 < current_adx < 100):
+                            current_adx = 25.0
+
+                        if current_adx > 50:
+                            sl_mult, tp_mult = 2.0, 3.0
+                        elif current_adx > 30:
+                            sl_mult, tp_mult = 1.5, 3.0
+                        else:
+                            sl_mult, tp_mult = 1.0, 2.5
+
+                        stop_loss = round(entry_price - (sl_mult * current_atr), 6)
+                        take_profit = round(entry_price + (tp_mult * current_atr), 6)
+
+                        sl_pct = ((stop_loss - entry_price) / entry_price) * 100
+                        tp_pct = ((take_profit - entry_price) / entry_price) * 100
+                        logger.info(
+                            "[Bootstrap] %s dynamic SL/TP: ATR=%.2f ADX=%.1f mult=%.1f/%.1f "
+                            "→ SL=%.2f (%.1f%%) TP=%.2f (+%.1f%%)",
+                            symbol, current_atr, current_adx, sl_mult, tp_mult,
+                            stop_loss, sl_pct, take_profit, tp_pct,
+                        )
+                        return stop_loss, take_profit
+            except Exception as exc:
+                logger.debug("[Bootstrap] %s ATR calc failed, using fallback: %s", symbol, exc)
+
+        # --- Fallback: fixed percentage ---
         risk_cfg = dict(self.config.get("risk", {}) or {})
         stop_loss_pct, take_profit_pct = resolve_effective_sl_tp_percentages(symbol, risk_cfg)
 
         stop_loss = round(entry_price * (1 + (stop_loss_pct / 100.0)), 6)
         take_profit = round(entry_price * (1 + (take_profit_pct / 100.0)), 6)
+        logger.info(
+            "[Bootstrap] %s fallback SL/TP: %.1f%% / +%.1f%% → SL=%.2f TP=%.2f",
+            symbol, stop_loss_pct, take_profit_pct, stop_loss, take_profit,
+        )
         return stop_loss, take_profit
 
     def _resolve_bootstrap_position_context(

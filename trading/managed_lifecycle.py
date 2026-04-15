@@ -261,7 +261,8 @@ class ManagedLifecycleHelper:
         exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
 
         # ── Pre-check: detect dust before hitting the API ──
-        min_order_thb = getattr(self.bot.executor, "_min_order_thb", 15.0)
+        _raw_min = getattr(self.bot.executor, "_min_order_thb", None)
+        min_order_thb = float(_raw_min) if isinstance(_raw_min, (int, float)) else 15.0
         order_value_thb = amount * exit_price
         if order_value_thb < min_order_thb:
             logger.warning(
