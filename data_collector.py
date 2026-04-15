@@ -212,25 +212,54 @@ class BitkubCollector:
 
         logger.debug(f"[{pair}] {timeframe}: no candle data returned")
         
-    def _make_request(self, endpoint: str, params: dict = None) -> Optional[dict]:
-        """Make API request to Bitkub with error handling"""
+    def _make_request(
+        self, endpoint: str, params: dict = None, *, _max_retries: int = 3
+    ) -> Optional[dict]:
+        """Make API request to Bitkub with exponential-backoff retry.
+
+        Retries on network errors (ConnectionError, Timeout) and 5xx/429
+        server responses up to *_max_retries* times with delays of
+        1 s, 2 s, 4 s, ….  Non-retriable errors (4xx client errors,
+        Bitkub application-level errors) are returned immediately.
+        """
         url = f"{self.BASE_URL}/{endpoint}"
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            # v2 format: {"error": 0, "result": ...}
-            if isinstance(data, dict) and 'error' in data:
-                if data.get('error') == 0:
-                    return data.get('result')
-                else:
-                    logger.error(f"Bitkub API error: {data.get('message')}")
-                    return None
-            # v3 format: direct list or dict
-            return data
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed: {e}")
-            return None
+        last_exc: Optional[Exception] = None
+        for attempt in range(_max_retries):
+            try:
+                response = requests.get(url, params=params, timeout=10)
+                # Retry on 429 (rate-limit) and 5xx (server error)
+                if response.status_code == 429 or response.status_code >= 500:
+                    wait = min(2 ** attempt, 8)
+                    logger.warning(
+                        "HTTP %d from %s — retry %d/%d in %ds",
+                        response.status_code, endpoint, attempt + 1, _max_retries, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                # v2 format: {"error": 0, "result": ...}
+                if isinstance(data, dict) and 'error' in data:
+                    if data.get('error') == 0:
+                        return data.get('result')
+                    else:
+                        logger.error(f"Bitkub API error: {data.get('message')}")
+                        return None
+                # v3 format: direct list or dict
+                return data
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_exc = e
+                wait = min(2 ** attempt, 8)
+                logger.warning(
+                    "Network error on %s: %s — retry %d/%d in %ds",
+                    endpoint, e, attempt + 1, _max_retries, wait,
+                )
+                time.sleep(wait)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Request failed (non-retriable): {e}")
+                return None
+        logger.error("Request to %s failed after %d retries: %s", endpoint, _max_retries, last_exc)
+        return None
 
     def get_current_ticker(self, pair: str) -> Optional[Dict]:
         """Get current ticker price for a pair using Bitkub v3 API"""

@@ -372,8 +372,16 @@ def _ts() -> str:
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 
-def _safe_text(value: Any) -> str:
+def escape_html(value: Any) -> str:
     return html.escape(str(value or ""), quote=False)
+
+
+def _safe_text(value: Any) -> str:
+    return escape_html(value)
+
+
+def format_fatal_auth_alert(details: str, *, title: str = "FATAL: Bitkub Auth Error") -> str:
+    return format_error_alert(title=title, details=details, status="SHUTDOWN")
 
 
 def format_trade_alert(

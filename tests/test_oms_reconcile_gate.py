@@ -264,6 +264,34 @@ class TestOMSLoopGatedByReconciliation:
 
 class TestReconciliationAndOMSNoDataRace:
 
+    def test_verify_order_fill_persists_live_snapshot_after_lock_release(self):
+        ex = _make_executor(db=Mock())
+        ex._db.save_position = Mock()
+        ex._open_orders["ord-1"] = _make_pending_order("ord-1")
+        ex._open_orders["ord-1"]["entry_price"] = 1_600_000.0
+
+        stale_order_info = dict(ex._open_orders["ord-1"])
+        stale_order_info["entry_price"] = 1_500_000.0
+
+        with patch.object(
+            ex,
+            "check_order_status",
+            return_value=OrderResult(
+                success=True,
+                status=OrderStatus.FILLED,
+                order_id="ord-1",
+                filled_amount=0.001,
+                filled_price=1_605_000.0,
+            ),
+        ):
+            ex._verify_order_fill(stale_order_info)
+
+        saved_payload = ex._db.save_position.call_args.args[0]
+        assert saved_payload["entry_price"] == 1_600_000.0
+        assert saved_payload["filled"] is True
+        assert saved_payload["filled_amount"] == pytest.approx(0.001)
+        assert saved_payload["filled_price"] == pytest.approx(1_605_000.0)
+
     def test_reconciliation_write_is_visible_to_oms_after_unlock(self):
         """
         Simulate a reconciliation writing a new order to _open_orders under

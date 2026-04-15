@@ -13,9 +13,11 @@ Group=ubuntu
 WorkingDirectory=/opt/crypto-bot-v1
 EnvironmentFile=/opt/crypto-bot-v1/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/crypto-bot-v1/.venv-3/bin/python /opt/crypto-bot-v1/main.py
+ExecStart=/usr/bin/env bash -lc 'if [ -x /opt/crypto-bot-v1/.venv/bin/python ]; then exec /opt/crypto-bot-v1/.venv/bin/python /opt/crypto-bot-v1/main.py; elif [ -x /opt/crypto-bot-v1/.venv-3/bin/python ]; then exec /opt/crypto-bot-v1/.venv-3/bin/python /opt/crypto-bot-v1/main.py; elif [ -x /opt/crypto-bot-v1/venv/bin/python ]; then exec /opt/crypto-bot-v1/venv/bin/python /opt/crypto-bot-v1/main.py; else echo "Could not locate a project virtualenv under /opt/crypto-bot-v1" >&2; exit 1; fi'
 Restart=always
-RestartSec=5
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
 TimeoutStopSec=30
 KillSignal=SIGINT
 StandardOutput=journal

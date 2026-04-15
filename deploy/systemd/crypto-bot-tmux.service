@@ -12,7 +12,7 @@ User=ubuntu
 Group=ubuntu
 Environment=TMUX_SESSION_NAME=crypto
 Environment=CRYPTO_BOT_ROOT=/opt/crypto-bot-v1
-Environment=CRYPTO_BOT_PYTHON=/opt/crypto-bot-v1/.venv-3/bin/python
+Environment=CRYPTO_BOT_PYTHON=/opt/crypto-bot-v1/.venv/bin/python
 Environment=CRYPTO_BOT_ENTRY=/opt/crypto-bot-v1/main.py
 ExecStart=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh start
 ExecStop=/opt/crypto-bot-v1/deploy/systemd/crypto-bot-tmux.sh stop

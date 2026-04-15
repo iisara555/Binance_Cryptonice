@@ -34,10 +34,25 @@ from main import (
     _enable_startup_auth_degraded_mode,
     resolve_runtime_trading_pairs,
 )
-from helpers import format_bitkub_time
+from helpers import calc_net_pnl, format_bitkub_time
 from state_management import TradeLifecycleState, TradeStateManager, TradeStateSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+def test_calc_net_pnl_short_subtracts_entry_fee():
+    result = calc_net_pnl(
+        entry_cost=100.0,
+        exit_price=99.0,
+        quantity=1.0,
+        side="sell",
+        fee_pct=BITKUB_FEE_PCT,
+    )
+
+    assert result["entry_fee"] == pytest.approx(0.25)
+    assert result["gross_exit"] == pytest.approx(99.0)
+    assert result["net_pnl"] == pytest.approx(0.75)
+    assert result["net_pnl_pct"] == pytest.approx(0.75)
 
 
 @pytest.fixture
@@ -717,6 +732,31 @@ class TestFullIntegrationFlow:
         assert status['multi_timeframe'] == {'enabled': True, 'pairs': []}
         assert status['tradable_pairs'] == ['THB_BTC']
 
+    def test_get_portfolio_state_lightweight_uses_balance_monitor_snapshot(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._auth_degraded = False
+        bot._portfolio_cache = {'data': None, 'timestamp': 0.0}
+        bot._cache_ttl = {'portfolio': 10}
+        bot._ws_client = None
+        bot.api_client = Mock()
+        bot.executor = Mock()
+        bot.executor.get_open_orders.return_value = [{'symbol': 'THB_BTC'}]
+        bot._balance_monitor = Mock()
+        bot._balance_monitor.get_state.return_value = {
+            'balances': {
+                'THB': {'available': 500.0, 'reserved': 0.0, 'total': 500.0},
+                'BTC': {'available': 0.001, 'reserved': 0.0, 'total': 0.001},
+            }
+        }
+        bot.api_client.get_ticker.return_value = {'last': 2_300_000.0}
+
+        portfolio = TradingBotOrchestrator._get_portfolio_state(bot, allow_refresh=False)
+
+        assert portfolio['balance'] == pytest.approx(500.0)
+        assert portfolio['total_balance'] == pytest.approx(2800.0)
+        assert portfolio['positions'] == [{'symbol': 'THB_BTC'}]
+        bot.api_client.get_ticker.assert_called_once_with('THB_BTC')
+
     def test_filter_pairs_by_candle_readiness_keeps_only_ready_pairs(self):
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.mtf_enabled = True
@@ -825,6 +865,38 @@ class TestFullIntegrationFlow:
         assert 'DEGRADED' in sent_text
         assert 'การเทรดถูกปิดใช้งาน' in sent_text
         assert 'Bitkub private API unavailable' in sent_text
+
+    def test_telegram_status_escapes_degraded_reason_once(self, tmp_path):
+        handler = TelegramBotHandler.__new__(TelegramBotHandler)
+        bot_ref = Mock()
+        bot_ref.get_status.return_value = {
+            'mode': 'dry_run',
+            'trading_pairs': [],
+            'auth_degraded': {
+                'active': True,
+                'reason': '<b>bad creds</b>',
+                'public_only': True,
+            },
+        }
+        app_ref = Mock()
+        app_ref.bot = bot_ref
+        app_ref.api_client = Mock()
+        app_ref.config = {
+            'database': {'db_path': str(tmp_path / 'missing.db')},
+            'portfolio': {'initial_balance': 500.0},
+        }
+        handler.app_ref = app_ref
+        handler.trading_disabled = threading.Event()
+        handler._start_time = time.time() - 5
+        handler.pairs = []
+        handler._send = Mock()
+
+        handler._cmd_status()
+
+        sent_text = handler._send.call_args.args[0]
+        assert '&lt;b&gt;bad creds&lt;/b&gt;' in sent_text
+        assert '<b>bad creds</b>' not in sent_text
+        assert sent_text.count('&lt;b&gt;bad creds&lt;/b&gt;') == 1
 
     def test_alert_system_create_trade_sender_reuses_same_instance(self):
         """Legacy alert callback should reuse the same AlertSystem instance."""
@@ -1475,6 +1547,95 @@ class TestFullIntegrationFlow:
         assert trade_log['net_pnl'] == pytest.approx(19.7)
         assert trade_log['price_source'] == 'reconcile'
 
+    def test_position_trace_logs_trailing_context(self, caplog):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.executor = Mock(
+            _allow_trailing_stop=True,
+            _trailing_activation_pct=1.25,
+            _trailing_stop_pct=0.75,
+        )
+
+        with caplog.at_level(logging.INFO):
+            bot._log_position_trace(
+                'ENTRY_SUBMITTED',
+                'THB_SOL',
+                entry_order_id='buy-123',
+                amount=0.05185856,
+                entry_price=5000.0,
+                stop_loss=4950.0,
+                take_profit=5125.0,
+                notes='state=pending_buy;status=pending',
+            )
+
+        assert '[PositionTrace]' in caplog.text
+        assert 'event=ENTRY_SUBMITTED' in caplog.text
+        assert 'entry_order=buy-123' in caplog.text
+        assert 'trail_activate=1.25%' in caplog.text
+        assert 'trail_gap=0.75%' in caplog.text
+
+    def test_trailing_stop_callback_logs_position_trace(self, caplog):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.send_alerts = True
+        bot.executor = Mock(
+            _allow_trailing_stop=True,
+            _trailing_activation_pct=1.25,
+            _trailing_stop_pct=0.75,
+        )
+        bot._send_alert = Mock()
+
+        with caplog.at_level(logging.INFO):
+            bot._on_trailing_stop_callback('THB_SOL', 4950.0, 5030.0, 5068.0, 1.36)
+
+        bot._send_alert.assert_called_once()
+        assert 'event=TRAILING_RATCHET' in caplog.text
+        assert 'symbol=THB_SOL' in caplog.text
+        assert 'prev_sl=4,950.00' in caplog.text
+        assert 'sl=5,030.00' in caplog.text
+
+    def test_check_sl_tp_immediate_routes_ws_stop_loss_to_managed_exit(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.trading_pair = 'THB_BTC'
+        bot.executor = Mock()
+        bot.executor.get_open_orders.return_value = [{
+            'order_id': 'buy-123',
+            'symbol': 'THB_BTC',
+            'side': OrderSide.BUY,
+            'amount': 0.001,
+            'entry_price': 100000.0,
+            'stop_loss': 95000.0,
+            'take_profit': 110000.0,
+            'total_entry_cost': 100.0,
+        }]
+        bot._state_machine_enabled = True
+        bot._state_manager = Mock()
+        bot._state_manager.get_state.return_value = Mock(state=TradeLifecycleState.IN_POSITION)
+        bot._submit_managed_exit = Mock()
+        bot.api_client = Mock()
+        bot.api_client.is_circuit_open.return_value = False
+        bot._ws_sltp_inflight = set()
+        bot._ws_sltp_inflight_lock = threading.Lock()
+
+        tick = Mock(
+            symbol='THB_BTC',
+            last=94999.0,
+            bid=94990.0,
+            ask=95010.0,
+            percent_change_24h=-1.25,
+        )
+
+        def inline_thread(*, target=None, args=(), daemon=None, **_kwargs):
+            thread = Mock()
+            thread.start.side_effect = lambda: target(*args)
+            return thread
+
+        with patch('trading.position_monitor.threading.Thread', side_effect=inline_thread):
+            TradingBotOrchestrator._check_sl_tp_immediate(bot, tick)
+
+        bot._submit_managed_exit.assert_called_once()
+        assert bot._submit_managed_exit.call_args.kwargs['triggered'] == 'SL'
+        assert bot._submit_managed_exit.call_args.kwargs['price_source'] == 'ws'
+        assert 'buy-123' not in bot._ws_sltp_inflight
+
     def test_position_row_valid_for_sync_accepts_buy_thb_btc_amount(self, mock_api_client):
         """BUY THB_BTC orders store THB amount, so amounts > 1.0 are valid."""
         executor = TradeExecutor(mock_api_client, config={})
@@ -1889,6 +2050,101 @@ class TestCliSnapshot:
         assert snapshot["positions"][0]["current_price"] is None
         assert snapshot["system"]["total_balance"] == "21,500.00 THB"
 
+    def test_cli_snapshot_omits_distance_pct_when_current_price_is_zero(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {
+            "mode": "full_auto",
+            "simulate_only": False,
+            "read_only": False,
+            "auth_degraded": False,
+            "data": {"pairs": ["THB_BTC"]},
+        }
+        app._cli_bot_name = "Test Bot"
+        app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
+        app._sample_api_latency = Mock(return_value=25.0)
+        app._format_cli_timestamp = Mock(return_value="12:34:56")
+        app._get_cli_price = Mock(return_value=0.0)
+        app._get_cli_position_price_hint = Mock(return_value=0.0)
+        app.api_client = Mock()
+        app.api_client.get_balances.return_value = {
+            "THB": {"available": 500.0, "reserved": 0.0},
+            "BTC": {"available": 0.01, "reserved": 0.0},
+        }
+        app.executor = Mock()
+        app.executor.get_open_orders.return_value = [
+            {
+                "symbol": "THB_BTC",
+                "side": "buy",
+                "entry_price": 2_100_000.0,
+                "stop_loss": 2_000_000.0,
+                "take_profit": 2_200_000.0,
+            }
+        ]
+        app.bot = Mock()
+        app.bot.get_status.return_value = {
+            "mode": "full_auto",
+            "trading_pairs": ["THB_BTC"],
+            "strategy_engine": {"strategies": ["trend_following"]},
+            "risk_summary": {"trades_today": 3},
+            "last_loop": None,
+            "multi_timeframe": {"pairs": []},
+        }
+        app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+
+        snapshot = TradingBotApp.get_cli_snapshot(app)
+
+        assert snapshot["positions"][0]["current_price"] == 0.0
+        assert snapshot["positions"][0]["sl_distance_pct"] is None
+        assert snapshot["positions"][0]["tp_distance_pct"] is None
+
+    def test_cli_snapshot_omits_pnl_for_estimated_bootstrap_positions(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {
+            "mode": "full_auto",
+            "simulate_only": False,
+            "read_only": False,
+            "auth_degraded": False,
+            "data": {"pairs": ["THB_SOL"]},
+        }
+        app._cli_bot_name = "Test Bot"
+        app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
+        app._sample_api_latency = Mock(return_value=25.0)
+        app._format_cli_timestamp = Mock(return_value="12:34:56")
+        app._get_cli_price = Mock(return_value=2_800.0)
+        app.api_client = Mock()
+        app.api_client.get_balances.return_value = {
+            "THB": {"available": 500.0, "reserved": 0.0},
+            "SOL": {"available": 1.0, "reserved": 0.0},
+        }
+        app.executor = Mock()
+        app.executor.get_open_orders.return_value = [
+            {
+                "symbol": "THB_SOL",
+                "side": "buy",
+                "entry_price": 2_750.0,
+                "stop_loss": 2_650.0,
+                "take_profit": 3_000.0,
+                "bootstrap_source": "estimated_from_ticker",
+            }
+        ]
+        app.bot = Mock()
+        app.bot.get_status.return_value = {
+            "mode": "full_auto",
+            "trading_pairs": ["THB_SOL"],
+            "strategy_engine": {"strategies": ["trend_following"]},
+            "risk_summary": {"trades_today": 3},
+            "last_loop": None,
+            "multi_timeframe": {"pairs": []},
+        }
+        app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+
+        snapshot = TradingBotApp.get_cli_snapshot(app)
+
+        assert snapshot["positions"][0]["entry_price"] == pytest.approx(2750.0)
+        assert snapshot["positions"][0]["current_price"] == pytest.approx(2800.0)
+        assert snapshot["positions"][0]["bootstrap_source"] == "estimated_from_ticker"
+        assert snapshot["positions"][0]["pnl_pct"] is None
+
     def test_format_cli_timestamp_converts_runtime_utc_to_bitkub_time(self):
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00") == "22:35:00"
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00Z") == "22:35:00"
@@ -2166,6 +2422,41 @@ class TestCliUi:
 
         assert list(command_center._log_lines)[-1]['message'] == 'warning'
         assert all(row['message'] != 'noise' for row in command_center._log_lines)
+
+    def test_log_buffer_reports_dropped_logs_after_lock_contention(self):
+        app = Mock()
+        command_center = CLICommandCenter(app)
+
+        first = logging.LogRecord(
+            name="crypto-bot.test",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="first",
+            args=(),
+            exc_info=None,
+        )
+        second = logging.LogRecord(
+            name="crypto-bot.test",
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="second",
+            args=(),
+            exc_info=None,
+        )
+
+        assert command_center._log_lock.acquire(blocking=False) is True
+        try:
+            command_center._append_log_record(first)
+        finally:
+            command_center._log_lock.release()
+
+        command_center._append_log_record(second)
+
+        messages = [row["message"] for row in command_center._log_lines]
+        assert any("Dropped 1 log record" in message for message in messages)
+        assert messages[-1] == "second"
 
     def test_signal_alignment_panel_renders_pair_runtime_context(self):
         app = Mock()

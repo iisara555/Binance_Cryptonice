@@ -20,8 +20,8 @@ function Resolve-PythonPath {
     }
 
     $candidates = @(
-        (Join-Path $Root ".venv-3\Scripts\python.exe"),
         (Join-Path $Root ".venv\Scripts\python.exe"),
+        (Join-Path $Root ".venv-3\Scripts\python.exe"),
         (Join-Path $Root "venv\Scripts\python.exe")
     )
 

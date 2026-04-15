@@ -19,23 +19,29 @@ from __future__ import annotations
 import time
 import logging
 import threading
-from collections import Counter
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional, Dict, Any, List
 
-from alerts import AlertSystem, AlertLevel  # Unified alert system
+from alerts import AlertSystem, AlertLevel, format_fatal_auth_alert  # Unified alert system
 from enum import Enum
 import os
 
-from signal_generator import SignalGenerator, AggregatedSignal, SignalRiskCheck
-from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult, OrderStatus
-from risk_management import RiskManager, RiskConfig, calculate_atr, get_default_sl_tp, check_pair_correlation
-from api_client import BitkubClient
+from signal_generator import SignalGenerator, AggregatedSignal
+from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult
+from risk_management import RiskManager, resolve_effective_sl_tp_percentages
+from api_client import BitkubClient, FatalAuthException
 from balance_monitor import BalanceEvent, BalanceMonitor
 from database import get_database
-from backtesting_validation import BacktestingValidator
-from state_management import TradeLifecycleState, TradeStateManager, TradeStateSnapshot, normalize_buy_quantity
-from strategy_base import MarketCondition, detect_market_condition
+from helpers import calc_net_pnl, normalize_side_value
+from state_management import TradeLifecycleState, TradeStateManager, TradeStateSnapshot
+from strategy_base import MarketCondition
+from trading.execution_runtime import ExecutionRuntimeDeps, ExecutionRuntimeHelper
+from trading.managed_lifecycle import ManagedLifecycleHelper
+from trading.portfolio_runtime import PortfolioRuntimeHelper
+from trading.position_monitor import PositionMonitorHelper
+from trading.signal_runtime import ExecutionPlanDeps, MultiTimeframeRuntimeDeps, SignalRuntimeDeps, SignalRuntimeHelper
+from trading.startup_runtime import StartupRuntimeHelper
+from trading.status_runtime import StatusRuntimeHelper
 
 # Import shared enums from modular trading package
 from trading.orchestrator import BotMode, SignalSource, TradeDecision
@@ -51,6 +57,7 @@ try:
     from monitoring import MonitoringService
     _MONITORING_AVAILABLE = True
 except ImportError:
+    MonitoringService = None
     _MONITORING_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -67,24 +74,12 @@ def _coerce_trade_float(val, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-
-def _coerce_trade_datetime(val: Any) -> Optional[datetime]:
-    if isinstance(val, datetime):
-        return val
-    if not val:
-        return None
-    try:
-        return datetime.fromisoformat(str(val))
-    except (TypeError, ValueError):
-        return None
-
 # WebSocket real-time price support
 try:
-    from bitkub_websocket import BitkubWebSocket, get_websocket, stop_websocket, PriceTick, get_latest_ticker
+    from bitkub_websocket import get_websocket, stop_websocket, PriceTick, get_latest_ticker
     _WEBSOCKET_AVAILABLE = True
 except ImportError:
     _WEBSOCKET_AVAILABLE = False
-    BitkubWebSocket = None
     get_websocket = None
     stop_websocket = None
     PriceTick = None
@@ -166,6 +161,8 @@ class TradingBotOrchestrator:
             cleanup_interval_hours = 12.0
         self._candle_retention_interval_seconds = max(int(cleanup_interval_hours * 3600), 3600)
         self._last_candle_retention_cleanup_at = 0.0
+        self._last_db_maintenance_at = 0.0
+        self._db_maintenance_interval_seconds = 24 * 3600  # once per day
         raw_min_trade_thb = config.get("min_trade_value")
         if raw_min_trade_thb is None:
             raw_min_trade_thb = 15.0
@@ -183,6 +180,16 @@ class TradingBotOrchestrator:
         scalping_cfg = dict(self.strategies_config.get("scalping", {}) or {})
         self._scalping_mode_enabled = self._active_strategy_mode == "scalping"
         self._scalping_position_timeout_minutes = int(scalping_cfg.get("position_timeout_minutes", 30) or 30)
+        execution_cfg = dict(config.get("execution", {}) or {})
+        self._enforce_min_profit_gate_for_voluntary_exit = bool(
+            execution_cfg.get("enforce_min_profit_gate_for_voluntary_exit", True)
+        )
+        try:
+            self._min_voluntary_exit_net_profit_pct = float(
+                execution_cfg.get("min_voluntary_exit_net_profit_pct", 0.2) or 0.2
+            )
+        except (TypeError, ValueError):
+            self._min_voluntary_exit_net_profit_pct = 0.2
         
         # Notification config
         self.notif_config = config.get("notifications", {})
@@ -243,9 +250,11 @@ class TradingBotOrchestrator:
         self._pending_decisions: List[TradeDecision] = []
         self._pending_decisions_lock = threading.Lock()
         self._executed_today: List[Dict] = []
+        self._executed_today_max = 200
         self._last_loop_time: Optional[datetime] = None
         self._loop_count = 0
         self._last_state_gate_logged: Dict[str, str] = {}
+        self._last_consumed_signal_triggers: Dict[str, str] = {}
 
         # === Monitoring Service ===
         self._monitoring: Optional[_MonitoringServiceType] = None
@@ -310,6 +319,7 @@ class TradingBotOrchestrator:
             'atr': 60,         # ATR calculation: 60s
         }
         self._portfolio_cache = {"data": None, "timestamp": 0.0}
+        self._portfolio_cache_lock = threading.Lock()
         self._market_data_cache = {"data": None, "timestamp": 0.0}
         self._atr_cache = {"value": None, "timestamp": 0.0}
         self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}
@@ -400,7 +410,12 @@ class TradingBotOrchestrator:
             logger.info("Trading RESUMED - auto pause cleared")
 
     def _invalidate_portfolio_cache(self) -> None:
-        self._portfolio_cache = {"data": None, "timestamp": 0.0}
+        _lock = getattr(self, "_portfolio_cache_lock", None)
+        if _lock:
+            with _lock:
+                self._portfolio_cache = {"data": None, "timestamp": 0.0}
+        else:
+            self._portfolio_cache = {"data": None, "timestamp": 0.0}
 
     def _find_tracked_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         if not self.executor:
@@ -411,25 +426,44 @@ class TradingBotOrchestrator:
             if str(position.get("symbol") or "").upper() != target_symbol:
                 continue
 
-            raw_side = position.get("side")
-            side = raw_side.value.lower() if isinstance(raw_side, Enum) else str(raw_side or "").lower()
+            side = normalize_side_value(position.get("side"))
             if side == "buy":
                 return position
 
         return None
 
+    # Helper accessors and thin facade wrappers for extracted runtime modules.
+
     @staticmethod
     def _extract_total_balance(balance_state: Optional[Dict[str, Any]], asset: str) -> float:
-        balances = (balance_state or {}).get("balances") or {}
-        payload = balances.get(str(asset or "").upper()) or {}
-        if isinstance(payload, dict):
-            available = float(payload.get("available", 0.0) or 0.0)
-            reserved = float(payload.get("reserved", 0.0) or 0.0)
-            total = payload.get("total")
-            if total is not None:
-                return float(total or 0.0)
-            return available + reserved
-        return float(payload or 0.0)
+        return PortfolioRuntimeHelper.extract_total_balance(balance_state, asset)
+
+    def _get_portfolio_runtime_helper(self) -> PortfolioRuntimeHelper:
+        helper = getattr(self, "_portfolio_runtime_helper", None)
+        if helper is None:
+            helper = PortfolioRuntimeHelper(
+                self,
+                websocket_available=_WEBSOCKET_AVAILABLE,
+                latest_ticker_getter=get_latest_ticker,
+            )
+            self._portfolio_runtime_helper = helper
+        return helper
+
+    def _get_portfolio_mark_price(self, symbol: str) -> float:
+        return self._get_portfolio_runtime_helper().get_portfolio_mark_price(symbol)
+
+    def _estimate_total_portfolio_balance(self, balances: Optional[Dict[str, Any]]) -> float:
+        return self._get_portfolio_runtime_helper().estimate_total_portfolio_balance(balances)
+
+    def _get_market_data_for_symbol(self, symbol: str):
+        return self._get_portfolio_runtime_helper().get_market_data_for_symbol(symbol)
+
+    def _get_latest_atr(self, symbol: Optional[str] = None, period: int = 14) -> Optional[float]:
+        return self._get_portfolio_runtime_helper().get_latest_atr(symbol=symbol, period=period)
+
+    @staticmethod
+    def _get_risk_portfolio_value(portfolio_state: Optional[Dict[str, Any]]) -> float:
+        return PortfolioRuntimeHelper.get_risk_portfolio_value(portfolio_state)
 
     def _reconcile_tracked_positions_with_balance_state(
         self,
@@ -451,11 +485,7 @@ class TradingBotOrchestrator:
             if not symbol or not order_id or "_" not in symbol:
                 continue
 
-            raw_side = position.get("side")
-            if isinstance(raw_side, Enum):
-                side = raw_side.value.lower()
-            else:
-                side = str(raw_side or "").lower()
+            side = normalize_side_value(position.get("side"))
 
             filled_amount = float(position.get("filled_amount") or 0.0)
             amount = float(position.get("amount") or 0.0)
@@ -519,7 +549,7 @@ class TradingBotOrchestrator:
             return False
 
         side_value = local_pos.get("side", OrderSide.BUY)
-        side_str = side_value.value if isinstance(side_value, Enum) else str(side_value or "").lower()
+        side_str = normalize_side_value(side_value)
         if side_str != "buy":
             return False
 
@@ -544,6 +574,15 @@ class TradingBotOrchestrator:
         preserved_entry = float(local_pos.get("entry_price") or 0.0)
         preserved_sl = local_pos.get("stop_loss")
         preserved_tp = local_pos.get("take_profit")
+        restored_context = self._resolve_bootstrap_position_context(symbol, float(balance_total))
+        restored_source = str(restored_context.get("source") or "")
+        restored_entry = _coerce_trade_float(restored_context.get("entry_price"), 0.0)
+        if restored_source and restored_source != "bootstrap_position" and restored_entry > 0:
+            preserved_amount = float(balance_total)
+            external_excess = 0.0
+            preserved_entry = restored_entry
+            preserved_sl = restored_context.get("stop_loss")
+            preserved_tp = restored_context.get("take_profit")
         if preserved_entry > 0 and (not preserved_sl or not preserved_tp):
             fallback_sl, fallback_tp = self._build_bootstrap_position_sl_tp(symbol, preserved_entry)
             preserved_sl = preserved_sl or fallback_sl
@@ -551,14 +590,17 @@ class TradingBotOrchestrator:
 
         preserved.update({
             "amount": preserved_amount,
+            "entry_price": preserved_entry,
             "remaining_amount": 0.0,
             "filled": True,
             "filled_amount": preserved_amount,
+            "filled_price": preserved_entry,
             "stop_loss": preserved_sl,
             "take_profit": preserved_tp,
         })
         if preserved_entry > 0:
-            preserved["total_entry_cost"] = preserved_amount * preserved_entry
+            restored_cost = _coerce_trade_float(restored_context.get("total_entry_cost"), 0.0)
+            preserved["total_entry_cost"] = restored_cost if (restored_source and restored_source != "bootstrap_position" and restored_cost > 0) else (preserved_amount * preserved_entry)
 
         with self.executor._orders_lock:
             self.executor._open_orders[bootstrap_id] = preserved
@@ -581,13 +623,14 @@ class TradingBotOrchestrator:
             )
 
         logger.info(
-            "[Reconcile] Preserved bootstrap position %s using live %s balance %.8f, entry %.2f, SL=%s, TP=%s",
+            "[Reconcile] Preserved bootstrap position %s using live %s balance %.8f, entry %.2f, SL=%s, TP=%s%s",
             bootstrap_id,
             base_asset,
             preserved_amount,
             preserved_entry,
             f"{float(preserved_sl):.2f}" if preserved_sl else "n/a",
             f"{float(preserved_tp):.2f}" if preserved_tp else "n/a",
+            f" via {restored_source}" if restored_source and restored_source != "bootstrap_position" else "",
         )
         return True
 
@@ -595,20 +638,8 @@ class TradingBotOrchestrator:
         if entry_price <= 0:
             return None, None
 
-        default_sl_pct, default_tp_pct = get_default_sl_tp(symbol)
         risk_cfg = dict(self.config.get("risk", {}) or {})
-
-        try:
-            stop_loss_pct = float(risk_cfg.get("stop_loss_pct", default_sl_pct) or default_sl_pct)
-        except (TypeError, ValueError):
-            stop_loss_pct = float(default_sl_pct)
-        try:
-            take_profit_pct = float(risk_cfg.get("take_profit_pct", default_tp_pct) or default_tp_pct)
-        except (TypeError, ValueError):
-            take_profit_pct = float(default_tp_pct)
-
-        stop_loss_pct = -abs(stop_loss_pct) if stop_loss_pct else float(default_sl_pct)
-        take_profit_pct = abs(take_profit_pct) if take_profit_pct else float(default_tp_pct)
+        stop_loss_pct, take_profit_pct = resolve_effective_sl_tp_percentages(symbol, risk_cfg)
 
         stop_loss = round(entry_price * (1 + (stop_loss_pct / 100.0)), 6)
         take_profit = round(entry_price * (1 + (take_profit_pct / 100.0)), 6)
@@ -625,6 +656,7 @@ class TradingBotOrchestrator:
             return {}
 
         best: Dict[str, Any] = {}
+        bootstrap_best: Dict[str, Any] = {}
 
         db = getattr(self, "db", None)
         if db is not None and hasattr(db, "load_all_positions"):
@@ -635,6 +667,7 @@ class TradingBotOrchestrator:
                 rows = []
 
             matching_rows = []
+            bootstrap_rows = []
             for row in rows:
                 row_symbol = str(row.get("symbol") or "").upper()
                 row_side = row.get("side", "buy")
@@ -646,7 +679,11 @@ class TradingBotOrchestrator:
                 entry_price = _coerce_trade_float(row.get("entry_price"), 0.0)
                 if entry_price <= 0:
                     continue
-                matching_rows.append(row)
+                order_id = str(row.get("order_id") or "")
+                if order_id.startswith("bootstrap_"):
+                    bootstrap_rows.append(row)
+                else:
+                    matching_rows.append(row)
 
             if matching_rows:
                 matching_rows.sort(key=lambda row: row.get("timestamp") or datetime.min, reverse=True)
@@ -661,6 +698,59 @@ class TradingBotOrchestrator:
                         "total_entry_cost": total_entry_cost if total_entry_cost > 0 else (quantity * entry_price),
                         "source": "persisted_position",
                     }
+            elif bootstrap_rows:
+                bootstrap_rows.sort(key=lambda row: row.get("timestamp") or datetime.min, reverse=True)
+                row = bootstrap_rows[0]
+                entry_price = _coerce_trade_float(row.get("entry_price"), 0.0)
+                total_entry_cost = _coerce_trade_float(row.get("total_entry_cost"), 0.0)
+                if entry_price > 0:
+                    bootstrap_best = {
+                        "entry_price": entry_price,
+                        "stop_loss": row.get("stop_loss"),
+                        "take_profit": row.get("take_profit"),
+                        "total_entry_cost": total_entry_cost if total_entry_cost > 0 else (quantity * entry_price),
+                        "source": "bootstrap_position",
+                    }
+
+        if not best:
+            history_best = self._resolve_bootstrap_exchange_history_context(symbol_key, quantity)
+            if history_best:
+                best = history_best
+
+        if db is not None and hasattr(db, "get_trades"):
+            try:
+                recent_trades = list(db.get_trades(pair=symbol_key, limit=20) or [])
+            except Exception as exc:
+                logger.debug("[Bootstrap Positions] Failed to load trade history for %s: %s", symbol_key, exc)
+                recent_trades = []
+
+            trade_events: list[Dict[str, Any]] = []
+            for trade in recent_trades:
+                trade_side = getattr(trade, "side", "")
+                trade_pair = getattr(trade, "pair", "")
+                normalized_side = str(trade_side or "").lower()
+                if str(trade_pair or "").upper() != symbol_key or normalized_side not in ("buy", "sell"):
+                    continue
+                trade_price = _coerce_trade_float(getattr(trade, "price", 0.0), 0.0)
+                trade_qty = _coerce_trade_float(getattr(trade, "quantity", 0.0), 0.0)
+                if trade_price <= 0 or trade_qty <= 0:
+                    continue
+                trade_events.append({
+                    "side": normalized_side,
+                    "quantity": trade_qty,
+                    "price": trade_price,
+                    "total_cost": trade_qty * trade_price if normalized_side == "buy" else 0.0,
+                    "timestamp": getattr(trade, "timestamp", None),
+                })
+
+            if trade_events and not best:
+                trade_history_best = self._build_weighted_inventory_context(
+                    trade_events,
+                    quantity,
+                    source="trade_history",
+                )
+                if trade_history_best:
+                    best = trade_history_best
 
         if db is not None and hasattr(db, "get_trade_state"):
             try:
@@ -674,7 +764,7 @@ class TradingBotOrchestrator:
             if state_entry > 0 and state_value in (
                 TradeLifecycleState.IN_POSITION.value,
                 TradeLifecycleState.PENDING_SELL.value,
-            ):
+            ) and not best:
                 best = {
                     "entry_price": state_entry,
                     "stop_loss": (state_row or {}).get("stop_loss"),
@@ -683,7 +773,167 @@ class TradingBotOrchestrator:
                     "source": "trade_state",
                 }
 
-        return best
+        return best or bootstrap_best
+
+    @staticmethod
+    def _bootstrap_quantity_tolerance(quantity: float) -> float:
+        return max(abs(float(quantity or 0.0)) * 0.05, 1e-8)
+
+    def _build_weighted_inventory_context(
+        self,
+        events: List[Dict[str, Any]],
+        quantity: float,
+        *,
+        source: str,
+    ) -> Dict[str, Any]:
+        if not events:
+            return {}
+
+        inventory_qty = 0.0
+        inventory_notional = 0.0
+        inventory_cost = 0.0
+        sorted_events = sorted(events, key=lambda event: event.get("timestamp") or datetime.min)
+
+        for event in sorted_events:
+            side = str(event.get("side") or "").lower()
+            event_qty = _coerce_trade_float(event.get("quantity"), 0.0)
+            event_price = _coerce_trade_float(event.get("price"), 0.0)
+            event_cost = _coerce_trade_float(event.get("total_cost"), 0.0)
+            if event_qty <= 0 or event_price <= 0:
+                continue
+
+            if side in ("buy", "bid"):
+                inventory_qty += event_qty
+                inventory_notional += event_qty * event_price
+                inventory_cost += event_cost if event_cost > 0 else (event_qty * event_price)
+                continue
+
+            if side not in ("sell", "ask") or inventory_qty <= 0:
+                continue
+
+            matched_qty = min(event_qty, inventory_qty)
+            avg_price = inventory_notional / inventory_qty if inventory_qty > 0 else 0.0
+            avg_cost = inventory_cost / inventory_qty if inventory_qty > 0 else 0.0
+            inventory_qty = max(inventory_qty - matched_qty, 0.0)
+            inventory_notional = max(inventory_notional - (avg_price * matched_qty), 0.0)
+            inventory_cost = max(inventory_cost - (avg_cost * matched_qty), 0.0)
+            if inventory_qty <= 1e-12:
+                inventory_qty = 0.0
+                inventory_notional = 0.0
+                inventory_cost = 0.0
+
+        if inventory_qty <= 0 or inventory_notional <= 0 or inventory_cost <= 0:
+            return {}
+
+        qty_tolerance = self._bootstrap_quantity_tolerance(quantity)
+        if quantity > 0 and abs(inventory_qty - quantity) > qty_tolerance:
+            return {}
+
+        entry_price = inventory_notional / inventory_qty if inventory_qty > 0 else 0.0
+        if entry_price <= 0:
+            return {}
+
+        return {
+            "entry_price": entry_price,
+            "stop_loss": None,
+            "take_profit": None,
+            "total_entry_cost": inventory_cost,
+            "source": source,
+        }
+
+    def _resolve_bootstrap_exchange_history_context(
+        self,
+        symbol: str,
+        quantity: float,
+    ) -> Dict[str, Any]:
+        try:
+            history = list(self.api_client.get_order_history(symbol, limit=self._order_history_window_limit()) or [])
+        except Exception as exc:
+            logger.debug("[Bootstrap Positions] Failed to load exchange order history for %s: %s", symbol, exc)
+            return {}
+
+        qty_tolerance = self._bootstrap_quantity_tolerance(quantity)
+        close_matches: list[Dict[str, Any]] = []
+        fallback_matches: list[Dict[str, Any]] = []
+        history_events: list[Dict[str, Any]] = []
+
+        for row in history:
+            status_value = self._history_status_value(row)
+            if status_value and not self._history_status_is_filled(row):
+                continue
+
+            side_value = self._history_side_value(row)
+            if side_value and side_value not in ("buy", "bid", "sell", "ask"):
+                continue
+
+            filled_amount, filled_price = self._extract_history_fill_details(row)
+            if filled_amount <= 0 or filled_price <= 0:
+                continue
+
+            history_events.append({
+                "side": side_value,
+                "quantity": filled_amount,
+                "price": filled_price,
+                "total_cost": 0.0,
+                "timestamp": self._history_timestamp_value(row),
+            })
+
+            raw_cost = _coerce_trade_float(row.get("amt"), 0.0)
+            if raw_cost <= 0:
+                raw_cost = _coerce_trade_float(row.get("amount"), 0.0)
+            if side_value in ("buy", "bid"):
+                history_events[-1]["total_cost"] = raw_cost if raw_cost > 0 else (filled_amount * filled_price)
+
+            candidate = {
+                "entry_price": filled_price,
+                "stop_loss": None,
+                "take_profit": None,
+                "total_entry_cost": raw_cost if raw_cost > 0 else (filled_amount * filled_price),
+                "source": "exchange_history",
+            }
+
+            if side_value in ("buy", "bid"):
+                if quantity > 0 and abs(filled_amount - quantity) <= qty_tolerance:
+                    close_matches.append(candidate)
+                else:
+                    fallback_matches.append(candidate)
+
+        weighted_context = self._build_weighted_inventory_context(
+            history_events,
+            quantity,
+            source="exchange_history",
+        )
+        if weighted_context:
+            return weighted_context
+
+        if close_matches:
+            return close_matches[0]
+        if fallback_matches:
+            return fallback_matches[0]
+        return {}
+
+    @staticmethod
+    def _history_timestamp_value(row: Optional[Dict[str, Any]]) -> datetime:
+        if not row:
+            return datetime.min
+
+        raw_ts = row.get("ts") or row.get("timestamp") or row.get("created_at") or row.get("updated_at")
+        if isinstance(raw_ts, datetime):
+            return raw_ts
+        if isinstance(raw_ts, (int, float)):
+            try:
+                ts_value = float(raw_ts)
+                if ts_value > 1e12:
+                    ts_value /= 1000.0
+                return datetime.fromtimestamp(ts_value)
+            except (OverflowError, OSError, ValueError):
+                return datetime.min
+        if isinstance(raw_ts, str) and raw_ts.strip():
+            try:
+                return datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            except ValueError:
+                return datetime.min
+        return datetime.min
 
     @staticmethod
     def _default_candle_retention_policy() -> Dict[str, int]:
@@ -736,6 +986,35 @@ class TradingBotOrchestrator:
         except Exception as exc:
             logger.warning("[Retention] Candle cleanup (%s) failed: %s", reason, exc)
 
+    def _maybe_run_db_maintenance(self) -> None:
+        """Periodic DB maintenance: cleanup old data + WAL checkpoint."""
+        now_ts = time.time()
+        if self._last_db_maintenance_at <= 0:
+            self._last_db_maintenance_at = now_ts
+            return
+        if (now_ts - self._last_db_maintenance_at) < self._db_maintenance_interval_seconds:
+            return
+        try:
+            deleted = self.db.cleanup_old_data(days=90)
+            total = sum(deleted.values())
+            logger.info(
+                "[Maintenance] DB cleanup removed %d row(s): %s", total,
+                ", ".join(f"{k}={v}" for k, v in deleted.items()),
+            )
+            conn = self.db.get_connection()
+            try:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                conn.close()
+            logger.info("[Maintenance] WAL checkpoint (TRUNCATE) completed")
+        except Exception as exc:
+            logger.warning("[Maintenance] DB maintenance failed: %s", exc)
+        self._last_db_maintenance_at = now_ts
+
+        # Prune _executed_today to prevent unbounded growth
+        if len(self._executed_today) > self._executed_today_max:
+            self._executed_today = self._executed_today[-self._executed_today_max:]
+
     def _maybe_run_candle_retention_cleanup(self) -> None:
         if not self._candle_retention_enabled or not self._candle_retention_policy:
             return
@@ -787,13 +1066,32 @@ class TradingBotOrchestrator:
             tracked_position = self._find_tracked_position_by_symbol(pair)
             wallet_balance = self._extract_total_balance(balance_state, asset)
 
+            if not tracked_position and pair:
+                try:
+                    active_pairs = {str(item).upper() for item in (self._get_trading_pairs() or [])}
+                except Exception:
+                    active_pairs = set()
+                if pair in active_pairs and wallet_balance > 0:
+                    try:
+                        self._bootstrap_held_positions()
+                    except Exception as exc:
+                        logger.error("Failed to bootstrap deposited position %s: %s", pair, exc, exc_info=True)
+                    tracked_position = self._find_tracked_position_by_symbol(pair)
+
             if tracked_position:
                 entry_price = _coerce_trade_float(tracked_position.get("entry_price"), 0.0)
-                message = (
-                    f"External crypto deposit detected: {asset} +{event.amount:.8f} "
-                    f"(wallet {wallet_balance:.8f}). Tracked {pair} entry remains {entry_price:,.2f}; "
-                    f"bot will not average-in this deposit automatically."
-                )
+                if str(tracked_position.get("bootstrap_source") or "").strip():
+                    message = (
+                        f"External crypto deposit detected: {asset} +{event.amount:.8f} "
+                        f"(wallet {wallet_balance:.8f}). {pair} was registered into Position Book at "
+                        f"entry {entry_price:,.2f} via bootstrap tracking."
+                    )
+                else:
+                    message = (
+                        f"External crypto deposit detected: {asset} +{event.amount:.8f} "
+                        f"(wallet {wallet_balance:.8f}). Tracked {pair} entry remains {entry_price:,.2f}; "
+                        f"bot will not average-in this deposit automatically."
+                    )
             else:
                 message = (
                     f"External crypto deposit detected: {asset} +{event.amount:.8f} "
@@ -895,494 +1193,13 @@ class TradingBotOrchestrator:
         logger.info("ระบบจัดการเทรดบอทกำลังเริ่มต้นการทำงาน")
 
     def _bootstrap_held_coin_history(self) -> None:
-        """Backfill held-coin history from live balances and tracked open orders."""
-        tracked_pairs = [pair.upper() for pair in self._get_trading_pairs()]
-        if not tracked_pairs:
-            return
-
-        try:
-            balances = self.api_client.get_balances()
-        except Exception as e:
-            logger.debug("[Portfolio Guard] balance bootstrap skipped: %s", e)
-            balances = {}
-
-        tracked_open_orders = {
-            str(order.get("symbol", "")).upper()
-            for order in self.executor.get_open_orders()
-            if order.get("symbol")
-        }
-        backfilled: list[str] = []
-
-        for pair in tracked_pairs:
-            if self.db.has_ever_held(pair):
-                continue
-
-            base_asset = pair.split("_", 1)[1] if "_" in pair else pair
-            balance_data = balances.get(base_asset.upper(), {}) if isinstance(balances, dict) else {}
-            available_qty = float(balance_data.get("available", 0) or 0)
-
-            if available_qty > 0 or pair in tracked_open_orders:
-                self.db.record_held_coin(pair, available_qty if available_qty > 0 else 0.0)
-                backfilled.append(pair)
-
-        if backfilled:
-            logger.info(
-                "🛡️  [Portfolio Guard] Backfilled held-coin history from live state: %s",
-                backfilled,
-            )
+        self._get_startup_runtime_helper().bootstrap_held_coin_history()
 
     def _bootstrap_held_positions(self) -> None:
-        """Register wallet-held coins as OMS-tracked open positions.
-
-        Coins that have real balance on Bitkub but no corresponding entry in
-        ``executor._open_orders`` (e.g. manually bought, transferred in, or
-        bought while the bot was offline) are registered as synthetic BUY
-        positions so the bot can manage SL/TP and auto-sell them.
-
-        Runs once at startup, after ``_bootstrap_held_coin_history`` and
-        ``sync_open_orders_from_db``, but before ``sync_in_position_states``.
-        """
-        tracked_pairs = [pair.upper() for pair in self._get_trading_pairs()]
-        if not tracked_pairs:
-            return
-
-        try:
-            balances = self.api_client.get_balances()
-        except Exception as e:
-            logger.warning("[Bootstrap Positions] Cannot fetch balances: %s", e)
-            return
-
-        # Symbols already tracked by OMS
-        tracked_symbols = {
-            str(order.get("symbol", "")).upper()
-            for order in self.executor.get_open_orders()
-            if order.get("symbol")
-        }
-
-        from helpers import parse_ticker_last
-
-        registered: list[str] = []
-        for pair in tracked_pairs:
-            if pair in tracked_symbols:
-                continue
-
-            base_asset = pair.split("_", 1)[1] if "_" in pair else pair
-            balance_data = balances.get(base_asset.upper(), {}) if isinstance(balances, dict) else {}
-            available_qty = float(balance_data.get("available", 0) or 0)
-            reserved_qty = float(balance_data.get("reserved", 0) or 0)
-            total_qty = available_qty + reserved_qty
-
-            if total_qty <= 0:
-                continue
-
-            restored_context = self._resolve_bootstrap_position_context(pair, total_qty)
-
-            # Get current market price as fallback when no persisted cost basis exists.
-            try:
-                ticker = self.api_client.get_ticker(pair)
-                current_price = parse_ticker_last(ticker) or 0.0
-            except Exception:
-                current_price = 0.0
-
-            entry_price = _coerce_trade_float(restored_context.get("entry_price"), 0.0)
-            if entry_price <= 0:
-                entry_price = current_price
-
-            if entry_price <= 0:
-                logger.debug("[Bootstrap Positions] Skipping %s: no price available", pair)
-                continue
-
-            # Minimum value check (Bitkub minimum ~10-15 THB)
-            position_value = total_qty * entry_price
-            if position_value < self.min_trade_value_thb:
-                logger.debug(
-                    "[Bootstrap Positions] Skipping %s: value %.2f THB < min %.2f THB",
-                    pair, position_value, self.min_trade_value_thb,
-                )
-                continue
-
-            stop_loss = restored_context.get("stop_loss")
-            take_profit = restored_context.get("take_profit")
-            if not stop_loss or not take_profit:
-                stop_loss, take_profit = self._build_bootstrap_position_sl_tp(pair, entry_price)
-            total_entry_cost = _coerce_trade_float(restored_context.get("total_entry_cost"), 0.0)
-            if total_entry_cost <= 0:
-                total_entry_cost = total_qty * entry_price
-
-            # Determine bootstrap source label
-            bootstrap_source = restored_context.get("source") or "estimated_from_ticker"
-
-            # Create synthetic position
-            synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
-            pos_data = {
-                "symbol": pair,
-                "side": OrderSide.BUY,
-                "amount": total_qty,
-                "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "order_id": synthetic_id,
-                "timestamp": datetime.now(),
-                "is_partial_fill": False,
-                "remaining_amount": total_qty,
-                "total_entry_cost": total_entry_cost,
-                "filled": True,
-                "filled_amount": total_qty,
-                "filled_price": entry_price,
-                "bootstrap_source": bootstrap_source,
-            }
-
-            self.executor.register_tracked_position(synthetic_id, pos_data)
-            # Ensure held-coin history is also recorded
-            self.db.record_held_coin(pair, total_qty)
-            registered.append(
-                f"{pair} ({total_qty:.8f} @ {entry_price:,.2f} | SL {float(stop_loss or 0.0):,.2f} TP {float(take_profit or 0.0):,.2f})"
-            )
-
-            if restored_context.get("source"):
-                logger.info(
-                    "[Bootstrap Positions] Restored %s entry context for %s @ %.2f",
-                    restored_context.get("source"),
-                    pair,
-                    entry_price,
-                )
-
-            time.sleep(0.15)  # rate-limit ticker calls
-
-        if registered:
-            logger.info(
-                "📦 [Bootstrap Positions] Registered %d held coin(s) as open positions:\n  %s",
-                len(registered),
-                "\n  ".join(registered),
-            )
+        self._get_startup_runtime_helper().bootstrap_held_positions()
 
     def _reconcile_on_startup(self):
-        """
-        HOTFIX FATAL-01: Ghost Orders Reconciliation on boot.
-
-        Scenario this fixes:
-          1. Bot places a BUY order on Bitkub → order fills.
-          2. Bot crashes BEFORE persisting the fill to SQLite.
-          3. On reboot, local DB thinks the position is "pending" or missing.
-          4. Without reconciliation, bot may try to place the same order again
-             or miss an existing open position.
-
-        Steps:
-          1. Query Bitkub GET /api/v3/market/my-open-orders for ALL symbols.
-          2. Query Bitkub GET /api/v3/market/balances for real wallet state.
-          3. Compare against local SQLite positions.
-             - Remote order with no local record → add to local tracking
-             - Local record with no remote order (filled while bot was down)
-               → mark as needing re-lookup via order history or mark closed
-          4. Overwrite in-memory _open_orders with Bitkub-authoritative state.
-
-        This runs BEFORE the main loop begins, so all downstream logic
-        (SL/TP checks, risk manager, etc.) works on correct state.
-        """
-        logger.info("╔══════════════════════════════════════════════════════╗")
-        logger.info("║  🔍 RECONCILIATION: Querying Bitkub for true state  ║")
-        logger.info("╚══════════════════════════════════════════════════════╝")
-
-        reconciled_count = 0
-        ghost_orders = []
-        balances: Dict[str, Any] = {}
-
-        try:
-            try:
-                balances = self.api_client.get_balances() or {}
-            except Exception as exc:
-                logger.warning("[Reconcile] Failed to fetch balances for startup preservation checks: %s", exc)
-
-            # ── Step 1: Get ALL open orders from Bitkub ──────────────────
-            # We query each tracked symbol; the API doesn't support wildcard.
-            symbols_to_check = [p.upper() for p in self._get_trading_pairs()]
-
-            all_remote_orders = []
-            for sym in symbols_to_check:
-                try:
-                    orders = self.api_client.get_open_orders(sym)
-                    if orders:
-                        for o in orders:
-                            o["_checked_symbol"] = sym  # tag for debugging
-                        all_remote_orders.extend(orders)
-                    time.sleep(0.2)  # rate-limit between queries
-                except Exception as e:
-                    logger.warning(f"[Reconcile] Failed to get open orders for {sym}: {e}", exc_info=True)
-
-            logger.info(f"[Reconcile] Bitkub reported {len(all_remote_orders)} open order(s)")
-
-            # ── Step 2: Convert remote orders to local tracking format ───
-            remote_order_ids = set()
-            for o in all_remote_orders:
-                oid = str(o.get("id", ""))
-                if not oid:
-                    continue
-                remote_order_ids.add(oid)
-
-                # Decode side from order type field
-                typ = o.get("typ", o.get("side", "")).lower()
-                side_enum = OrderSide.BUY if typ in ("bid", "buy") else OrderSide.SELL
-
-                # Normalise symbol back to THB_X format
-                raw_sym = str(o.get("sym") or "")
-                if "_" in raw_sym:
-                    parts = raw_sym.lower().split("_")
-                    # parts[0]=btc, parts[1]=thb → THB_BTC
-                    local_sym = f"THB_{parts[0].upper()}"
-                else:
-                    local_sym = str(o.get("_checked_symbol") or self.trading_pair).upper()
-
-                # Determine entry price, amount, SL, TP from order data
-                entry_price = float(o.get("rate") or o.get("rat", 0)) or 0.0
-                amount      = float(o.get("amount") or o.get("amt", 0)) or 0.0
-                remaining   = float(o.get("unfilled") or o.get("rem", 0)) or amount  # remaining amount
-
-                # Check if we already track this order locally
-                existing = self.executor._open_orders.get(oid)
-                if existing:
-                    # Local record exists — just sync the remaining amount
-                    with self.executor._orders_lock:
-                        self.executor._open_orders[oid]["remaining_amount"] = remaining
-                    logger.debug(f"[Reconcile] Order {oid} synced (local ↔ remote)")
-                else:
-                    # ═══ GHOST ORDER DETECTED ═══
-                    # Remote order exists but NOT in local tracking.
-                    # This means the bot crashed after placing the order but
-                    # before persisting to SQLite.
-                    ghost_orders.append({
-                        "order_id": oid,
-                        "symbol": local_sym,
-                        "side": side_enum,
-                        "amount": amount,
-                        "entry_price": entry_price,
-                        "remaining": remaining,
-                        "type": typ,
-                    })
-
-            # ── Step 3: Add ghost orders to local tracking ───────────────
-            imported_ghost_counts: Counter[tuple[str, str]] = Counter()
-            skipped_ghost_counts: Counter[tuple[str, str]] = Counter()
-            for ghost in ghost_orders:
-                local_sym = str(ghost.get("symbol", "")).upper()
-                side_value = ghost.get("side")
-                side_str = side_value.value if isinstance(side_value, Enum) else str(side_value).lower()
-                amount = float(ghost.get("amount", 0.0) or 0.0)
-                # Sanity check: only SELL orders represent BTC quantity here.
-                if local_sym in ("THB_BTC", "BTC_THB") and side_str == "sell" and amount > 1.0:
-                    skipped_ghost_counts[(local_sym, side_str)] += 1
-                    logger.warning(
-                        "[Reconcile] Skipping ghost order %s — "
-                        "amount=%.8f looks wrong for %s sell order (expected BTC < 1.0)",
-                        ghost.get("order_id"),
-                        amount,
-                        local_sym,
-                    )
-                    continue
-
-                # ── Skip SELL ghosts that match an existing filled BUY position ──
-                # A live TP/SL exit order placed by the bot before crash should
-                # not be imported as a new ghost — doing so would overwrite the
-                # original entry price with the exit price.
-                if side_str == "sell":
-                    has_matching_position = False
-                    with self.executor._orders_lock:
-                        for existing in self.executor._open_orders.values():
-                            ex_sym = str(existing.get("symbol", "")).upper()
-                            ex_side = existing.get("side")
-                            if isinstance(ex_side, Enum):
-                                ex_side = ex_side.value
-                            ex_side = str(ex_side).lower()
-                            if ex_sym == local_sym and ex_side == "buy" and existing.get("filled"):
-                                has_matching_position = True
-                                break
-                    if has_matching_position:
-                        skipped_ghost_counts[(local_sym, side_str)] += 1
-                        logger.info(
-                            "[Reconcile] Ghost SELL %s for %s — skipping ghost import to preserve entry price "
-                            "(matched existing filled BUY position)",
-                            ghost.get("order_id"), local_sym,
-                        )
-                        continue
-
-                oid = ghost["order_id"]
-                logger.warning(
-                    f"👻 [Ghost Order] {oid} found on Bitkub but NOT in local DB! "
-                    f"Adding to tracking: {ghost['side'].value.upper()} "
-                    f"{ghost['symbol']} {ghost['amount']:.8f} @ {ghost['entry_price']:,.2f}"
-                )
-
-                # If order is partially filled on Bitkub side, it won't show as
-                # a "pending" order — it'll show as "partial". We still track it.
-                with self.executor._orders_lock:
-                    self.executor._open_orders[oid] = {
-                        "symbol": ghost["symbol"],
-                        "side": ghost["side"],
-                        "amount": ghost["amount"],
-                        "entry_price": ghost["entry_price"],
-                        "stop_loss": None,     # Unknown — set conservatively
-                        "take_profit": None,   # Unknown — will be computed on next signal
-                        "order_id": oid,
-                        "timestamp": datetime.now(),
-                        "is_partial_fill": ghost["remaining"] < ghost["amount"],
-                        "remaining_amount": ghost["remaining"],
-                        # BUY orders: Bitkub returns THB spent as `amount`, so that IS the entry cost.
-                        # SELL orders: `amount` is coin qty, so cost = price × qty.
-                        "total_entry_cost": ghost["amount"] if ghost["side"] == OrderSide.BUY else ghost["entry_price"] * ghost["amount"],
-                        "filled": ghost["remaining"] < ghost["amount"],
-                    }
-                # Persist to DB so it survives another crash
-                try:
-                    self.db.save_position(self.executor._open_orders[oid])
-                except Exception as e:
-                    logger.error(f"[Reconcile] Failed to persist ghost order {oid}: {e}")
-                imported_ghost_counts[(local_sym, side_str)] += 1
-                reconciled_count += 1
-
-            if imported_ghost_counts:
-                summary = ", ".join(
-                    f"{side.upper()} {symbol} x{count}"
-                    for (symbol, side), count in sorted(imported_ghost_counts.items())
-                )
-                logger.warning(f"[Reconcile] Ghost orders imported summary: {summary}")
-            if skipped_ghost_counts:
-                summary = ", ".join(
-                    f"{side.upper()} {symbol} x{count}"
-                    for (symbol, side), count in sorted(skipped_ghost_counts.items())
-                )
-                logger.warning(f"[Reconcile] Ghost orders skipped by sanity check: {summary}")
-
-            handled_order_ids = self._reconcile_pending_trade_states(remote_order_ids)
-
-            # ── Step 4: Check local orders that are NOT on Bitkub anymore ──
-            # These were either: (a) filled while bot was down, or (b) cancelled
-            local_order_ids = set(self.executor._open_orders.keys()) - handled_order_ids
-            vanished_ids = local_order_ids - remote_order_ids
-
-            if vanished_ids:
-                logger.info(f"[Reconcile] {len(vanished_ids)} local order(s) not on Bitkub "
-                            f"— checking if they were filled while bot was down")
-
-            for missing_oid in vanished_ids:
-                local_pos = self.executor._open_orders.get(missing_oid)
-                if not local_pos:
-                    continue
-
-                sym = local_pos.get("symbol", self.trading_pair)
-                side_enum = local_pos.get("side", OrderSide.BUY)
-
-                # Query order history to check final status
-                try:
-                    history = self.api_client.get_order_history(sym, limit=50)
-                    matched = None
-                    for h in history:
-                        hist_id = str(h.get("id", ""))
-                        if hist_id == missing_oid:
-                            matched = h
-                            break
-
-                    if matched:
-                        status_str = self._history_status_value(matched)
-                        if self._history_status_is_filled(matched):
-                            logger.info(
-                                f"✅ [Reconcile] Order {missing_oid} was FILLED while bot was down. "
-                                f"Status: {status_str}"
-                            )
-                            side_val = side_enum.value if isinstance(side_enum, Enum) else str(side_enum).lower()
-                            if side_val == "buy":
-                                fallback_cost = _coerce_trade_float(local_pos.get("total_entry_cost"))
-                                filled_amount, filled_price = self._extract_history_fill_details(
-                                    matched,
-                                    fallback_amount=_coerce_trade_float(local_pos.get("filled_amount")) or _coerce_trade_float(local_pos.get("amount")),
-                                    fallback_price=_coerce_trade_float(local_pos.get("filled_price")) or _coerce_trade_float(local_pos.get("entry_price")),
-                                    fallback_cost=fallback_cost,
-                                )
-                                if filled_amount > 0 and filled_price > 0:
-                                    restored_position = dict(local_pos)
-                                    restored_position.update({
-                                        "symbol": sym,
-                                        "side": OrderSide.BUY,
-                                        "amount": filled_amount,
-                                        "entry_price": filled_price,
-                                        "timestamp": local_pos.get("timestamp") or datetime.now(),
-                                        "is_partial_fill": False,
-                                        "remaining_amount": 0.0,
-                                        "total_entry_cost": fallback_cost or (filled_amount * filled_price),
-                                        "filled": True,
-                                        "filled_amount": filled_amount,
-                                        "filled_price": filled_price,
-                                    })
-                                    self.executor.register_tracked_position(missing_oid, restored_position)
-                                    self._log_filled_order(
-                                        sym,
-                                        "buy",
-                                        filled_amount,
-                                        filled_price,
-                                        timestamp=local_pos.get("timestamp") or datetime.utcnow(),
-                                    )
-                                    logger.info(
-                                        "[Reconcile] Restored filled BUY %s as tracked position %.8f @ %.2f",
-                                        missing_oid,
-                                        filled_amount,
-                                        filled_price,
-                                    )
-                                else:
-                                    logger.warning("[Reconcile] Filled BUY %s unresolved; leaving local tracking unchanged", missing_oid)
-                            else:
-                                with self.executor._orders_lock:
-                                    self.executor._open_orders.pop(missing_oid, None)
-                                try:
-                                    self.db.delete_position(missing_oid)
-                                except Exception as exc:
-                                    logger.warning("[Reconcile] Failed to delete DB position %s after fill: %s", missing_oid, exc)
-                        elif self._history_status_is_cancelled(matched):
-                            logger.info(
-                                f"🗑️ [Reconcile] Order {missing_oid} was CANCELLED on Bitkub. "
-                                f"Removing from local tracking"
-                            )
-                            with self.executor._orders_lock:
-                                self.executor._open_orders.pop(missing_oid, None)
-                            try:
-                                self.db.delete_position(missing_oid)
-                            except Exception as exc:
-                                logger.warning("[Reconcile] Failed to delete cancelled DB position %s: %s", missing_oid, exc)
-                        else:
-                            logger.warning(
-                                f"[Reconcile] Order {missing_oid} has unusual status '{status_str}' "
-                                f"— keeping in local tracking for now"
-                            )
-                    else:
-                        # Not in order history either — could be very old or expired
-                        if self._preserve_bootstrap_position_from_balances(missing_oid, local_pos, balances):
-                            continue
-
-                        logger.warning(
-                            f"[Reconcile] Order {missing_oid} not found in Bitkub or history. "
-                            f"Removing from local tracking (likely stale)"
-                        )
-                        with self.executor._orders_lock:
-                            self.executor._open_orders.pop(missing_oid, None)
-                        try:
-                            self.db.delete_position(missing_oid)
-                        except Exception as exc:
-                            logger.warning("[Reconcile] Failed to delete stale DB position %s: %s", missing_oid, exc)
-
-                except Exception as e:
-                    logger.error(f"[Reconcile] Failed to check history for {missing_oid}: {e}")
-
-            # ── Step 5: Final state summary ──────────────────────────────
-            final_count = len(self.executor._open_orders)
-            logger.info(
-                f"╔══════════════════════════════════════════════════════╗\n"
-                f"║  ✅ RECONCILIATION COMPLETE                        ║\n"
-                f"║     Ghost orders added:  {reconciled_count}\n"
-                f"║     Orders removed:      {len(vanished_ids) if vanished_ids else 0}\n"
-                f"║     Active positions:    {final_count}\n"
-                f"╚══════════════════════════════════════════════════════╝"
-            )
-
-        except Exception as e:
-            logger.error(f"[Reconcile] Reconciliation failed: {e}", exc_info=True)
-            logger.warning("[Reconcile] Proceeding with local state only — may have stale data!")
+        self._get_startup_runtime_helper().reconcile_on_startup()
     
     def stop(self):
         """Stop the trading bot gracefully."""
@@ -1390,7 +1207,7 @@ class TradingBotOrchestrator:
         self.running = False
 
         if self._loop_thread and self._loop_thread.is_alive():
-            self._loop_thread.join(timeout=10)
+            self._loop_thread.join(timeout=30)
 
         # Stop WebSocket
         if _WEBSOCKET_AVAILABLE and stop_websocket:
@@ -1415,29 +1232,35 @@ class TradingBotOrchestrator:
     def _main_loop(self):
         """Main trading loop - runs every interval_seconds."""
         while self.running:
-            # ── Fatal Shutdown Gate ────────────────────────────────────────
-            # Check global shutdown flag (set by api_client on Error 5 etc.)
-            import api_client as _ac
-            if _ac.SHOULD_SHUTDOWN:
-                logger.critical(
-                    f"🚨 GRACEFUL SHUTDOWN: {_ac.SHUTDOWN_REASON}"
-                )
+            try:
+                self._last_loop_time = datetime.now()
+                self._loop_count += 1
+                self._maybe_run_candle_retention_cleanup()
+                self._maybe_run_db_maintenance()
+                
+                logger.debug(f"Loop #{self._loop_count} started at {self._last_loop_time}")
+                
+                # Run one iteration
+                self._run_iteration()
+
+            except FatalAuthException as exc:
+                logger.critical("🚨 GRACEFUL SHUTDOWN: %s", exc.message)
+                alert_system = getattr(self, "alert_system", None)
+                if alert_system is not None:
+                    try:
+                        title = "FATAL: Bitkub Auth Error 5" if getattr(exc, "code", None) == 5 else "FATAL: Bitkub Auth Error"
+                        alert_system.send(
+                            AlertLevel.CRITICAL,
+                            format_fatal_auth_alert(exc.message, title=title),
+                        )
+                    except Exception as alert_exc:
+                        logger.warning("Failed to send fatal auth alert: %s", alert_exc)
                 logger.critical(
                     "หยุดการทำงานอย่างปลอดภัย — "
                     "กรุณาตรวจสอบ API Key/Secret ใน .env แล้วรีสตาร์ทบอท"
                 )
                 self.running = False
                 break
-
-            try:
-                self._last_loop_time = datetime.now()
-                self._loop_count += 1
-                self._maybe_run_candle_retention_cleanup()
-                
-                logger.debug(f"Loop #{self._loop_count} started at {self._last_loop_time}")
-                
-                # Run one iteration
-                self._run_iteration()
                 
             except Exception as e:
                 logger.error(f"Main loop error: {e}", exc_info=True)
@@ -1532,10 +1355,20 @@ class TradingBotOrchestrator:
 
         return filtered_pairs
 
+    def _order_history_window_limit(self) -> int:
+        config = getattr(self, "config", {}) or {}
+        data_config = dict(config.get("data", {}) or {})
+        raw_limit = data_config.get("order_history_limit", config.get("order_history_limit", 200))
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            limit = 200
+        return max(50, min(limit, 500))
+
     def _lookup_order_history_status(self, symbol: str, order_id: str) -> Optional[Dict[str, Any]]:
         """Fallback history lookup for an order when the info endpoint is inconclusive."""
         try:
-            history = self.api_client.get_order_history(symbol, limit=50)
+            history = self.api_client.get_order_history(symbol, limit=self._order_history_window_limit())
         except Exception as e:
             logger.debug("[State] History lookup failed for %s: %s", order_id, e)
             return None
@@ -1550,6 +1383,12 @@ class TradingBotOrchestrator:
         if not row:
             return ""
         return str(row.get("status") or row.get("typ") or "").lower()
+
+    @staticmethod
+    def _history_side_value(row: Optional[Dict[str, Any]]) -> str:
+        if not row:
+            return ""
+        return normalize_side_value(row.get("side") or row.get("sd") or "")
 
     @classmethod
     def _history_status_is_filled(cls, row: Optional[Dict[str, Any]]) -> bool:
@@ -1578,15 +1417,25 @@ class TradingBotOrchestrator:
             or _coerce_trade_float(row.get("price"))
             or fallback_price
         )
-        fill_amount = (
+        history_side = self._history_side_value(row)
+        explicit_base_amount = (
             _coerce_trade_float(row.get("filled"))
             or _coerce_trade_float(row.get("filled_amount"))
             or _coerce_trade_float(row.get("executed_amount"))
             or _coerce_trade_float(row.get("executed"))
-            or _coerce_trade_float(row.get("amount"))
-            or _coerce_trade_float(row.get("amt"))
-            or fallback_amount
+            or _coerce_trade_float(row.get("rec"))
         )
+        if explicit_base_amount > 0:
+            fill_amount = explicit_base_amount
+        else:
+            raw_amount = _coerce_trade_float(row.get("amount"))
+            raw_cost = _coerce_trade_float(row.get("amt")) or raw_amount
+            fee_value = _coerce_trade_float(row.get("fee"))
+            if history_side in ("buy", "bid") and raw_cost > 0 and fill_price > 0:
+                net_cost = raw_cost - fee_value if fee_value > 0 and raw_cost > fee_value else raw_cost
+                fill_amount = net_cost / fill_price if net_cost > 0 else 0.0
+            else:
+                fill_amount = raw_amount or raw_cost or fallback_amount
         if fill_amount <= 0 and fill_price > 0 and fallback_cost > 0:
             fill_amount = fallback_cost / fill_price
         return fill_amount, fill_price
@@ -1630,87 +1479,17 @@ class TradingBotOrchestrator:
         except Exception as exc:
             logger.error("[State] Failed to log filled %s trade for %s: %s", side, symbol, exc, exc_info=True)
 
+    # Startup and managed lifecycle facade wrappers.
+
     def _reconcile_pending_trade_states(self, remote_order_ids: set[str]) -> set[str]:
-        handled_order_ids: set[str] = set()
-        if not getattr(self, "_state_machine_enabled", False):
-            return handled_order_ids
-        state_manager = getattr(self, "_state_manager", None)
-        if state_manager is None:
-            return handled_order_ids
+        return self._get_startup_runtime_helper().reconcile_pending_trade_states(remote_order_ids)
 
-        for snapshot in list(state_manager.list_active_states()):
-            if snapshot.state == TradeLifecycleState.PENDING_BUY:
-                tracked_order_id = snapshot.entry_order_id
-            elif snapshot.state == TradeLifecycleState.PENDING_SELL:
-                tracked_order_id = snapshot.exit_order_id
-            else:
-                continue
-
-            if not tracked_order_id or tracked_order_id in remote_order_ids:
-                continue
-
-            hist = self._lookup_order_history_status(snapshot.symbol, tracked_order_id)
-            if self._history_status_is_filled(hist):
-                if snapshot.state == TradeLifecycleState.PENDING_BUY:
-                    filled_amount, filled_price = self._extract_history_fill_details(
-                        hist,
-                        fallback_amount=snapshot.filled_amount,
-                        fallback_price=snapshot.entry_price,
-                        fallback_cost=snapshot.total_entry_cost,
-                    )
-                    if filled_amount <= 0 or filled_price <= 0:
-                        logger.warning("[Reconcile] Filled BUY for %s detected but amount/price unresolved", snapshot.symbol)
-                        continue
-                    self._register_filled_position_from_state(snapshot, filled_amount, filled_price)
-                    state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
-                    self.db.record_held_coin(snapshot.symbol, filled_amount)
-                    if self.risk_manager:
-                        self.risk_manager.record_trade()
-                    logger.info(
-                        "[Reconcile] Pending BUY %s filled while offline -> restored in_position %.8f @ %.2f",
-                        snapshot.symbol,
-                        filled_amount,
-                        filled_price,
-                    )
-                else:
-                    _, exit_price = self._extract_history_fill_details(
-                        hist,
-                        fallback_amount=snapshot.filled_amount,
-                        fallback_price=snapshot.exit_price or snapshot.entry_price,
-                    )
-                    completed = state_manager.complete_exit(snapshot.symbol, exit_price or snapshot.exit_price or snapshot.entry_price)
-                    self._report_completed_exit(completed, exit_price or snapshot.exit_price or snapshot.entry_price, "reconcile")
-                    logger.info("[Reconcile] Pending SELL %s filled while offline -> closed trade logged", snapshot.symbol)
-                handled_order_ids.add(tracked_order_id)
-                continue
-
-            if self._history_status_is_cancelled(hist):
-                if snapshot.state == TradeLifecycleState.PENDING_BUY:
-                    state_manager.cancel_pending_buy(snapshot.symbol, "buy cancelled during downtime")
-                    logger.info("[Reconcile] Pending BUY %s cancelled while offline", snapshot.symbol)
-                else:
-                    restore_position = {
-                        "symbol": snapshot.symbol,
-                        "side": OrderSide.BUY,
-                        "amount": snapshot.filled_amount,
-                        "entry_price": snapshot.entry_price,
-                        "stop_loss": snapshot.stop_loss,
-                        "take_profit": snapshot.take_profit,
-                        "timestamp": snapshot.opened_at or datetime.now(),
-                        "is_partial_fill": False,
-                        "remaining_amount": 0.0,
-                        "total_entry_cost": snapshot.total_entry_cost,
-                        "filled": True,
-                        "filled_amount": snapshot.filled_amount,
-                        "filled_price": snapshot.entry_price,
-                        "state_managed": True,
-                    }
-                    self.executor.register_tracked_position(snapshot.entry_order_id, restore_position)
-                    state_manager.restore_in_position(snapshot.symbol, "sell cancelled during downtime")
-                    logger.info("[Reconcile] Pending SELL %s cancelled while offline -> restored in_position", snapshot.symbol)
-                handled_order_ids.add(tracked_order_id)
-
-        return handled_order_ids
+    def _get_startup_runtime_helper(self) -> StartupRuntimeHelper:
+        helper = getattr(self, "_startup_runtime_helper", None)
+        if helper is None:
+            helper = StartupRuntimeHelper(self)
+            self._startup_runtime_helper = helper
+        return helper
 
     def _resolve_fill_amount(
         self,
@@ -1718,24 +1497,7 @@ class TradingBotOrchestrator:
         result: OrderResult,
         fallback_price: float,
     ) -> tuple[float, float]:
-        """Best-effort fill normalization for Bitkub responses with missing filled quantity."""
-        fill_price = float(result.filled_price or fallback_price or snapshot.entry_price or snapshot.exit_price or 0.0)
-        fill_amount = float(result.filled_amount or 0.0)
-        if fill_amount > 0 and snapshot.state == TradeLifecycleState.PENDING_BUY:
-            total_entry_cost = float(snapshot.total_entry_cost or result.ordered_amount or 0.0)
-            normalized_fill_amount = normalize_buy_quantity(fill_amount, fill_price, total_entry_cost)
-            if normalized_fill_amount != fill_amount:
-                return normalized_fill_amount, fill_price
-
-        if fill_amount > 0:
-            return fill_amount, fill_price
-
-        if snapshot.state == TradeLifecycleState.PENDING_BUY:
-            if fill_price > 0 and snapshot.total_entry_cost > 0:
-                return snapshot.total_entry_cost / fill_price, fill_price
-            return 0.0, fill_price
-
-        return float(snapshot.filled_amount or 0.0), fill_price
+        return ManagedLifecycleHelper.resolve_fill_amount(snapshot, result, fallback_price)
 
     def _register_filled_position_from_state(
         self,
@@ -1743,31 +1505,7 @@ class TradingBotOrchestrator:
         filled_amount: float,
         filled_price: float,
     ) -> None:
-        """Create a tracked IN_POSITION row once a pending BUY is confirmed filled."""
-        pos_data = {
-            "symbol": snapshot.symbol,
-            "side": OrderSide.BUY,
-            "amount": filled_amount,
-            "entry_price": filled_price,
-            "stop_loss": snapshot.stop_loss,
-            "take_profit": snapshot.take_profit,
-            "timestamp": snapshot.opened_at or datetime.now(),
-            "is_partial_fill": False,
-            "remaining_amount": 0.0,
-            "total_entry_cost": snapshot.total_entry_cost,
-            "filled": True,
-            "filled_amount": filled_amount,
-            "filled_price": filled_price,
-            "state_managed": True,
-        }
-        self.executor.register_tracked_position(snapshot.entry_order_id, pos_data)
-        self._log_filled_order(
-            snapshot.symbol,
-            "buy",
-            filled_amount,
-            filled_price,
-            timestamp=snapshot.opened_at or datetime.utcnow(),
-        )
+        self._get_managed_lifecycle_helper().register_filled_position_from_state(snapshot, filled_amount, filled_price)
 
     def _report_completed_exit(
         self,
@@ -1775,105 +1513,42 @@ class TradingBotOrchestrator:
         exit_price: float,
         price_source: str,
     ) -> None:
-        """Persist and notify net PnL only after the exit order is fully matched."""
-        from trade_executor import BITKUB_FEE_PCT
-
-        amount = float(snapshot.filled_amount or 0.0)
-        if amount <= 0:
-            logger.warning("[State] Exit report skipped for %s: filled amount is 0", snapshot.symbol)
-            return
-
-        entry_cost = float(snapshot.total_entry_cost or (snapshot.entry_price * amount) or 0.0)
-        entry_fee = entry_cost * BITKUB_FEE_PCT
-        gross_exit = exit_price * amount
-        exit_fee = gross_exit * BITKUB_FEE_PCT
-        net_exit = gross_exit - exit_fee
-        total_fees = entry_fee + exit_fee
-        net_pnl = net_exit - entry_cost
-        net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0.0
-        now = datetime.now()
-
-        self._log_filled_order(
-            snapshot.symbol,
-            "sell",
-            amount,
-            exit_price,
-            fee=exit_fee,
-            timestamp=now,
-        )
-
-        try:
-            self.db.log_closed_trade({
-                "symbol": snapshot.symbol,
-                "side": "buy",
-                "amount": amount,
-                "entry_price": snapshot.entry_price,
-                "exit_price": exit_price,
-                "entry_cost": entry_cost,
-                "gross_exit": gross_exit,
-                "entry_fee": entry_fee,
-                "exit_fee": exit_fee,
-                "total_fees": total_fees,
-                "net_pnl": net_pnl,
-                "net_pnl_pct": net_pnl_pct,
-                "trigger": snapshot.trigger,
-                "price_source": price_source,
-                "opened_at": snapshot.opened_at,
-                "closed_at": now,
-            })
-        except Exception as e:
-            logger.error("[State] Failed to log closed trade for %s: %s", snapshot.symbol, e, exc_info=True)
-
-        trigger_label = "Take Profit" if snapshot.trigger == "TP" else ("Stop Loss" if snapshot.trigger == "SL" else (snapshot.trigger or "Exit"))
-        msg = self._format_exit_alert(
-            snapshot.symbol,
-            trigger_label,
-            amount,
-            snapshot.entry_price,
-            exit_price,
-            entry_cost,
-            gross_exit,
-            net_pnl,
-            net_pnl_pct,
-            total_fees,
-            now=now,
-        )
-        self._send_alert(msg, to_telegram=True)
+        self._get_managed_lifecycle_helper().report_completed_exit(snapshot, exit_price, price_source)
 
     def _submit_managed_entry(self, decision: TradeDecision, portfolio: Dict[str, Any]) -> None:
-        """Submit a BUY order into PENDING_BUY instead of opening a position immediately."""
-        result = self.executor.execute_entry(
-            decision.plan,
-            portfolio["balance"],
-            defer_position_tracking=True,
-        )
-        if not result.success or not result.order_id:
-            decision.status = "failed"
-            logger.error("Trade execution failed: %s", result.message)
-            return
+        self._get_managed_lifecycle_helper().submit_managed_entry(decision, portfolio)
 
-        snapshot = self._state_manager.start_pending_buy(
-            decision.plan.symbol,
-            decision.plan,
-            result,
-            signal_source=self.signal_source.value,
-        )
-        decision.status = snapshot.state.value
-        self._executed_today.append({
-            "decision": decision,
-            "result": result,
-            "timestamp": datetime.now(),
-        })
-        coin = self._format_coin_symbol(decision.plan.symbol)
-        msg = self._format_alert_block(
-            f"📥 <b>ส่งคำสั่งซื้อ</b>  {coin}",
-            [
-                f"ราคา  <code>{decision.plan.entry_price:,.0f}</code> THB  ({decision.plan.confidence:.0%})",
-                f"ขนาดไม้จะคำนวณตามยอดคงเหลือ/ความเสี่ยงตอนส่งออเดอร์",
-                f"SL <code>{decision.plan.stop_loss:,.0f}</code>  TP <code>{decision.plan.take_profit:,.0f}</code>",
-            ],
-        )
-        self._send_alert(msg, to_telegram=True)
+    @staticmethod
+    def _signal_trigger_cache_key(symbol: str, signal_type: str) -> str:
+        return ManagedLifecycleHelper.signal_trigger_cache_key(symbol, signal_type)
+
+    def _get_signal_trigger_token(self, signal: Optional[AggregatedSignal]) -> str:
+        return ManagedLifecycleHelper.get_signal_trigger_token(signal)
+
+    def _is_reused_signal_trigger(self, signal: Optional[AggregatedSignal]) -> bool:
+        return self._get_managed_lifecycle_helper().is_reused_signal_trigger(signal)
+
+    def _remember_consumed_signal_trigger(self, signal: Optional[AggregatedSignal]) -> None:
+        self._get_managed_lifecycle_helper().remember_consumed_signal_trigger(signal)
+
+    def _get_managed_lifecycle_helper(self) -> ManagedLifecycleHelper:
+        helper = getattr(self, "_managed_lifecycle_helper", None)
+        if helper is None:
+            helper = ManagedLifecycleHelper(self)
+            self._managed_lifecycle_helper = helper
+        return helper
+
+    def _get_position_monitor_helper(self) -> PositionMonitorHelper:
+        helper = getattr(self, "_position_monitor_helper", None)
+        if helper is None:
+            helper = PositionMonitorHelper(
+                self,
+                websocket_available=_WEBSOCKET_AVAILABLE,
+                price_tick_available=PriceTick is not None,
+                latest_ticker_getter=get_latest_ticker,
+            )
+            self._position_monitor_helper = helper
+        return helper
 
     def _submit_managed_exit(
         self,
@@ -1888,211 +1563,100 @@ class TradingBotOrchestrator:
         price_source: str,
         opened_at: Optional[datetime],
     ) -> bool:
-        """Submit an exit order and move the symbol into PENDING_SELL."""
-        if not self._state_machine_enabled:
-            return False
-
-        snapshot = self._state_manager.get_state(pos_symbol)
-        if snapshot.state != TradeLifecycleState.IN_POSITION:
-            logger.debug(
-                "[State] Skip managed exit for %s because lifecycle=%s",
-                pos_symbol,
-                snapshot.state.value,
-            )
-            return False
-
-        exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
-        result = self.executor.execute_exit(
+        return self._get_managed_lifecycle_helper().submit_managed_exit(
             position_id=position_id,
-            order_id=position_id,
-            side=exit_side,
+            pos_symbol=pos_symbol,
+            side=side,
             amount=amount,
-            price=exit_price,
-            defer_cleanup=True,
-        )
-        if not result.success or not result.order_id:
-            logger.error("Failed to submit %s exit for %s: %s", triggered, pos_symbol, result.message)
-            return False
-
-        position_data = {
-            "order_id": position_id,
-            "symbol": pos_symbol,
-            "amount": amount,
-            "entry_price": entry_price,
-            "stop_loss": snapshot.stop_loss,
-            "take_profit": snapshot.take_profit,
-            "timestamp": opened_at or datetime.now(),
-            "total_entry_cost": total_entry_cost,
-        }
-        self.executor.remove_tracked_position(position_id)
-        pending = self._state_manager.start_pending_sell(
-            pos_symbol,
-            position_data,
-            exit_order_id=result.order_id,
-            trigger=triggered,
             exit_price=exit_price,
-            notes=f"price_source={price_source}",
+            triggered=triggered,
+            entry_price=entry_price,
+            total_entry_cost=total_entry_cost,
+            price_source=price_source,
+            opened_at=opened_at,
         )
-
-        if result.status == OrderStatus.FILLED:
-            completed = self._state_manager.complete_exit(
-                pos_symbol,
-                exit_price=float(result.filled_price or exit_price or 0.0),
-            )
-            self._report_completed_exit(completed, float(result.filled_price or exit_price or 0.0), price_source)
-            return True
-
-        logger.info(
-            "[State] %s -> %s | exit order submitted %s for %s",
-            pos_symbol,
-            pending.state.value,
-            result.order_id,
-            triggered,
-        )
-        return True
 
     def _advance_managed_trade_states(self) -> None:
-        """Advance PENDING_BUY/PENDING_SELL via Bitkub order polling."""
-        if not self._state_machine_enabled:
-            return
+        self._get_managed_lifecycle_helper().advance_managed_trade_states()
 
-        self._state_manager.sync_in_position_states(self.executor.get_open_orders())
-        for snapshot in list(self._state_manager.list_active_states()):
-            try:
-                if snapshot.state == TradeLifecycleState.PENDING_BUY:
-                    status = self.executor.check_order_status(
-                        snapshot.entry_order_id,
-                        symbol=snapshot.symbol,
-                        side="buy",
-                    )
-                    if status.status == OrderStatus.ERROR:
-                        hist = self._lookup_order_history_status(snapshot.symbol, snapshot.entry_order_id)
-                        hist_status = str((hist or {}).get("status") or "").lower()
-                        if hist_status in ("filled", "match", "done", "complete"):
-                            status = OrderResult(
-                                success=True,
-                                status=OrderStatus.FILLED,
-                                order_id=snapshot.entry_order_id,
-                                filled_price=(hist or {}).get("rate"),
-                            )
+    def _build_signal_runtime_deps(self) -> SignalRuntimeDeps:
+        return SignalRuntimeDeps(
+            get_portfolio_state=self._get_portfolio_state,
+            get_mtf_signal_for_symbol=self._get_mtf_signal_for_symbol,
+            state_machine_enabled=bool(getattr(self, "_state_machine_enabled", False)),
+            state_manager=getattr(self, "_state_manager", None),
+            last_state_gate_logged=self.__dict__.setdefault("_last_state_gate_logged", {}),
+            get_market_data_for_symbol=self._get_market_data_for_symbol,
+            risk_manager=getattr(self, "risk_manager", None),
+            executed_today=self.__dict__.setdefault("_executed_today", []),
+            signal_generator=self.signal_generator,
+            database=self.db,
+            is_reused_signal_trigger=self._is_reused_signal_trigger,
+            get_signal_trigger_token=self._get_signal_trigger_token,
+            allow_sell_entries_from_idle=bool(getattr(self, "_allow_sell_entries_from_idle", False)),
+            create_execution_plan_for_symbol=self._create_execution_plan_for_symbol,
+            signal_source=self.signal_source,
+            mode=self.mode,
+            process_full_auto=self._process_full_auto,
+            process_semi_auto=self._process_semi_auto,
+            process_dry_run=self._process_dry_run,
+        )
 
-                    if status.status == OrderStatus.FILLED:
-                        filled_amount, filled_price = self._resolve_fill_amount(snapshot, status, snapshot.entry_price)
-                        if filled_amount <= 0 or filled_price <= 0:
-                            logger.warning("[State] Filled BUY for %s but amount/price unresolved", snapshot.symbol)
-                            continue
-                        self._register_filled_position_from_state(snapshot, filled_amount, filled_price)
-                        self._state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
-                        self.db.record_held_coin(snapshot.symbol, filled_amount)
-                        if self.risk_manager:
-                            self.risk_manager.record_trade()
-                        logger.info(
-                            "[State] %s -> in_position | order=%s amount=%.8f @ %.2f",
-                            snapshot.symbol,
-                            snapshot.entry_order_id,
-                            filled_amount,
-                            filled_price,
-                        )
-                        if self.send_alerts:
-                            msg = self._format_alert_block(
-                                f"✅ <b>ซื้อสำเร็จ (Filled)</b>  {snapshot.symbol.replace('THB_', '')}",
-                                [
-                                    f"ได้ของจำนวน: <code>{filled_amount:.6f}</code>",
-                                    f"ที่ราคา: <code>{filled_price:,.2f}</code> THB",
-                                    f"มูลค่าไม้: <code>{filled_amount * filled_price:,.2f}</code> THB",
-                                ]
-                            )
-                            self._send_alert(msg, to_telegram=True)
-                        continue
+    def _build_multi_timeframe_runtime_deps(self) -> MultiTimeframeRuntimeDeps:
+        return MultiTimeframeRuntimeDeps(
+            mtf_enabled=bool(getattr(self, "mtf_enabled", False)),
+            signal_generator=self.signal_generator,
+            mtf_timeframes=list(getattr(self, "mtf_timeframes", []) or []),
+            database=self.db,
+            last_mtf_status=self.__dict__.setdefault("_last_mtf_status", {}),
+            serialize_mtf_signals_detail=SignalRuntimeHelper.serialize_mtf_signals_detail,
+            merge_mtf_signals_detail=SignalRuntimeHelper.merge_mtf_signals_detail,
+            mtf_confirmation_required=bool(getattr(self, "_mtf_confirmation_required", False)),
+        )
 
-                    if self._state_manager.is_timed_out(snapshot):
-                        cancelled = self.executor.cancel_order(snapshot.entry_order_id, symbol=snapshot.symbol, side="buy")
-                        stale_fill = getattr(self.executor, "_oms_cancel_was_error_21", False)
-                        self.executor._oms_cancel_was_error_21 = False
-                        if stale_fill:
-                            fallback = OrderResult(
-                                success=True,
-                                status=OrderStatus.FILLED,
-                                order_id=snapshot.entry_order_id,
-                                filled_price=snapshot.entry_price,
-                            )
-                            filled_amount, filled_price = self._resolve_fill_amount(snapshot, fallback, snapshot.entry_price)
-                            if filled_amount > 0 and filled_price > 0:
-                                self._register_filled_position_from_state(snapshot, filled_amount, filled_price)
-                                self._state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
-                                self.db.record_held_coin(snapshot.symbol, filled_amount)
-                                if self.risk_manager:
-                                    self.risk_manager.record_trade()
-                            continue
-                        if cancelled:
-                            self._state_manager.cancel_pending_buy(snapshot.symbol, "buy timeout cancel")
-                            logger.info("[State] %s -> idle | pending buy timed out", snapshot.symbol)
-                            if self.send_alerts:
-                                msg = self._format_alert_block(
-                                    f"⏰ <b>ยกเลิกคำสั่งซื้อ (ตกรถ)</b>  {snapshot.symbol.replace('THB_', '')}",
-                                    [f"ออเดอร์ Limit ไม่ถูกจับคู่ภายในเวลาที่กำหนด", "ดึงออเดอร์กลับและรอสัญญาณใหม่"]
-                                )
-                                self._send_alert(msg, to_telegram=True)
-                        else:
-                            logger.warning("[State] Failed to cancel timed-out buy for %s", snapshot.symbol)
+    def _build_execution_plan_deps(self) -> ExecutionPlanDeps:
+        return ExecutionPlanDeps(
+            state_machine_enabled=bool(getattr(self, "_state_machine_enabled", False)),
+            database=self.db,
+            held_coins_only=bool(getattr(self, "_held_coins_only", False)),
+            api_client=self.api_client,
+            min_trade_value_thb=float(getattr(self, "min_trade_value_thb", 15.0) or 15.0),
+            get_latest_atr=self._get_latest_atr,
+            risk_manager=self.risk_manager,
+            loop_count=int(getattr(self, "_loop_count", 0) or 0),
+        )
 
-                elif snapshot.state == TradeLifecycleState.PENDING_SELL:
-                    status = self.executor.check_order_status(
-                        snapshot.exit_order_id,
-                        symbol=snapshot.symbol,
-                        side="sell",
-                    )
-                    if status.status == OrderStatus.ERROR:
-                        hist = self._lookup_order_history_status(snapshot.symbol, snapshot.exit_order_id)
-                        hist_status = str((hist or {}).get("status") or "").lower()
-                        if hist_status in ("filled", "match", "done", "complete"):
-                            status = OrderResult(
-                                success=True,
-                                status=OrderStatus.FILLED,
-                                order_id=snapshot.exit_order_id,
-                                filled_price=(hist or {}).get("rate"),
-                            )
-
-                    if status.status == OrderStatus.FILLED:
-                        _, exit_price = self._resolve_fill_amount(snapshot, status, snapshot.exit_price)
-                        completed = self._state_manager.complete_exit(snapshot.symbol, exit_price)
-                        self._report_completed_exit(completed, exit_price, "order")
-                        logger.info("[State] %s -> idle | exit filled", snapshot.symbol)
-                        continue
-
-                    if self._state_manager.is_timed_out(snapshot):
-                        cancelled = self.executor.cancel_order(snapshot.exit_order_id, symbol=snapshot.symbol, side="sell")
-                        stale_fill = getattr(self.executor, "_oms_cancel_was_error_21", False)
-                        self.executor._oms_cancel_was_error_21 = False
-                        if stale_fill:
-                            completed = self._state_manager.complete_exit(snapshot.symbol, snapshot.exit_price or snapshot.entry_price)
-                            self._report_completed_exit(completed, snapshot.exit_price or snapshot.entry_price, "stale_cancel")
-                            continue
-
-                        if cancelled:
-                            restore_position = {
-                                "symbol": snapshot.symbol,
-                                "side": OrderSide.BUY,
-                                "amount": snapshot.filled_amount,
-                                "entry_price": snapshot.entry_price,
-                                "stop_loss": snapshot.stop_loss,
-                                "take_profit": snapshot.take_profit,
-                                "timestamp": snapshot.opened_at or datetime.now(),
-                                "is_partial_fill": False,
-                                "remaining_amount": 0.0,
-                                "total_entry_cost": snapshot.total_entry_cost,
-                                "filled": True,
-                                "filled_amount": snapshot.filled_amount,
-                                "filled_price": snapshot.entry_price,
-                                "state_managed": True,
-                            }
-                            self.executor.register_tracked_position(snapshot.entry_order_id, restore_position)
-                            self._state_manager.restore_in_position(snapshot.symbol, "sell timeout cancel")
-                            logger.info("[State] %s restored to in_position after sell timeout", snapshot.symbol)
-                        else:
-                            logger.warning("[State] Failed to cancel timed-out sell for %s", snapshot.symbol)
-            except Exception as e:
-                logger.error("[State] Advance error for %s: %s", snapshot.symbol, e, exc_info=True)
+    def _build_execution_runtime_deps(self) -> ExecutionRuntimeDeps:
+        pending_lock = getattr(self, "_pending_decisions_lock", None)
+        if pending_lock is None:
+            pending_lock = threading.Lock()
+            self._pending_decisions_lock = pending_lock
+        return ExecutionRuntimeDeps(
+            read_only=bool(getattr(self, "read_only", False)),
+            send_alerts=bool(getattr(self, "send_alerts", False)),
+            format_skip_alert=getattr(self, "_format_skip_alert", lambda *_args, **_kwargs: ""),
+            send_alert=getattr(self, "_send_alert", lambda *_args, **_kwargs: None),
+            send_pending_alert=getattr(self, "_send_pending_alert", lambda *_args, **_kwargs: None),
+            send_dry_run_alert=getattr(self, "_send_dry_run_alert", lambda *_args, **_kwargs: None),
+            state_machine_enabled=bool(getattr(self, "_state_machine_enabled", False)),
+            allow_sell_entries_from_idle=bool(getattr(self, "_allow_sell_entries_from_idle", False)),
+            state_manager=getattr(self, "_state_manager", None),
+            risk_manager=getattr(self, "risk_manager", None),
+            get_risk_portfolio_value=self._get_risk_portfolio_value,
+            config=dict(getattr(self, "config", {}) or {}),
+            executor=getattr(self, "executor", None),
+            database=getattr(self, "db", None),
+            timeframe=str(getattr(self, "timeframe", "1h") or "1h"),
+            submit_managed_entry=getattr(self, "_submit_managed_entry", lambda *_args, **_kwargs: None),
+            try_submit_managed_signal_sell=getattr(self, "_try_submit_managed_signal_sell", lambda *_args, **_kwargs: False),
+            send_trade_alert=getattr(self, "_send_trade_alert", lambda *_args, **_kwargs: None),
+            pending_decisions=self.__dict__.setdefault("_pending_decisions", []),
+            pending_decisions_lock=pending_lock,
+            get_portfolio_state=self._get_portfolio_state,
+            auth_degraded=bool(getattr(self, "_auth_degraded", False)),
+            mode=self.mode,
+            executed_today=self.__dict__.setdefault("_executed_today", []),
+        )
     
     def _run_iteration(self):
         """Run one iteration of the trading logic for all pairs."""
@@ -2174,165 +1738,7 @@ class TradingBotOrchestrator:
             self._process_pair_iteration(current_pair)
     
     def _process_pair_iteration(self, symbol: str):
-        """Process trading iteration for a single symbol.
-        
-        Args:
-            symbol: Trading pair symbol (e.g., 'THB_BTC', 'THB_DOGE')
-        """
-        portfolio = self._get_portfolio_state()
-        mtf_signal = self._get_mtf_signal_for_symbol(symbol, portfolio)
-        lifecycle_gated = False
-
-        if self._state_machine_enabled:
-            snapshot = self._state_manager.get_state(symbol)
-            if snapshot.state != TradeLifecycleState.IDLE:
-                last_logged = self._last_state_gate_logged.get(symbol)
-                if last_logged != snapshot.state.value:
-                    logger.info("[State] %s gated by execution state: %s", symbol, snapshot.state.value)
-                    self._last_state_gate_logged[symbol] = snapshot.state.value
-                lifecycle_gated = True
-            self._last_state_gate_logged.pop(symbol, None)
-
-        # 1. Get current market data for this symbol
-        data = self._get_market_data_for_symbol(symbol)
-        
-        if data is None or data.empty:
-            logger.debug(f"No market data for {symbol}, skipping")
-            return
-        
-        # 2a. H5/SRG-2: Sync SignalGenerator with live portfolio state so
-        #     check_risk() sees real position count and daily trade count.
-        if self._state_machine_enabled:
-            _open_count = len(self._state_manager.list_active_states())
-        else:
-            _open_count = len(portfolio.get("positions", []))
-        _daily_count = (
-            self.risk_manager.trade_count_today
-            if self.risk_manager is not None
-            else len(self._executed_today)
-        )
-        self.signal_generator.sync_state(
-            open_positions_count=_open_count,
-            daily_trades_count=_daily_count,
-        )
-
-        # 2. Sniper: Dual EMA + MACD "Full Bull Alignment"
-        signals = self.signal_generator.generate_sniper_signal(
-            data=data,
-            symbol=symbol,
-        )
-        if not isinstance(signals, list):
-            signals = self.signal_generator.generate_signals(
-                data=data,
-                symbol=symbol,
-            )
-
-        current_market_condition = None
-        for generated_signal in signals:
-            if isinstance(generated_signal, AggregatedSignal):
-                current_market_condition = generated_signal.market_condition
-                break
-        if current_market_condition is None:
-            current_market_condition = detect_market_condition(data["close"].tolist())
-        
-        if not signals:
-            logger.debug(f"No signals generated for {symbol}")
-            return
-
-        # Keep signal diagnostics fresh for Rich CLI even when execution state
-        # currently blocks new signal processing for this symbol.
-        if lifecycle_gated:
-            return
-        
-        # 4. Log signals to database
-        for signal in signals:
-            try:
-                if isinstance(signal, AggregatedSignal):
-                    sig_type = signal.signal_type.value.upper() if hasattr(signal.signal_type, 'value') else str(signal.signal_type).upper()
-                    strategy_names = ",".join(sorted(signal.strategy_votes.keys())) if signal.strategy_votes else ""
-                    self.db.insert_signal(
-                        pair=signal.symbol,
-                        signal_type=sig_type,
-                        confidence=signal.combined_confidence,
-                        result='pending',
-                        strategy=strategy_names,
-                    )
-            except Exception as e:
-                logger.error(f"Failed to log signal to database: {e}")
-        
-        # 5. Process signals based on mode
-        for signal in signals:
-            # Strategy generator returns AggregatedSignal instances.
-            if not isinstance(signal, AggregatedSignal):
-                continue
-
-            signal_type = signal.signal_type.value.lower() if hasattr(signal.signal_type, 'value') else str(signal.signal_type).lower()
-                
-            risk_check = self.signal_generator.check_risk(signal, portfolio)
-
-            if self._state_machine_enabled:
-                if signal_type == "buy":
-                    approved, gate_reason = self._state_manager.confirm_entry_signal(
-                        symbol=symbol,
-                        signal_type=signal_type,
-                        confidence=signal.combined_confidence,
-                        risk_passed=risk_check.passed,
-                        signal_time=signal.timestamp,
-                    )
-                    if not approved:
-                        if gate_reason.startswith("awaiting confirmation"):
-                            logger.debug("[State] %s BUY signal queued: %s", symbol, gate_reason)
-                        else:
-                            logger.debug("[State] %s signal ignored: %s", symbol, gate_reason)
-                        continue
-                elif signal_type == "sell":
-                    snapshot = self._state_manager.get_state(symbol)
-                    if snapshot.state == TradeLifecycleState.IN_POSITION:
-                        pass
-                    elif not self._allow_sell_entries_from_idle:
-                        logger.debug(
-                            "[State] %s SELL signal ignored: lifecycle=%s and idle SELL is disabled",
-                            symbol,
-                            snapshot.state.value,
-                        )
-                        continue
-                    else:
-                        approved, gate_reason = self._state_manager.confirm_idle_sell_signal(
-                            symbol=symbol,
-                            confidence=signal.combined_confidence,
-                            risk_passed=risk_check.passed,
-                            signal_time=signal.timestamp,
-                        )
-                        if not approved:
-                            if gate_reason.startswith("awaiting confirmation"):
-                                logger.debug("[State] %s SELL signal queued: %s", symbol, gate_reason)
-                            else:
-                                logger.debug("[State] %s SELL signal ignored: %s", symbol, gate_reason)
-                            continue
-                else:
-                    logger.debug("[State] %s signal ignored: unsupported type '%s'", symbol, signal_type)
-                    continue
-            
-            # Create execution plan for this symbol
-            plan = self._create_execution_plan_for_symbol(signal, symbol)
-            if not plan:
-                continue
-
-            # Create trade decision
-            decision = TradeDecision(
-                plan=plan,
-                signal=signal,
-                risk_check=risk_check,
-                signal_source=self.signal_source
-            )
-            
-            # Process based on mode
-            if self.mode == BotMode.FULL_AUTO:
-                self._process_full_auto(decision, portfolio)
-            elif self.mode == BotMode.SEMI_AUTO:
-                self._process_semi_auto(decision, portfolio)
-            else:  # DRY_RUN
-                self._process_dry_run(decision, portfolio)
+        return SignalRuntimeHelper.process_pair_iteration(self._build_signal_runtime_deps(), symbol)
 
     def _maybe_trigger_sideways_rebalance(self, market_condition: Optional[MarketCondition] = None) -> None:
         """Compatibility hook for sideways-market rebalance logic.
@@ -2343,134 +1749,21 @@ class TradingBotOrchestrator:
         return None
 
     def _serialize_mtf_signals_detail(self, mtf_result) -> Dict[str, Dict[str, Any]]:
-        details: Dict[str, Dict[str, Any]] = {}
-        for timeframe, tf_signal in (getattr(mtf_result, "signals", {}) or {}).items():
-            signal_type = getattr(getattr(tf_signal, "signal_type", None), "value", getattr(tf_signal, "signal_type", None))
-            indicators = getattr(tf_signal, "indicators", {}) or {}
-            details[str(timeframe)] = {
-                "type": str(signal_type or "HOLD").upper(),
-                "confidence": float(getattr(tf_signal, "confidence", 0.0) or 0.0),
-                "trend_strength": float(getattr(tf_signal, "trend_strength", 0.0) or 0.0),
-                "rsi": float(indicators.get("rsi", 0.0) or 0.0),
-                "adx": float(indicators.get("adx", 0.0) or 0.0),
-                "macd_hist": float(indicators.get("macd_hist", 0.0) or 0.0),
-                "volume_ratio": float(indicators.get("volume_ratio", 0.0) or 0.0),
-                "reason": str(getattr(tf_signal, "reason", "") or ""),
-            }
-        return details
+        return SignalRuntimeHelper.serialize_mtf_signals_detail(mtf_result)
 
     def _merge_mtf_signals_detail(
         self,
         base_details: Optional[Dict[str, Dict[str, Any]]],
         override_details: Optional[Dict[str, Dict[str, Any]]],
     ) -> Dict[str, Dict[str, Any]]:
-        merged: Dict[str, Dict[str, Any]] = {}
-        ordered_timeframes: List[str] = []
-
-        for source in (base_details or {}, override_details or {}):
-            for timeframe in source.keys():
-                normalized = str(timeframe)
-                if normalized not in ordered_timeframes:
-                    ordered_timeframes.append(normalized)
-
-        for timeframe in ordered_timeframes:
-            base_row = dict((base_details or {}).get(timeframe) or {})
-            override_row = dict((override_details or {}).get(timeframe) or {})
-            clean_override = {
-                key: value
-                for key, value in override_row.items()
-                if value is not None and (not isinstance(value, str) or value.strip())
-            }
-            merged[timeframe] = {
-                **base_row,
-                **clean_override,
-            }
-
-        return merged
+        return SignalRuntimeHelper.merge_mtf_signals_detail(base_details, override_details)
 
     def _get_mtf_signal_for_symbol(
         self,
         symbol: str,
         portfolio: Dict[str, Any],
     ):
-        if not self.mtf_enabled:
-            return None
-
-        recorded_at = datetime.now().isoformat()
-        try:
-            mtf_result = self.signal_generator.generate_mtf_signals(
-                pair=symbol,
-                timeframes=self.mtf_timeframes,
-                db=self.db,
-            )
-        except Exception as exc:
-            logger.warning("MTF signal generation failed for %s: %s", symbol, exc)
-            self._last_mtf_status[symbol] = {
-                "updated_at": recorded_at,
-                "status": "error",
-                "reason": str(exc),
-                "timeframes": list(self.mtf_timeframes),
-            }
-            return None
-
-        if mtf_result is None:
-            self._last_mtf_status[symbol] = {
-                "updated_at": recorded_at,
-                "status": "waiting",
-                "reason": "No multi-timeframe data available yet",
-                "timeframes": list(self.mtf_timeframes),
-            }
-            return None
-
-        snapshot = {
-            "updated_at": recorded_at,
-            "timeframes": list(getattr(mtf_result, "timeframes", {}).keys() or self.mtf_timeframes),
-            "signals_detail": self._serialize_mtf_signals_detail(mtf_result),
-            "trend_alignment": float(getattr(mtf_result, "trend_alignment", 0.0) or 0.0),
-            "consensus_strength": float(getattr(mtf_result, "consensus_strength", 0.0) or 0.0),
-            "higher_timeframe_trend": getattr(getattr(mtf_result, "higher_timeframe_trend", None), "value", getattr(mtf_result, "higher_timeframe_trend", None)),
-            "higher_timeframe_confidence": float(getattr(mtf_result, "higher_timeframe_confidence", 0.0) or 0.0),
-        }
-
-        try:
-            signal = self.signal_generator.get_mtf_signal(
-                pair=symbol,
-                timeframes=self.mtf_timeframes,
-                portfolio=portfolio,
-                db=self.db,
-                mtf_result=mtf_result,
-            )
-        except Exception as exc:
-            logger.warning("MTF signal build failed for %s: %s", symbol, exc)
-            self._last_mtf_status[symbol] = {
-                **snapshot,
-                "status": "error",
-                "reason": str(exc),
-            }
-            return None
-
-        if signal is None:
-            self._last_mtf_status[symbol] = {
-                **snapshot,
-                "status": "waiting",
-                "reason": "No aligned multi-timeframe signal yet",
-            }
-            return None
-
-        metadata = getattr(signal, "metadata", {}) or {}
-        self._last_mtf_status[symbol] = {
-            **snapshot,
-            "status": "ready",
-            "signal_type": signal.signal_type.value,
-            "confidence": signal.confidence,
-            "timeframes": list(metadata.get("timeframes_used") or snapshot["timeframes"]),
-            "higher_timeframe_trend": metadata.get("higher_timeframe_trend") or snapshot["higher_timeframe_trend"],
-            "signals_detail": self._merge_mtf_signals_detail(
-                snapshot["signals_detail"],
-                metadata.get("signals_detail"),
-            ),
-        }
-        return signal
+        return SignalRuntimeHelper.get_mtf_signal_for_symbol(self._build_multi_timeframe_runtime_deps(), symbol, portfolio)
 
     def _apply_multi_timeframe_confirmation(
         self,
@@ -2478,322 +1771,18 @@ class TradingBotOrchestrator:
         signals: List[AggregatedSignal],
         mtf_signal,
     ) -> List[AggregatedSignal]:
-        if not self.mtf_enabled or not signals:
-            return signals
-
-        if mtf_signal is None:
-            if self._mtf_confirmation_required:
-                logger.debug("[MTF] %s skipped: higher-timeframe confirmation not ready", symbol)
-                return []
-            return signals
-
-        mtf_type = str(getattr(mtf_signal.signal_type, "value", mtf_signal.signal_type)).upper()
-        confirmed: List[AggregatedSignal] = []
-        for signal in signals:
-            signal_type = str(getattr(signal.signal_type, "value", signal.signal_type)).upper()
-            if signal_type == mtf_type:
-                signal.combined_confidence = min(
-                    0.99,
-                    max(signal.combined_confidence, (signal.combined_confidence + float(mtf_signal.confidence)) / 2),
-                )
-                rationale_suffix = f" | MTF confirmed {mtf_type} ({float(mtf_signal.confidence):.0%})"
-                signal.trade_rationale = f"{signal.trade_rationale or '[Trade Triggered]'}{rationale_suffix}"
-                confirmed.append(signal)
-                continue
-
-            if self._mtf_confirmation_required:
-                logger.debug("[MTF] %s filtered %s due to conflicting %s confirmation", symbol, signal_type, mtf_type)
-                continue
-
-            signal.combined_confidence = max(0.0, signal.combined_confidence * 0.75)
-            rationale_suffix = f" | MTF conflict {mtf_type} ({float(mtf_signal.confidence):.0%})"
-            signal.trade_rationale = f"{signal.trade_rationale or '[Trade Triggered]'}{rationale_suffix}"
-            confirmed.append(signal)
-
-        return confirmed
-    
-    def _get_market_data_for_symbol(self, symbol: str):
-        """Fetch latest market data from database for a specific symbol (10-second cache).
-        
-        Args:
-            symbol: Trading pair symbol (e.g., 'THB_BTC', 'THB_DOGE')
-        """
-        now = time.time()
-        cache_key = f"market_data_{symbol}_{self.timeframe}"
-        
-        # Check cache
-        if (cache_key in self._symbol_market_cache and
-            (now - self._symbol_market_cache[cache_key]["timestamp"]) < self._cache_ttl['market_data']):
-            return self._symbol_market_cache[cache_key]["data"]
-        
-        rows = None
-        try:
-            conn = self.db.get_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT timestamp, open, high, low, close, volume
-                    FROM prices
-                    WHERE pair = ?
-                      AND COALESCE(timeframe, '1h') = ?
-                    ORDER BY timestamp DESC
-                    LIMIT 250
-                """, (symbol, self.timeframe))
-                rows = cursor.fetchall()
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.debug(f"Error fetching market data for {symbol}: {e}")
-        
-        if not rows:
-            # Try API fallback
-            try:
-                # api_client.get_candle has its own complete mapping, pass directly
-                response = self.api_client.get_candle(symbol, timeframe=self.timeframe)
-                if response.get("error") == 0:
-                    data = response.get("result", [])
-                    import pandas as pd
-                    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                    df = df.sort_values("timestamp").reset_index(drop=True)
-                    df.attrs["_data_source"] = "api"
-                    
-                    self._symbol_market_cache[cache_key] = {"data": df, "timestamp": now}
-                    return df
-                else:
-                    # VULN-06 FIX: Log non-zero API error at warning level
-                    logger.warning(
-                        "API candle request for %s returned error=%s: %s",
-                        symbol, response.get("error"), response.get("message", ""),
-                    )
-            except Exception as e:
-                # VULN-06 FIX: Promote from debug to warning so operators notice
-                logger.warning("API fallback failed for %s: %s", symbol, e)
-            return None
-        
-        import pandas as pd
-        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df = df.sort_values("timestamp").reset_index(drop=True)
-        df.attrs["_data_source"] = "db"
-        
-        self._symbol_market_cache[cache_key] = {"data": df, "timestamp": now}
-        return df
+        return SignalRuntimeHelper.apply_multi_timeframe_confirmation(self._build_multi_timeframe_runtime_deps(), symbol, signals, mtf_signal)
     
     def _create_execution_plan_for_symbol(self, signal: AggregatedSignal, symbol: str) -> Optional[ExecutionPlan]:
-        """Create an ExecutionPlan from an AggregatedSignal for a specific symbol.
-
-        Uses STRICT dynamic SL/TP based structurally on ATR.
-        Enforces 'No ATR = No Trade' rule.
-        ✓ NEW: Only allows BUY signals for coins ever held by this bot.
-        """
-        signal_type_value = str(getattr(signal.signal_type, "value", signal.signal_type) or "").lower()
-        side = OrderSide.BUY if signal_type_value == "buy" else OrderSide.SELL
-        plan_close_flag = False  # Default: opening new position
-        
-        # Check existing positions
-        try:
-            if self._state_machine_enabled:
-                open_positions = []
-            else:
-                session = self.db.get_session()
-                try:
-                    from sqlalchemy import text
-                    open_positions = session.execute(
-                        text("SELECT side, amount FROM positions WHERE symbol = :symbol AND remaining_amount > 0"),
-                        {"symbol": symbol},
-                    ).fetchall()
-                finally:
-                    session.close()
-            
-            if open_positions:
-                current_side = open_positions[0][0]
-                if current_side == 'sell' and side == OrderSide.BUY:
-                    plan_close_flag = True
-                elif current_side == 'buy' and side == OrderSide.SELL:
-                    plan_close_flag = True
-        except Exception as e:
-            logger.debug(f"[Position Check] Could not check positions: {e}")
-        
-        # Restrict BUY signals to previously held coins only when held-coins-only mode is enabled.
-        if side == OrderSide.BUY and plan_close_flag is False and self._held_coins_only:
-            has_history = False
-            try:
-                if self.db:
-                    has_history = self.db.has_ever_held(symbol)
-            except Exception as e:
-                logger.debug(f"[Portfolio Guard] history lookup failed for {symbol}: {e}")
-
-            if not has_history:
-                logger.debug(
-                    f"[Portfolio Guard] BUY rejected for {symbol}: never held"
-                )
-                return None
-        
-        # SELL signal requires base asset balance
-        if side == OrderSide.SELL and plan_close_flag is False:
-            try:
-                base_asset = symbol.split('_')[1] if '_' in symbol else symbol
-                balances = self.api_client.get_balances()
-                base_data = balances.get(base_asset.upper()) or balances.get(base_asset.lower()) or {}
-                available_base = float(base_data.get('available', 0))
-                base_value_thb = available_base * signal.avg_price
-                if base_value_thb < self.min_trade_value_thb:
-                    logger.debug(
-                        f"[Strategy Bypass] {base_asset.upper()} value {base_value_thb:.2f} THB "
-                        f"< MIN {self.min_trade_value_thb:.2f} THB"
-                    )
-                    return None
-            except Exception as e:
-                logger.debug(f"[Balance Check] ไม่สามารถตรวจสอบ balance: {e}")
-        
-        direction = "long" if side == OrderSide.BUY else "short"
-        entry_price = signal.avg_price
-        
-        # Must have ATR to proceed
-        atr_value = self._get_latest_atr(symbol)
-        if not atr_value or atr_value <= 0:
-            logger.debug(f"Trade rejected for {symbol}: ATR unavailable")
-            return None
-        
-        # Use signal's SL/TP if provided (sniper strategy computes its own),
-        # otherwise fall back to risk manager ATR calculation.
-        if signal.avg_stop_loss and signal.avg_take_profit and signal.avg_stop_loss > 0 and signal.avg_take_profit > 0:
-            sl = signal.avg_stop_loss
-            tp = signal.avg_take_profit
-            logger.debug(f"Using signal SL/TP for {symbol}: SL={sl:.4f} TP={tp:.4f}")
-        else:
-            rr_ratio = signal.avg_risk_reward if signal.avg_risk_reward > 0 else 2.0
-            sl, tp = self.risk_manager.calc_sl_tp_from_atr(
-                entry_price=entry_price,
-                atr_value=atr_value,
-                direction=direction,
-                risk_reward_ratio=rr_ratio,
-            )
-            logger.debug(f"ATR-based SL/TP for {symbol}: SL={sl:.4f} TP={tp:.4f} (ATR={atr_value:.4f})")
-        
-        return ExecutionPlan(
-            symbol=symbol,
-            side=side,
-            amount=0,  # Will be calculated by executor
-            entry_price=entry_price,
-            stop_loss=sl,
-            take_profit=tp,
-            risk_reward_ratio=signal.avg_risk_reward,
-            confidence=signal.combined_confidence,
-            strategy_votes=signal.strategy_votes,
-            notes=[
-                f"Confidence: {signal.combined_confidence:.2%}",
-                f"Strategies: {', '.join(signal.strategy_votes.keys())}",
-                f"Risk Score: {signal.risk_score:.0f}/100",
-                f"ATR: {atr_value:.4f}" if atr_value else "ATR: N/A",
-                f"Dynamic SL/TP: pair={symbol}",
-            ],
-            signal_timestamp=signal.timestamp,
-            signal_id=f"{signal.symbol}_{signal.signal_type.value}_{int(signal.timestamp.timestamp())}_{self._loop_count}",
-            max_price_drift_pct=1.5,
-            close_position=plan_close_flag,
-        )
+        return SignalRuntimeHelper.create_execution_plan_for_symbol(self._build_execution_plan_deps(), signal, symbol)
     
     # ── WebSocket Real-time Price Handler ───────────────────────────────────
 
     def _on_ws_tick(self, tick: _PriceTickType):
-        """
-        Called on every real-time price tick from the WebSocket.
-        This runs on the WebSocket's callback dispatcher thread.
-
-        Logs significant price movements and can trigger immediate
-        SL/TP checks without waiting for the next main-loop iteration.
-        """
-        logger.debug(
-            f"[WS] {tick.symbol} last={tick.last:,.0f} "
-            f"bid={tick.bid:,.0f} ask={tick.ask:,.0f} "
-            f"change={tick.percent_change_24h:+.2f}%"
-        )
-
-        # Immediately check if this price hits any open position SL/TP
-        # This gives us <100ms reaction time vs the old 1-5s polling cycle
-        self._check_sl_tp_immediate(tick)
+        self._get_position_monitor_helper().on_ws_tick(tick)
 
     def _check_sl_tp_immediate(self, tick: _PriceTickType):
-        """
-        Check if a real-time price tick hits any open position SL/TP.
-        Called from the WebSocket callback thread — fire-and-forget,
-        exceptions are caught to avoid crashing the callback thread.
-        """
-        if not _WEBSOCKET_AVAILABLE or not PriceTick:
-            return
-
-        try:
-            open_orders = self.executor.get_open_orders()
-        except Exception:
-            return
-
-        for pos in open_orders:
-            pos_symbol  = pos.get("symbol", self.trading_pair)
-            if pos_symbol.upper() != tick.symbol.upper():
-                continue
-
-            if self._state_machine_enabled:
-                lifecycle = self._state_manager.get_state(pos_symbol)
-                if lifecycle.state != TradeLifecycleState.IN_POSITION:
-                    continue
-
-            position_id = pos.get("order_id", "")
-            entry_price = _coerce_trade_float(pos.get("entry_price"), 0.0)
-            stop_loss = _coerce_trade_float(pos.get("stop_loss"), 0.0)
-            take_profit = _coerce_trade_float(pos.get("take_profit"), 0.0)
-            side        = pos.get("side", OrderSide.BUY)
-            amount      = _coerce_trade_float(pos.get("amount"), 0.0)
-
-            if not entry_price or entry_price == 0:
-                continue
-
-            triggered = None
-            current_price = tick.last
-
-            if side == OrderSide.BUY:
-                if stop_loss > 0 and current_price <= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price >= take_profit:
-                    triggered = "TP"
-            else:
-                if stop_loss > 0 and current_price >= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price <= take_profit:
-                    triggered = "TP"
-
-            if triggered:
-                logger.info(
-                    f"[WS-SLTP] {triggered} triggered for position {position_id} | "
-                    f"Entry={entry_price:,.0f} Current={current_price:,.0f} | "
-                    f"SL={stop_loss:,.0f} TP={take_profit:,.0f}"
-                )
-
-                # M6 fix: per-position deduplication guard.  If an exit thread
-                # is already in-flight for this position we skip spawning
-                # another one, preventing the unbounded thread explosion that
-                # would otherwise occur during a flash crash with rapid ticks.
-                with self._ws_sltp_inflight_lock:
-                    if position_id in self._ws_sltp_inflight:
-                        logger.debug(
-                            f"[WS-SLTP] Exit thread already in-flight for {position_id} — skipping duplicate"
-                        )
-                        continue
-                    self._ws_sltp_inflight.add(position_id)
-
-                # Fire SL/TP exit on a separate thread to avoid
-                # blocking the WS callback thread
-                total_entry_cost = pos.get("total_entry_cost", entry_price * amount)
-                try:
-                    threading.Thread(
-                        target=self._ws_sltp_exit_wrapper,
-                        args=(position_id, pos_symbol, side, amount, current_price, triggered, entry_price, total_entry_cost),
-                        daemon=True,
-                    ).start()
-                except Exception as e:
-                    logger.error(f"Failed to fire SL/TP exit thread: {e}", exc_info=True)
-                    # Release the inflight guard so retries are possible
-                    with self._ws_sltp_inflight_lock:
-                        self._ws_sltp_inflight.discard(position_id)
+        self._get_position_monitor_helper().check_sl_tp_immediate(tick)
 
     def _ws_sltp_exit_wrapper(
         self,
@@ -2806,17 +1795,16 @@ class TradingBotOrchestrator:
         entry_price: float,
         total_entry_cost: float = 0.0,
     ):
-        """M6 fix: thin wrapper around _execute_ws_sl_tp_exit that guarantees
-        the per-position inflight guard is released when the exit completes
-        (or fails), allowing future ticks to retry if needed."""
-        try:
-            self._execute_ws_sl_tp_exit(
-                position_id, symbol, side, amount,
-                current_price, triggered, entry_price, total_entry_cost,
-            )
-        finally:
-            with self._ws_sltp_inflight_lock:
-                self._ws_sltp_inflight.discard(position_id)
+        self._get_position_monitor_helper().ws_sltp_exit_wrapper(
+            position_id,
+            symbol,
+            side,
+            amount,
+            current_price,
+            triggered,
+            entry_price,
+            total_entry_cost,
+        )
 
     def _execute_ws_sl_tp_exit(
         self,
@@ -2829,204 +1817,19 @@ class TradingBotOrchestrator:
         entry_price: float,
         total_entry_cost: float = 0.0,
     ):
-        """Execute a SL/TP exit triggered by a WebSocket price tick."""
-        # FIX HIGH-01: Check circuit breaker before executing any trade
-        # Prevents rate limit death spiral during WebSocket-triggered exits
-        if hasattr(self.api_client, 'is_circuit_open') and self.api_client.is_circuit_open():
-            logger.warning(
-                f"[WS-SLTP] Circuit breaker OPEN — blocking {triggered} exit for "
-                f"position {position_id} ({symbol}) to prevent rate limit death spiral"
-            )
-            return
-        
-        try:
-            if self._state_machine_enabled:
-                self._submit_managed_exit(
-                    position_id=position_id,
-                    pos_symbol=symbol,
-                    side=side,
-                    amount=amount,
-                    exit_price=current_price,
-                    triggered=triggered,
-                    entry_price=entry_price,
-                    total_entry_cost=total_entry_cost,
-                    price_source="ws",
-                    opened_at=None,
-                )
-                return
-
-            exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
-            result = self.executor.execute_exit(
-                position_id=position_id,
-                order_id=position_id,
-                side=exit_side,
-                amount=amount,
-                price=current_price,
-            )
-            if result.success:
-                # ── Net P/L with Bitkub 0.25% fees ────────────────
-                from trade_executor import BITKUB_FEE_PCT
-                now = datetime.now()
-                
-                entry_cost = total_entry_cost if total_entry_cost > 0 else (entry_price * amount)
-                entry_fee = entry_cost * BITKUB_FEE_PCT
-                
-                gross_exit = current_price * amount
-                exit_fee = gross_exit * BITKUB_FEE_PCT
-                net_exit = gross_exit - exit_fee
-                
-                total_fees = entry_fee + exit_fee
-                net_pnl = net_exit - entry_cost
-                net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
-                
-                pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
-                coin = symbol.replace("THB_", "")
-                trigger_label = "Take Profit" if triggered == "TP" else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
-                
-                # ── Log closed trade to DB ─────────────────────────
-                try:
-                    self.db.log_closed_trade({
-                        "symbol": symbol, "side": side,
-                        "amount": amount, "entry_price": entry_price,
-                        "exit_price": current_price, "entry_cost": entry_cost,
-                        "gross_exit": gross_exit, "entry_fee": entry_fee,
-                        "exit_fee": exit_fee, "total_fees": total_fees,
-                        "net_pnl": net_pnl, "net_pnl_pct": net_pnl_pct,
-                        "trigger": triggered, "price_source": "ws",
-                        "closed_at": now,
-                    })
-                except Exception as e:
-                    logger.error(f"[WS-SLTP] Failed to log closed trade: {e}", exc_info=True)
-                
-                msg = self._format_exit_alert(
-                    symbol,
-                    trigger_label,
-                    amount,
-                    entry_price,
-                    current_price,
-                    entry_cost,
-                    gross_exit,
-                    net_pnl,
-                    net_pnl_pct,
-                    total_fees,
-                    now=now,
-                )
-                self._send_alert(msg, to_telegram=True)
-            else:
-                logger.error(f"[WS-SLTP] Exit failed: {result.message}")
-        except Exception as e:
-            logger.error(f"[WS-SLTP] Exit error: {e}", exc_info=True)
-
-    def _get_latest_atr(self, symbol: Optional[str] = None, period: int = 14) -> Optional[float]:
-        """Calculate latest ATR value from market data for a specific symbol.
-
-        Uses the RiskManager's ATR calculation with Wilder's smoothing.
-
-        Returns:
-            ATR value (float) or None if market data unavailable.
-        """
-        symbol = symbol or self.trading_pair or ""
-        if not symbol:
-            return None
-        now = time.time()
-        cache_key = f"atr_{symbol}_{period}"
-        if (self._atr_cache.get(cache_key) is not None
-                and (now - self._atr_cache[cache_key]["timestamp"]) < self._cache_ttl['atr']):
-            return self._atr_cache[cache_key]["value"]
-
-        try:
-            data = self._get_market_data_for_symbol(symbol)
-            if data is None or len(data) < period + 1:
-                return None
-
-            # Ensure we have high/low/close columns
-            if not all(k in data.columns for k in ["high", "low", "close"]):
-                return None
-
-            highs = data["high"].tolist()
-            lows = data["low"].tolist()
-            closes = data["close"].tolist()
-
-            atr_values = calculate_atr(highs, lows, closes, period=period)
-            atr = atr_values[-1]
-
-            if atr <= 0:
-                return None
-
-            result = float(atr)
-            self._atr_cache[cache_key] = {"value": result, "timestamp": now}
-            return result
-        except Exception as e:
-            logger.debug(f"Could not calculate ATR for {symbol}: {e}")
-            return None
+        self._get_position_monitor_helper().execute_ws_sl_tp_exit(
+            position_id,
+            symbol,
+            side,
+            amount,
+            current_price,
+            triggered,
+            entry_price,
+            total_entry_cost,
+        )
 
     def _get_portfolio_state(self, allow_refresh: bool = True) -> Dict[str, Any]:
-        """Get current portfolio state with 10-second caching.
-
-        Always fetches the real THB balance from Bitkub API (get_balances).
-        Cached for 10 seconds to avoid hammering the API.
-        """
-        now = time.time()
-        if (self._portfolio_cache["data"] is not None
-                and ((now - self._portfolio_cache["timestamp"]) < self._cache_ttl['portfolio'] or not allow_refresh)):
-            return self._portfolio_cache["data"]
-
-        if self._auth_degraded:
-            result = {
-                "balance": 0.0,
-                "positions": self.executor.get_open_orders(),
-                "timestamp": datetime.now(),
-            }
-            self._portfolio_cache = {"data": result, "timestamp": now}
-            return result
-
-        if not allow_refresh:
-            balance_monitor = getattr(self, "_balance_monitor", None)
-            balance_state = balance_monitor.get_state() if balance_monitor else {}
-            thb_payload = (balance_state.get("balances") or {}).get("THB") or {}
-            thb_balance = float(thb_payload.get("total", thb_payload.get("available", 0.0)) or 0.0)
-            result = {
-                "balance": thb_balance,
-                "positions": self.executor.get_open_orders(),
-                "timestamp": datetime.now(),
-            }
-            self._portfolio_cache = {"data": result, "timestamp": now}
-            return result
-
-        try:
-            # Always get real balance from Bitkub API (even in read_only mode)
-            # This ensures we get the ACTUAL available THB, not a config default.
-            response = self.api_client.get_balances()
-
-            if isinstance(response, dict):
-                thb_info = response.get("THB", {})
-                thb_balance = float(thb_info.get("available", 0))
-            elif isinstance(response, list):
-                # Fallback: try get_balance (flat dict)
-                resp2 = self.api_client.get_balance()
-                if isinstance(resp2, dict) and resp2.get("error") == 0:
-                    result_data = resp2.get("result", {})
-                    thb_balance = float(result_data.get("THB", 0)) if isinstance(result_data, dict) else 0.0
-                else:
-                    thb_balance = 0.0
-            else:
-                thb_balance = 0.0
-
-            result = {
-                "balance": thb_balance,
-                "positions": self.executor.get_open_orders(),
-                "timestamp": datetime.now()
-            }
-            self._portfolio_cache = {"data": result, "timestamp": now}
-            return result
-
-        except Exception as e:
-            logger.error(f"Error getting portfolio state from Bitkub: {e}", exc_info=True)
-            return {
-                "balance": 0.0,
-                "positions": self.executor.get_open_orders(),
-                "timestamp": datetime.now()
-            }
+        return self._get_portfolio_runtime_helper().get_portfolio_state(allow_refresh=allow_refresh)
 
     def _get_dashboard_multi_timeframe_status(self, allow_refresh: bool = True) -> Dict[str, Any]:
         now = time.time()
@@ -3052,280 +1855,22 @@ class TradingBotOrchestrator:
         return status
 
     def _process_full_auto(self, decision: TradeDecision, portfolio: Dict[str, Any]):
-        """
-        Full auto mode: execute trade automatically after risk check passes.
-        """
-        if self.read_only:
-            logger.info("READ_ONLY mode — skipping trade execution")
-            return
-        
-        if not decision.risk_check.passed:
-            reason = getattr(decision.risk_check, 'reason', getattr(decision.risk_check, 'reasons', 'Unknown reasons'))
-            logger.info(f"🛡️ Risk Manager: ปฏิเสธสัญญาณเทรด ({reason})")
-            if self.send_alerts:
-                self._send_alert(self._format_skip_alert(decision))
-            return
-        
-        # Log trade rationale
-        rationale = getattr(decision.signal, 'trade_rationale', 'N/A')
-        logger.info(f"[Trade Decision] {rationale}")
-        side_thai = "ซื้อ" if decision.plan.side.value == "buy" else "ขาย"
-        logger.info(f"🤖 [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} THB")
-
-        # ── C3/SRG-1: Global risk gate – block NEW entries (BUY + idle SELL) ────
-        is_new_entry_buy = decision.plan.side.value == "buy"
-        is_new_entry_idle_sell = (
-            decision.plan.side.value == "sell"
-            and not decision.plan.close_position
-            and (not self._state_machine_enabled or self._allow_sell_entries_from_idle)
-        )
-        if (is_new_entry_buy or is_new_entry_idle_sell) and self.risk_manager:
-            if self._state_machine_enabled:
-                open_count = len(self._state_manager.list_active_states())
-            else:
-                open_count = len(portfolio.get("positions", []))
-            gate = self.risk_manager.can_open_position(
-                portfolio["balance"], open_count,
-            )
-            if not gate.allowed:
-                logger.warning("🚫 [RiskGate] Trade blocked for %s: %s",
-                               decision.plan.symbol, gate.reason)
-                return
-
-            # ── Correlation guard – block if too correlated with open positions ──
-            corr_threshold = float(self.config.get("risk", {}).get("correlation_threshold", 0.75))
-            if corr_threshold < 1.0:
-                open_symbols = [
-                    str(pos.get("symbol", "")).upper()
-                    for pos in self.executor.get_open_orders()
-                    if pos.get("symbol")
-                ]
-                if open_symbols:
-                    corr_gate = check_pair_correlation(
-                        candidate_symbol=decision.plan.symbol,
-                        open_symbols=open_symbols,
-                        db=self.db,
-                        threshold=corr_threshold,
-                        timeframe=self.timeframe,
-                    )
-                    if not corr_gate.allowed:
-                        logger.warning("🔗 [CorrelationGate] Trade blocked for %s: %s",
-                                       decision.plan.symbol, corr_gate.reason)
-                        return
-
-        if self._state_machine_enabled:
-            if decision.plan.side == OrderSide.BUY:
-                self._submit_managed_entry(decision, portfolio)
-                return
-            if self._try_submit_managed_signal_sell(decision):
-                return
-            if not self._allow_sell_entries_from_idle:
-                logger.debug(
-                    "[State] SELL signal skipped for %s: no in-position state and idle SELL is disabled",
-                    decision.plan.symbol,
-                )
-                return
-        
-        # Execute trade
-        result = self.executor.execute_entry(decision.plan, portfolio["balance"])
-        
-        if result.success:
-            decision.status = "executed"
-            self._executed_today.append({
-                "decision": decision,
-                "result": result,
-                "timestamp": datetime.now()
-            })
-            
-            # Log order to database
-            try:
-                ts = datetime.utcnow()
-                self.db.insert_order(
-                    pair=decision.plan.symbol,
-                    side=decision.plan.side.value,
-                    quantity=result.filled_amount,
-                    price=result.filled_price or 0.0,
-                    status="filled",
-                    order_type="limit",
-                    timestamp=ts,
-                )
-            except Exception as e:
-                logger.error(f"Failed to log order to database: {e}", exc_info=True)
-            
-            # Send alert
-            self._send_trade_alert(decision, result)
-        else:
-            decision.status = "failed"
-            if "Skipping order" in result.message:
-                logger.info(result.message)
-            else:
-                logger.error(f"Trade execution failed: {result.message}")
-                if self.send_alerts:
-                    symbol = decision.plan.symbol if decision.plan else "?"
-                    self._send_alert(
-                        f"\u26a0\ufe0f Trade REJECTED [{symbol}]: {result.message}",
-                        to_telegram=True,
-                    )
+        ExecutionRuntimeHelper.process_full_auto(self._build_execution_runtime_deps(), decision, portfolio)
     
     def _process_semi_auto(self, decision: TradeDecision, portfolio: Dict[str, Any]):
-        """
-        Semi-auto mode: send alert and wait for confirmation.
-        """
-        if not decision.risk_check.passed:
-            return
-        
-        # Add to pending decisions
-        with self._pending_decisions_lock:
-            self._pending_decisions.append(decision)
-        
-        # Send alert
-        self._send_pending_alert(decision, portfolio)
-        
-        logger.info(f"SEMI_AUTO: Alert sent for {decision.plan.side.value} @ {decision.plan.entry_price}")
+        ExecutionRuntimeHelper.process_semi_auto(self._build_execution_runtime_deps(), decision, portfolio)
     
     def _process_dry_run(self, decision: TradeDecision, portfolio: Dict[str, Any]):
-        """
-        Dry run mode: log what would happen without executing.
-        """
-        if not decision.risk_check.passed:
-            return
-        
-        logger.info(f"DRY_RUN: Would execute {decision.plan.side.value} @ {decision.plan.entry_price}")
-        logger.info(f"  Confidence: {decision.plan.confidence:.2%}")
-        logger.info(f"  Strategy votes: {decision.plan.strategy_votes}")
-        logger.info(f"  Risk-reward: {decision.plan.risk_reward_ratio:.2f}")
-        
-        self._send_dry_run_alert(decision, portfolio)
+        ExecutionRuntimeHelper.process_dry_run(self._build_execution_runtime_deps(), decision, portfolio)
     
     def approve_trade(self, decision_id: int) -> bool:
-        """
-        Approve a pending trade decision (for semi-auto mode).
-        
-        Args:
-            decision_id: Index of the pending decision to approve
-            
-        Returns:
-            True if approved and executed successfully
-        """
-        if self._auth_degraded:
-            logger.warning("approve_trade blocked: auth degraded mode is active")
-            return False
-
-        if self.mode != BotMode.SEMI_AUTO:
-            logger.warning("approve_trade called but mode is not semi_auto")
-            return False
-        
-        with self._pending_decisions_lock:
-            if decision_id < 0 or decision_id >= len(self._pending_decisions):
-                logger.error(f"Invalid decision_id: {decision_id}")
-                return False
-            
-            decision = self._pending_decisions[decision_id]
-        portfolio = self._get_portfolio_state()
-        
-        logger.info(f"Manual approval: executing trade #{decision_id}")
-
-        if self._state_machine_enabled:
-            if decision.plan.side == OrderSide.BUY:
-                self._submit_managed_entry(decision, portfolio)
-                with self._pending_decisions_lock:
-                    self._pending_decisions.pop(decision_id)
-                return True
-            if self._try_submit_managed_signal_sell(decision):
-                with self._pending_decisions_lock:
-                    self._pending_decisions.pop(decision_id)
-                return True
-            if not self._allow_sell_entries_from_idle:
-                logger.debug(
-                    "approve_trade skipped SELL for %s: idle SELL is disabled",
-                    decision.plan.symbol,
-                )
-                return False
-        
-        result = self.executor.execute_entry(decision.plan, portfolio["balance"])
-        
-        if result.success:
-            decision.status = "executed"
-            self._executed_today.append({
-                "decision": decision,
-                "result": result,
-                "timestamp": datetime.now()
-            })
-            with self._pending_decisions_lock:
-                self._pending_decisions.pop(decision_id)
-            return True
-        
-        return False
+        return ExecutionRuntimeHelper.approve_trade(self._build_execution_runtime_deps(), decision_id)
 
     def _try_submit_managed_signal_sell(self, decision: TradeDecision) -> bool:
-        """Route SELL signal through managed exit flow when symbol is in IN_POSITION state."""
-        if not self._state_machine_enabled or decision.plan.side != OrderSide.SELL:
-            return False
-
-        symbol = str(decision.plan.symbol or "").upper()
-        snapshot = self._state_manager.get_state(symbol)
-        if snapshot.state != TradeLifecycleState.IN_POSITION:
-            return False
-
-        open_orders = self.executor.get_open_orders() or []
-        position = None
-        for row in open_orders:
-            row_symbol = str(row.get("symbol") or "").upper()
-            if row_symbol != symbol:
-                continue
-            side_value = str(getattr(row.get("side"), "value", row.get("side")) or "").lower()
-            if side_value and side_value != "buy":
-                continue
-            position = row
-            break
-
-        if not position:
-            logger.warning("[State] SELL signal for %s ignored: no open position found for managed exit", symbol)
-            return False
-
-        position_id = str(position.get("order_id") or snapshot.entry_order_id or "")
-        amount = float(position.get("remaining_amount") or position.get("amount") or snapshot.filled_amount or 0.0)
-        entry_price = float(position.get("entry_price") or snapshot.entry_price or decision.plan.entry_price or 0.0)
-        total_entry_cost = float(position.get("total_entry_cost") or snapshot.total_entry_cost or 0.0)
-        opened_at = position.get("timestamp") or snapshot.opened_at
-        if not position_id or amount <= 0:
-            logger.warning("[State] SELL signal for %s ignored: incomplete managed exit payload", symbol)
-            return False
-
-        submitted = self._submit_managed_exit(
-            position_id=position_id,
-            pos_symbol=symbol,
-            side=OrderSide.BUY,
-            amount=amount,
-            exit_price=float(decision.plan.entry_price or entry_price),
-            triggered="SIGSELL",
-            entry_price=entry_price,
-            total_entry_cost=total_entry_cost,
-            price_source="signal",
-            opened_at=opened_at,
-        )
-        if submitted:
-            decision.status = "pending_sell"
-        return bool(submitted)
+        return self._get_managed_lifecycle_helper().try_submit_managed_signal_sell(decision)
     
     def reject_trade(self, decision_id: int) -> bool:
-        """
-        Reject a pending trade decision (for semi-auto mode).
-        
-        Args:
-            decision_id: Index of the pending decision to reject
-        """
-        with self._pending_decisions_lock:
-            if decision_id < 0 or decision_id >= len(self._pending_decisions):
-                return False
-            
-            decision = self._pending_decisions[decision_id]
-            decision.status = "rejected"
-            
-            self._pending_decisions.pop(decision_id)
-        
-        logger.info(f"Trade #{decision_id} rejected")
-        return True
+        return ExecutionRuntimeHelper.reject_trade(self._build_execution_runtime_deps(), decision_id)
     
     def _send_trade_alert(self, decision: TradeDecision, result: OrderResult):
         """Log executed entries and notify Telegram."""
@@ -3351,14 +1896,63 @@ class TradingBotOrchestrator:
         message = self._format_dry_run_alert(decision, portfolio)
         self._send_alert(message)
 
+    def _get_status_runtime_helper(self) -> StatusRuntimeHelper:
+        helper = getattr(self, "_status_runtime_helper", None)
+        if helper is None:
+            helper = StatusRuntimeHelper(
+                self,
+                required_candles=_MIN_CANDLES_FOR_TRADING_READINESS,
+                websocket_available=_WEBSOCKET_AVAILABLE,
+                latest_ticker_getter=get_latest_ticker,
+            )
+            self._status_runtime_helper = helper
+        return helper
+
     @staticmethod
     def _format_alert_block(header: str, lines: List[str], now: Optional[datetime] = None) -> str:
-        timestamp = (now or datetime.now()).strftime('%H:%M:%S')
-        return "\n".join([header, '-' * 22, *lines, f"Time: <code>{timestamp}</code>"])
+        return StatusRuntimeHelper.format_alert_block(header, lines, now=now)
 
     @staticmethod
     def _format_coin_symbol(symbol: str) -> str:
-        return str(symbol or "").replace("THB_", "")
+        return StatusRuntimeHelper.format_coin_symbol(symbol)
+
+    def _get_trailing_trace_context(self) -> Dict[str, Any]:
+        return self._get_status_runtime_helper().get_trailing_trace_context()
+
+    def _log_position_trace(
+        self,
+        event: str,
+        symbol: str,
+        *,
+        entry_order_id: str = "",
+        exit_order_id: str = "",
+        amount: float = 0.0,
+        entry_price: float = 0.0,
+        exit_price: float = 0.0,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        previous_stop_loss: float = 0.0,
+        current_price: float = 0.0,
+        profit_pct: Optional[float] = None,
+        trigger: str = "",
+        notes: str = "",
+    ) -> None:
+        self._get_status_runtime_helper().log_position_trace(
+            event,
+            symbol,
+            entry_order_id=entry_order_id,
+            exit_order_id=exit_order_id,
+            amount=amount,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            previous_stop_loss=previous_stop_loss,
+            current_price=current_price,
+            profit_pct=profit_pct,
+            trigger=trigger,
+            notes=notes,
+        )
 
     def _format_exit_alert(
         self,
@@ -3374,84 +1968,31 @@ class TradingBotOrchestrator:
         total_fees: float,
         now: Optional[datetime] = None,
     ) -> str:
-        pnl_emoji = "✅" if net_pnl >= 0 else "🔻"
-        coin = self._format_coin_symbol(symbol)
-        return self._format_alert_block(
-            f"📤 <b>Position Closed</b>  {coin}  ({trigger_label})",
-            [
-                f"Size <code>{amount:.8f}</code> {coin}",
-                f"Buy <code>{entry_cost:,.2f}</code> THB @ <code>{entry_price:,.2f}</code>",
-                f"Sell <code>{gross_exit:,.2f}</code> THB @ <code>{exit_price:,.2f}</code>",
-                f"{pnl_emoji} PnL <code>{net_pnl:+,.0f}</code> THB ({net_pnl_pct:+.2f}%)",
-                f"Fees <code>{total_fees:,.0f}</code> THB",
-            ],
+        return self._get_status_runtime_helper().format_exit_alert(
+            symbol,
+            trigger_label,
+            amount,
+            entry_price,
+            exit_price,
+            entry_cost,
+            gross_exit,
+            net_pnl,
+            net_pnl_pct,
+            total_fees,
             now=now,
         )
     
     def _format_trade_alert(self, decision: TradeDecision, result: OrderResult) -> str:
-        """Format trade execution alert message — premium mobile-friendly style."""
-        plan = decision.plan
-        now = datetime.now()
-
-        side_val   = plan.side.value.upper() if plan else "N/A"
-        entry      = plan.entry_price if plan else 0
-        fill_price = result.filled_price or entry
-        size_thb   = result.filled_amount * fill_price
-        sl         = plan.stop_loss if plan else 0
-        tp         = plan.take_profit if plan else 0
-        conf       = plan.confidence if plan else 0
-        coin       = self._format_coin_symbol(plan.symbol) if plan else ""
-
-        return self._format_alert_block(
-            f"📥 <b>Position Opened</b>  {coin}",
-            [
-                f"Size <code>{float(result.filled_amount or 0.0):.8f}</code> {coin}",
-                f"Fill Price <code>{fill_price:,.0f}</code> THB",
-                f"Notional <code>{size_thb:,.0f}</code> THB  |  Confidence {conf:.0%}",
-                f"SL <code>{sl:,.0f}</code>  |  TP <code>{tp:,.0f}</code>",
-            ],
-            now=now,
-        )
+        return self._get_status_runtime_helper().format_trade_alert(decision, result)
 
     def _format_skip_alert(self, decision: TradeDecision) -> str:
-        """Format skipped trade alert message (log only, not sent to Telegram)."""
-        plan = decision.plan
-        reason = getattr(decision.risk_check, 'reason', getattr(decision.risk_check, 'reasons', 'Unknown reason'))
-        coin = plan.symbol.replace("THB_", "") if plan else ""
-        side = plan.side.value.upper() if plan else "N/A"
-
-        message = (
-            f"🛡️ <b>Risk Control</b>  {coin} {side}\n"
-            f"Reason: {reason}"
-        )
-        return message
+        return self._get_status_runtime_helper().format_skip_alert(decision)
     
     def _format_pending_alert(self, decision: TradeDecision, portfolio: Dict[str, Any]) -> str:
-        """Format pending trade alert message."""
-        plan = decision.plan
-        coin = self._format_coin_symbol(plan.symbol) if plan else ""
-        with self._pending_decisions_lock:
-            decision_id = len(self._pending_decisions) - 1
-
-        return self._format_alert_block(
-            f"⏳ <b>Approval Required</b>  {coin}",
-            [
-                f"Price <code>{plan.entry_price:,.0f}</code> THB  |  Confidence {plan.confidence:.0%}",
-                f"Balance <code>{portfolio['balance']:,.0f}</code> THB",
-                f"ID: <code>{decision_id}</code>  /approve {decision_id}",
-            ],
-        )
+        return self._get_status_runtime_helper().format_pending_alert(decision, portfolio)
     
     def _format_dry_run_alert(self, decision: TradeDecision, portfolio: Dict[str, Any]) -> str:
-        """Format dry run alert message (log only)."""
-        plan = decision.plan
-        coin = plan.symbol.replace("THB_", "") if plan else ""
-
-        message = (
-            f"🧪 <b>Dry Run</b>  {coin} {plan.side.value.upper()} @ {plan.entry_price:,.0f} THB  ({plan.confidence:.0%})"
-        )
-
-        return message
+        return self._get_status_runtime_helper().format_dry_run_alert(decision, portfolio)
     
     def _send_alert(self, message: str, to_telegram: bool = False):
         """Send alert via unified alert system.
@@ -3471,6 +2012,14 @@ class TradingBotOrchestrator:
         """Log trailing stop ratchet (not sent to Telegram)."""
         if not self.send_alerts:
             return
+        self._log_position_trace(
+            "TRAILING_RATCHET",
+            symbol,
+            previous_stop_loss=old_sl,
+            stop_loss=new_sl,
+            current_price=current_price,
+            profit_pct=profit_pct,
+        )
         coin = symbol.replace("THB_", "")
         msg = (
             f"Trailing SL  {coin}  {old_sl:,.0f} → {new_sl:,.0f}  "
@@ -3479,184 +2028,10 @@ class TradingBotOrchestrator:
         self._send_alert(msg, to_telegram=False)
 
     def _build_multi_timeframe_status(self) -> Dict[str, Any]:
-        timeframes = list(getattr(self, "mtf_timeframes", []) or [])
-        status = {
-            "enabled": bool(getattr(self, "mtf_enabled", False)),
-            "mode": "confirmation",
-            "timeframes": timeframes,
-            "required_candles": _MIN_CANDLES_FOR_TRADING_READINESS,
-            "require_htf_confirmation": bool(getattr(self, "_mtf_confirmation_required", False)),
-            "primary_timeframe": getattr(self, "timeframe", "1h"),
-            "pairs": [],
-            "last_signals": dict(getattr(self, "_last_mtf_status", {}) or {}),
-        }
-        if not status["enabled"] or not timeframes:
-            return status
-
-        db = getattr(self, "db", None)
-        if db is None:
-            return status
-
-        try:
-            conn = db.get_connection()
-            cursor = conn.cursor()
-            pair_summaries = []
-            for pair in list(getattr(self, "trading_pairs", []) or []):
-                timeframe_rows = []
-                waiting_total = 0
-                blocking_timeframes: List[str] = []
-                for timeframe in timeframes:
-                    cursor.execute(
-                        "SELECT COUNT(*), MAX(timestamp) FROM prices WHERE pair = ? AND COALESCE(timeframe, '1h') = ?",
-                        (pair, timeframe),
-                    )
-                    count, latest = cursor.fetchone()
-                    count_value = int(count or 0)
-                    waiting_candles = max(0, _MIN_CANDLES_FOR_TRADING_READINESS - count_value)
-                    waiting_total += waiting_candles
-                    if waiting_candles > 0:
-                        blocking_timeframes.append(f"{timeframe}:{waiting_candles}")
-                    timeframe_rows.append({
-                        "timeframe": timeframe,
-                        "count": count_value,
-                        "required_candles": _MIN_CANDLES_FOR_TRADING_READINESS,
-                        "waiting_candles": waiting_candles,
-                        "latest": latest.isoformat() if hasattr(latest, "isoformat") else (str(latest) if latest else None),
-                    })
-
-                pair_summaries.append({
-                    "pair": pair,
-                    "timeframes": timeframe_rows,
-                    "required_candles": _MIN_CANDLES_FOR_TRADING_READINESS,
-                    "waiting_candles": waiting_total,
-                    "waiting_summary": ", ".join(blocking_timeframes) if blocking_timeframes else "ready",
-                    "ready": all((row["waiting_candles"] or 0) <= 0 for row in timeframe_rows),
-                })
-
-            status["pairs"] = pair_summaries
-        except Exception as exc:
-            logger.debug("Failed to build multi-timeframe status: %s", exc)
-            status["error"] = str(exc)
-        finally:
-            try:
-                cursor.close()
-                conn.close()
-            except Exception as exc:
-                logger.debug("Failed to close MTF status DB resources: %s", exc)
-
-        return status
+        return self._get_status_runtime_helper().build_multi_timeframe_status()
     
     def get_status(self, lightweight: bool = False) -> Dict[str, Any]:
-        """Get current bot status."""
-        paused, pause_reason = self._is_paused()
-        trading_pairs = getattr(self, "trading_pairs", [])
-        trading_pair = getattr(self, "trading_pair", "")
-        portfolio_state_getter = getattr(self, "_get_portfolio_state", lambda: {})
-        try:
-            portfolio_state = portfolio_state_getter(allow_refresh=not lightweight) or {}
-        except TypeError:
-            portfolio_state = portfolio_state_getter() or {}
-        risk_manager = getattr(self, "risk_manager", None)
-
-        # WebSocket status
-        if self._ws_client:
-            ws_state = "connected" if self._ws_client.is_connected() else "disconnected"
-            live_symbol = trading_pairs[0] if trading_pairs else trading_pair
-            live_tick = get_latest_ticker(live_symbol) if _WEBSOCKET_AVAILABLE and callable(get_latest_ticker) else None
-            live_price = live_tick.last if live_tick else None
-        else:
-            ws_state = "not_started"
-            live_price = None
-
-        balance_monitor = getattr(self, "_balance_monitor", None)
-        balance_state = balance_monitor.get_state() if balance_monitor else None
-        balance_events: List[Dict[str, str]] = []
-        for row in list((balance_state or {}).get("last_events") or [])[:5]:
-            event_type = str(row.get("event_type") or "BAL")
-            coin = str(row.get("coin") or "").upper()
-            amount = float(row.get("amount") or 0.0)
-            message = f"{event_type} {coin} {amount:,.4f}".strip()
-            balance_events.append(
-                {
-                    "timestamp": str(row.get("occurred_at") or "-"),
-                    "type": event_type,
-                    "message": message,
-                }
-            )
-
-        recent_trades: List[Dict[str, str]] = []
-        for row in list(getattr(self, "_executed_today", []) or [])[-5:]:
-            decision = row.get("decision") if isinstance(row, dict) else None
-            result = row.get("result") if isinstance(row, dict) else None
-            side = "-"
-            symbol = "-"
-            if decision and getattr(decision, "plan", None):
-                side = str(getattr(getattr(decision.plan, "side", None), "value", "-") or "-")
-                symbol = str(getattr(decision.plan, "symbol", "-") or "-")
-            status = str(getattr(result, "status", "filled") or "filled")
-            timestamp = row.get("timestamp") if isinstance(row, dict) else None
-            recent_trades.append(
-                {
-                    "timestamp": timestamp.isoformat() if isinstance(timestamp, datetime) else str(timestamp or "-"),
-                    "symbol": symbol,
-                    "side": side,
-                    "status": status,
-                }
-            )
-
-        mtf_status = self._get_dashboard_multi_timeframe_status(allow_refresh=not lightweight)
-        tradable_pairs = self._filter_pairs_by_candle_readiness(list(trading_pairs), allow_refresh=not lightweight)
-        executor = getattr(self, "executor", None)
-        open_positions = 0
-        if executor and hasattr(executor, "get_open_orders"):
-            try:
-                open_positions = len(executor.get_open_orders())
-            except Exception:
-                open_positions = 0
-
-        return {
-            "running": getattr(self, "running", False),
-            "mode": self.mode.value,
-            "signal_source": self.signal_source.value,
-            "strategy": "sniper_directional",
-            "strategy_engine": {
-                "enabled": True,
-                "strategies": list(getattr(self, "enabled_strategies", [])),
-            },
-            "auth_degraded": {
-                "active": getattr(self, "_auth_degraded", False),
-                "reason": getattr(self, "_auth_degraded_reason", ""),
-                "public_only": getattr(self, "_auth_degraded", False),
-            },
-            "trading_pairs": trading_pairs,
-            "tradable_pairs": tradable_pairs,
-            "trading_paused": {
-                "active": paused,
-                "reason": pause_reason,
-            },
-            "timeframe": getattr(self, "timeframe", None),
-            "interval_seconds": getattr(self, "interval_seconds", 0),
-            "loop_count": getattr(self, "_loop_count", 0),
-            "last_loop": self._last_loop_time.isoformat() if self._last_loop_time is not None else None,
-            "pending_decisions": self._safe_pending_count(),
-            "executed_today": len(getattr(self, "_executed_today", [])),
-            "open_positions": open_positions,
-            "balance_monitor": {
-                "enabled": bool(balance_monitor),
-                "running": bool(balance_monitor and balance_monitor.running),
-                "updated_at": balance_state.get("updated_at") if balance_state else None,
-                "last_event_count": len(balance_state.get("last_events", [])) if balance_state else 0,
-            },
-            "balance_events": balance_events,
-            "recent_trades": recent_trades,
-            "multi_timeframe": mtf_status,
-            "websocket": {
-                "enabled": getattr(self, "_ws_enabled", False),
-                "state": ws_state,
-                "live_price": live_price,
-            },
-            "risk_summary": risk_manager.get_risk_summary(portfolio_state.get("balance", 0)) if risk_manager else {}
-        }
+        return self._get_status_runtime_helper().get_status(lightweight=lightweight)
 
     def trigger_rebalance(self) -> Dict[str, Any]:
         """Rebalance is permanently disabled in sniper mode."""
@@ -3665,189 +2040,68 @@ class TradingBotOrchestrator:
             "reason": "Rebalance is disabled in sniper mode",
             "trigger": "manual",
         }
+
+    # Status and monitoring facade wrappers.
     
     def _safe_pending_count(self) -> int:
-        with self._pending_decisions_lock:
-            return len(self._pending_decisions)
+        return self._get_status_runtime_helper().safe_pending_count()
     
     def get_pending_decisions(self) -> List[Dict[str, Any]]:
-        """Get list of pending decisions for approval."""
-        with self._pending_decisions_lock:
-            decisions_copy = list(self._pending_decisions)
-        return [
-            {
-                "id": i,
-                "side": d.plan.side.value,
-                "entry_price": d.plan.entry_price,
-                "confidence": d.plan.confidence,
-                "strategy_votes": d.plan.strategy_votes,
-                "signal_source": d.signal_source.value,
-                "risk_check_passed": d.risk_check.passed,
-                "decision_time": d.decision_time.isoformat()
-            }
-            for i, d in enumerate(decisions_copy)
-        ]
+        return self._get_status_runtime_helper().get_pending_decisions()
 
     def _check_positions_for_sl_tp(self):
-        """
-        Monitor open positions and execute SL/TP exits.
-        Multi-pair: fetches price per position symbol (not just self.trading_pair).
-        """
-        open_orders = self.executor.get_open_orders()
-        if not open_orders:
-            return
+        self._get_position_monitor_helper().check_positions_for_sl_tp()
 
-        # Cache prices per symbol to avoid redundant API calls
-        _price_cache: Dict[str, tuple] = {}
+    def _should_allow_voluntary_exit(
+        self,
+        symbol: str,
+        trigger: str,
+        entry_price: float,
+        exit_price: float,
+        amount: float,
+        total_entry_cost: float = 0.0,
+        side: Any = "buy",
+    ) -> bool:
+        trigger_value = str(trigger or "").upper()
+        if trigger_value not in {"SIGSELL", "TIME"}:
+            return True
+        if not bool(getattr(self, "_enforce_min_profit_gate_for_voluntary_exit", False)):
+            return True
 
-        def _get_price(symbol: str):
-            if symbol in _price_cache:
-                return _price_cache[symbol]
-            price, source = None, "none"
-            if self._ws_client and self._ws_client.is_connected() and _WEBSOCKET_AVAILABLE and callable(get_latest_ticker):
-                tick = get_latest_ticker(symbol)
-                if tick:
-                    price, source = tick.last, "ws"
-            if price is None:
-                try:
-                    ticker = self.api_client.get_ticker(symbol)
-                    if isinstance(ticker, dict):
-                        price = float(ticker.get("last", ticker.get("close", 0)))
-                    source = "rest"
-                except Exception as e:
-                    logger.warning(f"Could not get price for {symbol}: {e}")
-            _price_cache[symbol] = (price, source)
-            return price, source
+        amount_value = float(amount or 0.0)
+        entry_value = float(entry_price or 0.0)
+        exit_value = float(exit_price or 0.0)
+        entry_cost = float(total_entry_cost or 0.0)
+        if amount_value <= 0 or entry_value <= 0 or exit_value <= 0:
+            return True
+        if entry_cost <= 0:
+            entry_cost = entry_value * amount_value
+        if entry_cost <= 0:
+            return True
 
-        for pos in open_orders:
-            position_id = pos.get("order_id", "")
-            entry_price = _coerce_trade_float(pos.get("entry_price"), 0.0)
-            stop_loss = _coerce_trade_float(pos.get("stop_loss"), 0.0)
-            take_profit = _coerce_trade_float(pos.get("take_profit"), 0.0)
-            side = pos.get("side", OrderSide.BUY)
-            amount = _coerce_trade_float(pos.get("amount"), 0.0)
-            pos_symbol = pos.get("symbol", self.trading_pair)
+        from trade_executor import BITKUB_FEE_PCT
+        side_value = str(getattr(side, "value", side) or "buy").lower()
 
-            if self._state_machine_enabled:
-                lifecycle = self._state_manager.get_state(pos_symbol)
-                if lifecycle.state != TradeLifecycleState.IN_POSITION:
-                    continue
+        pnl = calc_net_pnl(
+            entry_cost=entry_cost,
+            exit_price=exit_value,
+            quantity=amount_value,
+            side=side_value,
+            fee_pct=BITKUB_FEE_PCT,
+        )
+        net_pnl_pct = float(pnl.get("net_pnl_pct", 0.0) or 0.0)
+        min_net_profit_pct = float(getattr(self, "_min_voluntary_exit_net_profit_pct", 0.0) or 0.0)
+        if net_pnl_pct >= min_net_profit_pct:
+            return True
 
-            if not entry_price or entry_price == 0:
-                continue
-
-            # Get price for THIS position's symbol
-            current_price, price_source = _get_price(pos_symbol)
-            if current_price is None or current_price == 0:
-                continue
-
-            triggered = None
-
-            if self._scalping_mode_enabled:
-                opened_at = _coerce_trade_datetime(pos.get("timestamp"))
-                if opened_at is not None:
-                    hold_seconds = (datetime.now() - opened_at).total_seconds()
-                    if hold_seconds >= (self._scalping_position_timeout_minutes * 60):
-                        triggered = "TIME"
-
-            if not triggered and side == OrderSide.BUY:
-                # For long positions: SL below entry, TP above entry
-                if stop_loss > 0 and current_price <= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price >= take_profit:
-                    triggered = "TP"
-            elif not triggered:
-                # For short positions (if supported): SL above entry, TP below entry
-                if stop_loss > 0 and current_price >= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price <= take_profit:
-                    triggered = "TP"
-
-            if triggered:
-                logger.info(
-                    f"[{price_source.upper()}-SLTP] {triggered} triggered for "
-                    f"position {position_id} ({pos_symbol}) | Entry: {entry_price:,.0f} | "
-                    f"Current: {current_price:,.0f} | SL: {stop_loss:,.0f} | "
-                    f"TP: {take_profit:,.0f}"
-                )
-
-                exit_price = current_price
-
-                if self._state_machine_enabled:
-                    self._submit_managed_exit(
-                        position_id=position_id,
-                        pos_symbol=pos_symbol,
-                        side=side,
-                        amount=amount,
-                        exit_price=exit_price,
-                        triggered=triggered,
-                        entry_price=entry_price,
-                        total_entry_cost=pos.get("total_entry_cost", entry_price * amount),
-                        price_source=price_source,
-                        opened_at=pos.get("timestamp"),
-                    )
-                    continue
-
-                # Determine exit side (opposite of entry)
-                exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
-
-                result = self.executor.execute_exit(
-                    position_id=position_id,
-                    order_id=position_id,
-                    side=exit_side,
-                    amount=amount,
-                    price=exit_price
-                )
-
-                if result.success:
-                    # ── Net P/L with Bitkub 0.25% fees ────────────────
-                    from trade_executor import BITKUB_FEE_PCT
-                    now = datetime.now()
-                    
-                    entry_cost = pos.get("total_entry_cost", entry_price * amount)
-                    entry_fee = entry_cost * BITKUB_FEE_PCT
-                    
-                    gross_exit = exit_price * amount
-                    exit_fee = gross_exit * BITKUB_FEE_PCT
-                    net_exit = gross_exit - exit_fee
-                    
-                    total_fees = entry_fee + exit_fee
-                    net_pnl = net_exit - entry_cost
-                    net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
-                    
-                    pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
-                    trigger_emoji = "🎯" if triggered == "TP" else "🛑"
-                    
-                    # ── Log closed trade to DB ─────────────────────────
-                    try:
-                        self.db.log_closed_trade({
-                            "symbol": pos_symbol, "side": side,
-                            "amount": amount, "entry_price": entry_price,
-                            "exit_price": exit_price, "entry_cost": entry_cost,
-                            "gross_exit": gross_exit, "entry_fee": entry_fee,
-                            "exit_fee": exit_fee, "total_fees": total_fees,
-                            "net_pnl": net_pnl, "net_pnl_pct": net_pnl_pct,
-                            "trigger": triggered, "price_source": price_source,
-                            "opened_at": pos.get("timestamp"),
-                            "closed_at": now,
-                        })
-                    except Exception as e:
-                        logger.error(f"Failed to log closed trade: {e}", exc_info=True)
-                    
-                    trigger_label = "Take Profit" if triggered == "TP" else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
-                    msg = self._format_exit_alert(
-                        pos_symbol,
-                        trigger_label,
-                        amount,
-                        entry_price,
-                        exit_price,
-                        entry_cost,
-                        gross_exit,
-                        net_pnl,
-                        net_pnl_pct,
-                        total_fees,
-                        now=now,
-                    )
-                    self._send_alert(msg, to_telegram=True)
-                else:
-                    logger.error(f"Failed to execute {triggered} exit: {result.message}")
+        logger.info(
+            "[ExitGate] Suppressed %s exit for %s | entry=%.2f exit=%.2f amount=%.8f | net_pnl_pct=%.3f < %.3f",
+            trigger_value,
+            str(symbol or "").upper(),
+            entry_value,
+            exit_value,
+            amount_value,
+            net_pnl_pct,
+            min_net_profit_pct,
+        )
+        return False

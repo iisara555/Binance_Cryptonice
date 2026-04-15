@@ -33,7 +33,7 @@
 หรือ
 
 ```powershell
-.\.venv-3\Scripts\python.exe main.py
+.\.venv\Scripts\python.exe main.py
 ```
 
 ### Windows Always-On
@@ -54,19 +54,19 @@
 
 ```powershell
 $env:BOT_STARTUP_TEST_MODE = "1"
-.\.venv-3\Scripts\python.exe main.py
+.\.venv\Scripts\python.exe main.py
 ```
 
 ### Strict preflight
 
 ```powershell
-.\.venv-3\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --json
+.\.venv\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --json
 ```
 
 ### Allow degraded mode temporarily
 
 ```powershell
-.\.venv-3\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --allow-auth-degraded --json
+.\.venv\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --allow-auth-degraded --json
 ```
 
 ## Go-Live Conditions
@@ -80,7 +80,7 @@ $env:BOT_STARTUP_TEST_MODE = "1"
 
 ## Latest Verified Evidence
 
-- full repo tests ล่าสุดผ่าน `333 passed, 11 skipped, 2 warnings`
+- full repo tests ล่าสุดผ่าน `372 passed, 11 skipped, 2 warnings`
 - post-fix CLI lifecycle regression tests ผ่าน `33 passed`
 - broader integration หลัง fix ผ่าน `84 passed`
 - live VPS health ล่าสุดอยู่ที่ `healthy: true`, `auth_degraded.active: false`, `tradable_pairs` ครบ 9 คู่
@@ -89,6 +89,7 @@ $env:BOT_STARTUP_TEST_MODE = "1"
 ## Important Operational Notes
 
 - Runtime path resolution is now project-root based, so folder rename or drive move is supported for standalone usage
+- Runtime launchers and systemd templates now prefer `.venv` and fallback to `.venv-3` or `venv` when needed
 - Windows service installs still need reinstall after moving the project, because Windows stores absolute paths in service registration
 - Linux / VPS ที่ต้องการ Rich CLI ควรใช้ `tmux` session (`crypto`) และให้ `crypto-bot-tmux.service` เป็นคนสร้าง session ตอน boot แทนการรัน bot ตรงใต้ `systemd`
 - Historical references to dashboard, frontend, `start.py`, `ai_signals/`, `show_bitkub_coins.py`, and `validate_bitkub_config.py` are obsolete for this repo version

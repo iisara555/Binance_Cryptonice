@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -152,8 +153,18 @@ class MultiTimeframeCollector:
 class MultiTimeframeAnalyzer:
     """Analyze multiple timeframes and aggregate the result."""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        *,
+        pair: str = "",
+        indicator_cache: Optional[Dict[Tuple[Any, ...], Tuple[float, Dict[str, float]]]] = None,
+        indicator_cache_lock: Optional[threading.Lock] = None,
+        indicator_cache_ttl: float = 0.0,
+        indicator_cache_max_size: int = 0,
+    ):
         self.config = dict(config or {})
+        self.pair = str(pair or "").upper()
         self.alignment_threshold = float(self.config.get("alignment_threshold", 0.6) or 0.6)
         self.tf_weights = {
             str(timeframe): float(weight)
@@ -164,6 +175,101 @@ class MultiTimeframeAnalyzer:
             for timeframe in (self.config.get("higher_timeframes") or ["1h", "4h", "1d"])
             if str(timeframe).strip()
         ]
+        self._indicator_cache = indicator_cache
+        self._indicator_cache_lock = indicator_cache_lock
+        self._indicator_cache_ttl = max(float(indicator_cache_ttl or 0.0), 0.0)
+        self._indicator_cache_max_size = max(int(indicator_cache_max_size or 0), 0)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if pd.isna(numeric):
+            return float(default)
+        return numeric
+
+    def _select_indicator_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if len(frame) >= 36:
+            return frame.iloc[:-1].copy()
+        return frame.copy()
+
+    def _make_indicator_cache_key(self, timeframe: str, frame: pd.DataFrame) -> Optional[Tuple[Any, ...]]:
+        if frame.empty:
+            return None
+        last_row = frame.iloc[-1]
+        return (
+            self.pair,
+            str(timeframe),
+            last_row.get("timestamp"),
+            len(frame),
+            self._safe_float(last_row.get("close")),
+            self._safe_float(last_row.get("volume"), 1.0),
+        )
+
+    def _get_cached_indicator_snapshot(self, cache_key: Optional[Tuple[Any, ...]]) -> Optional[Dict[str, float]]:
+        if cache_key is None or self._indicator_cache is None or self._indicator_cache_lock is None:
+            return None
+        now = datetime.now(timezone.utc).timestamp()
+        with self._indicator_cache_lock:
+            cached = self._indicator_cache.get(cache_key)
+            if not cached:
+                return None
+            cached_at, snapshot = cached
+            if self._indicator_cache_ttl > 0 and now - cached_at >= self._indicator_cache_ttl:
+                self._indicator_cache.pop(cache_key, None)
+                return None
+            return dict(snapshot)
+
+    def _store_cached_indicator_snapshot(
+        self,
+        cache_key: Optional[Tuple[Any, ...]],
+        snapshot: Dict[str, float],
+    ) -> Dict[str, float]:
+        if cache_key is None or self._indicator_cache is None or self._indicator_cache_lock is None:
+            return snapshot
+        with self._indicator_cache_lock:
+            if self._indicator_cache_max_size > 0 and len(self._indicator_cache) >= self._indicator_cache_max_size:
+                oldest_key = min(self._indicator_cache.items(), key=lambda item: item[1][0])[0]
+                self._indicator_cache.pop(oldest_key, None)
+            self._indicator_cache[cache_key] = (datetime.now(timezone.utc).timestamp(), dict(snapshot))
+        return snapshot
+
+    def _compute_indicator_snapshot(self, frame: pd.DataFrame) -> Dict[str, float]:
+        close = frame["close"].astype(float)
+        high = frame["high"].astype(float)
+        low = frame["low"].astype(float)
+        volume = frame["volume"].astype(float)
+
+        ema_fast = close.ewm(span=9, adjust=False).mean().iloc[-1]
+        ema_slow = close.ewm(span=21, adjust=False).mean().iloc[-1]
+        rsi = TechnicalIndicators.calculate_rsi(close).iloc[-1]
+        macd, macd_signal, macd_hist = TechnicalIndicators.calculate_macd(close)
+        adx = TechnicalIndicators.calculate_adx(high, low, close).iloc[-1]
+        atr = TechnicalIndicators.calculate_atr(high, low, close).iloc[-1]
+        volume_ma = volume.rolling(window=20).mean().iloc[-1]
+
+        return {
+            "ema_fast": self._safe_float(ema_fast),
+            "ema_slow": self._safe_float(ema_slow),
+            "rsi": self._safe_float(rsi, 50.0),
+            "macd": self._safe_float(macd.iloc[-1]),
+            "macd_signal": self._safe_float(macd_signal.iloc[-1]),
+            "macd_hist": self._safe_float(macd_hist.iloc[-1]),
+            "adx": self._safe_float(adx),
+            "atr": self._safe_float(atr),
+            "volume_ma": self._safe_float(volume_ma),
+        }
+
+    def _get_indicator_snapshot(self, timeframe: str, frame: pd.DataFrame) -> Dict[str, float]:
+        indicator_frame = self._select_indicator_frame(frame)
+        cache_key = self._make_indicator_cache_key(timeframe, indicator_frame)
+        cached = self._get_cached_indicator_snapshot(cache_key)
+        if cached is not None:
+            return cached
+        snapshot = self._compute_indicator_snapshot(indicator_frame)
+        return self._store_cached_indicator_snapshot(cache_key, snapshot)
 
     def analyze(self, data: Dict[str, TimeframeData]) -> Dict[str, TimeframeSignal]:
         signals: Dict[str, TimeframeSignal] = {}
@@ -235,26 +341,17 @@ class MultiTimeframeAnalyzer:
 
         frame = data.candles
         close = frame["close"].astype(float)
-        high = frame["high"].astype(float)
-        low = frame["low"].astype(float)
         volume = frame["volume"].astype(float)
+        indicators = self._get_indicator_snapshot(timeframe, frame)
 
-        ema_fast = close.ewm(span=9, adjust=False).mean().iloc[-1]
-        ema_slow = close.ewm(span=21, adjust=False).mean().iloc[-1]
-        rsi = TechnicalIndicators.calculate_rsi(close).iloc[-1]
-        macd, macd_signal, macd_hist = TechnicalIndicators.calculate_macd(close)
-        adx = TechnicalIndicators.calculate_adx(high, low, close).iloc[-1]
-        atr = TechnicalIndicators.calculate_atr(high, low, close).iloc[-1]
-        volume_ma = volume.rolling(window=20).mean().iloc[-1]
+        ema_fast = indicators.get("ema_fast", 0.0)
+        ema_slow = indicators.get("ema_slow", 0.0)
+        rsi = indicators.get("rsi", 50.0)
+        adx = indicators.get("adx", 0.0)
+        atr = indicators.get("atr", 0.0)
+        latest_macd_hist = indicators.get("macd_hist", 0.0)
+        volume_ma = indicators.get("volume_ma", 0.0)
         latest_close = float(close.iloc[-1])
-
-        if pd.isna(rsi):
-            rsi = 50.0
-        if pd.isna(adx):
-            adx = 0.0
-        if pd.isna(atr):
-            atr = 0.0
-        latest_macd_hist = float(macd_hist.iloc[-1]) if not pd.isna(macd_hist.iloc[-1]) else 0.0
         volume_ratio = float(volume.iloc[-1] / volume_ma) if volume_ma and not pd.isna(volume_ma) and volume_ma > 0 else 1.0
 
         trend_strength = float(adx) if adx else 0.0
@@ -283,8 +380,8 @@ class MultiTimeframeAnalyzer:
             "rsi": float(rsi),
             "ema_fast": float(ema_fast),
             "ema_slow": float(ema_slow),
-            "macd": float(macd.iloc[-1]) if not pd.isna(macd.iloc[-1]) else 0.0,
-            "macd_signal": float(macd_signal.iloc[-1]) if not pd.isna(macd_signal.iloc[-1]) else 0.0,
+            "macd": float(indicators.get("macd", 0.0)),
+            "macd_signal": float(indicators.get("macd_signal", 0.0)),
             "macd_hist": latest_macd_hist,
             "adx": float(adx),
             "atr": float(atr),

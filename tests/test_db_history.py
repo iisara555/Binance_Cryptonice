@@ -91,3 +91,21 @@ def test_sqlite_connection_uses_temp_store_memory(temp_db):
         conn.close()
 
     assert temp_store_mode == 2
+
+
+def test_get_candles_returns_cached_copy_until_price_write_invalidates(temp_db):
+    db = Database(temp_db)
+    now = datetime.utcnow()
+
+    db.insert_price("THB_BTC", now, 100, 101, 99, 100, 10, timeframe="1m")
+    first = db.get_candles("THB_BTC", interval="1m")
+    first.loc[0, "close"] = 999999
+
+    second = db.get_candles("THB_BTC", interval="1m")
+    assert second.loc[0, "close"] == 100
+
+    db.insert_price("THB_BTC", now + timedelta(minutes=1), 110, 111, 109, 110, 11, timeframe="1m")
+    third = db.get_candles("THB_BTC", interval="1m")
+
+    assert len(third) == 2
+    assert list(third["close"]) == [100, 110]

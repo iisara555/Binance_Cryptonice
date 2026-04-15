@@ -16,7 +16,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, date, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from abc import ABC, abstractmethod
@@ -646,7 +646,7 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
         self.min_rebalance_pct = config.get("min_rebalance_pct", 1.0)
         self._last_volatility: Dict[str, float] = {}
 
-    def _calculate_volatility(self, prices: List[float]) -> float:
+    def _calculate_volatility(self, prices: Sequence[float]) -> float:
         """Calculate volatility as coefficient of variation (std/mean * 100)."""
         if len(prices) < 2:
             return 0.0
@@ -663,7 +663,7 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
         self,
         symbol: str,
         current_volatility: float,
-        prices: List[float],
+        prices: Sequence[float],
         base_target: float,
     ) -> float:
         """
@@ -1429,95 +1429,3 @@ class PortfolioRebalancer:
 # Quick Test
 # ─────────────────────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO)
-    
-    # Test configuration
-    config = {
-        "rebalance": {
-            "enabled": True,
-            "strategy": "combined",
-            "threshold": {
-                "threshold_pct": 10.0,
-                "min_rebalance_pct": 1.0,
-            },
-            "calendar": {
-                "frequency": "weekly",
-                "day_of_week": 0,
-                "hour_of_day": 0,
-            },
-            "risk": {
-                "volatility_window": 20,
-                "risk_adjustment_factor": 0.5,
-                "min_allocation_pct": 5.0,
-                "max_allocation_pct": 50.0,
-                "volatility_threshold_pct": 30,
-            },
-            "target_allocation": {
-                "BTC": 40.0,
-                "ETH": 30.0,
-                "BNB": 20.0,
-                "SOL": 10.0,
-            },
-            "min_trade_value": 5.0,
-            "estimated_cost_pct": 0.5,
-        }
-    }
-    
-    rebalancer = PortfolioRebalancer(config)
-    
-    # Mock portfolio manager
-    class MockPortfolioManager:
-        def __init__(self):
-            self._balance = 500.0
-            self._positions = {
-                "BTC": {"quantity": 0.01, "price": 45000.0},
-                "ETH": {"quantity": 0.1, "price": 3000.0},
-                "BNB": {"quantity": 0.5, "price": 350.0},
-                "SOL": {"quantity": 1.0, "price": 100.0},
-            }
-        
-        def total_portfolio_value(self):
-            positions_value = sum(p["quantity"] * p["price"] for p in self._positions.values())
-            return self._balance + positions_value
-        
-        def get_position(self, symbol):
-            if symbol in self._positions:
-                class Pos:
-                    quantity = self._positions[symbol]["quantity"]
-                    current_price = self._positions[symbol]["price"]
-                return Pos()
-            return None
-    
-    pm = MockPortfolioManager()
-    
-    # Simulated prices
-    price_data = {
-        "BTC": 45000.0,
-        "ETH": 3000.0,
-        "BNB": 350.0,
-        "SOL": 100.0,
-    }
-    
-    print("\n=== Portfolio Rebalancer Test ===")
-    print(f"Total portfolio value: {pm.total_portfolio_value():.2f} THB")
-    
-    should_rebal, reason = rebalancer.check_rebalance_needed(pm, price_data)
-    print(f"Should rebalance: {should_rebal}")
-    print(f"Reason: {reason}")
-    
-    if should_rebal:
-        plan = rebalancer.create_rebalance_plan(pm, price_data)
-        print(f"\nRebalance Plan:")
-        print(f"  Trigger: {plan.trigger.value}")
-        print(f"  Strategy: {plan.strategy.value}")
-        print(f"  Total trades: {plan.total_trades}")
-        print(f"  Max drift: {plan.max_drift_pct}%")
-        print(f"  Estimated cost: {plan.estimated_cost} THB")
-        
-        for order in plan.orders:
-            print(f"  - {order.side.upper()} {order.symbol}: {order.quantity:.8f} "
-                  f"(~{order.estimated_value:.2f} THB) | {order.reason}")
-    
-    # Sim

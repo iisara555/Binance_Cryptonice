@@ -6,6 +6,7 @@ before new BUY entries and correctly blocks trades when limits are breached.
 """
 
 import pytest
+import threading
 from datetime import datetime
 from unittest.mock import Mock, MagicMock, patch
 
@@ -465,3 +466,198 @@ def test_risk_manager_blocks_new_entries_when_drawdown_limit_reached():
         bot._process_full_auto(decision, portfolio)
 
         mock_executor.execute_entry.assert_not_called()
+
+
+def test_get_status_uses_total_balance_for_risk_summary_and_completed_trade_count():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._ws_client = None
+    bot.trading_pairs = ['THB_BTC']
+    bot.trading_pair = 'THB_BTC'
+    bot.running = True
+    bot.mode = BotMode.DRY_RUN
+    bot.signal_source = SignalSource.STRATEGY
+    bot.ml_enabled = False
+    bot.paused = False
+    bot.pause_reason = ''
+    bot._reconciling_orders = False
+    bot._pause_state_lock = threading.Lock()
+    bot._auth_degraded = False
+    bot._auth_degraded_reason = ''
+    bot.interval_seconds = 60
+    bot._loop_count = 1
+    bot._last_loop_time = None
+    bot._pending_decisions = []
+    bot._pending_decisions_lock = threading.Lock()
+    bot._executed_today = [{}, {}]
+    bot._ws_enabled = False
+    bot._last_mtf_status = {}
+    bot._mtf_confirmation_required = False
+    bot.mtf_enabled = True
+    bot.mtf_timeframes = ['1h']
+    bot.timeframe = '1h'
+    bot.enabled_strategies = []
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = []
+    bot.risk_manager = Mock()
+    bot.risk_manager.trade_count_today = 0
+    bot.risk_manager.get_risk_summary.return_value = {'ok': True}
+    bot._get_portfolio_state = Mock(return_value={'balance': 677.39, 'total_balance': 967.70, 'timestamp': None, 'positions': []})
+    bot._get_dashboard_multi_timeframe_status = Mock(return_value={'enabled': True, 'pairs': []})
+
+    status = TradingBotOrchestrator.get_status(bot, lightweight=True)
+
+    bot.risk_manager.get_risk_summary.assert_called_once_with(967.70)
+    assert status['executed_today'] == 0
+
+
+def test_submit_managed_entry_marks_immediate_fill_as_in_position():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    decision = _make_buy_decision()
+    snapshot = TradeStateSnapshot(
+        symbol='THB_BTC',
+        state=TradeLifecycleState.PENDING_BUY,
+        entry_order_id='ord-1',
+        active_order_id='ord-1',
+        total_entry_cost=1500.0,
+        entry_price=1_500_000.0,
+        stop_loss=1_470_000.0,
+        take_profit=1_560_000.0,
+        opened_at=datetime.now(),
+    )
+    filled_snapshot = TradeStateSnapshot(
+        symbol='THB_BTC',
+        state=TradeLifecycleState.IN_POSITION,
+        entry_order_id='ord-1',
+        active_order_id='ord-1',
+        total_entry_cost=1500.0,
+        filled_amount=0.001,
+        entry_price=1_500_000.0,
+        stop_loss=1_470_000.0,
+        take_profit=1_560_000.0,
+        opened_at=datetime.now(),
+    )
+
+    bot.executor = Mock()
+    bot.executor.execute_entry.return_value = OrderResult(
+        success=True,
+        status=OrderStatus.FILLED,
+        order_id='ord-1',
+        filled_amount=0.001,
+        filled_price=1_500_000.0,
+        ordered_amount=1500.0,
+        remaining_amount=0.0,
+        message='filled',
+    )
+    bot._state_manager = Mock()
+    bot._state_manager.start_pending_buy.return_value = snapshot
+    bot._state_manager.mark_entry_filled.return_value = filled_snapshot
+    bot._register_filled_position_from_state = Mock()
+    bot.risk_manager = Mock()
+    bot.db = Mock()
+    bot.signal_source = SignalSource.STRATEGY
+    bot._executed_today = []
+    bot._format_coin_symbol = Mock(return_value='BTC')
+    bot._format_alert_block = Mock(return_value='msg')
+    bot.send_alerts = False
+    bot._send_alert = Mock()
+
+    TradingBotOrchestrator._submit_managed_entry(bot, decision, {'balance': 1000.0, 'total_balance': 1000.0})
+
+    bot._state_manager.start_pending_buy.assert_called_once()
+    bot._register_filled_position_from_state.assert_called_once_with(snapshot, 0.001, 1_500_000.0)
+    bot._state_manager.mark_entry_filled.assert_called_once_with('THB_BTC', 0.001, 1_500_000.0)
+    bot.risk_manager.record_trade.assert_called_once()
+    assert decision.status == TradeLifecycleState.IN_POSITION.value
+
+
+def test_try_submit_managed_signal_sell_routes_in_position_symbol_to_managed_exit():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = TradeStateSnapshot(
+        symbol='THB_BTC',
+        state=TradeLifecycleState.IN_POSITION,
+        entry_order_id='entry-1',
+        filled_amount=0.01,
+        entry_price=1_500_000.0,
+        total_entry_cost=15_000.0,
+        opened_at=datetime.now(),
+    )
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [{
+        'order_id': 'entry-1',
+        'symbol': 'THB_BTC',
+        'side': OrderSide.BUY,
+        'amount': 0.01,
+        'remaining_amount': 0.01,
+        'entry_price': 1_500_000.0,
+        'total_entry_cost': 15_000.0,
+        'timestamp': datetime.now(),
+    }]
+    bot._submit_managed_exit = Mock(return_value=True)
+
+    decision = _make_sell_decision()
+
+    submitted = TradingBotOrchestrator._try_submit_managed_signal_sell(bot, decision)
+
+    assert submitted is True
+    assert decision.status == 'pending_sell'
+    bot._submit_managed_exit.assert_called_once()
+    assert bot._submit_managed_exit.call_args.kwargs['triggered'] == 'SIGSELL'
+
+
+def test_try_submit_managed_signal_sell_suppresses_sub_threshold_profit_exit():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = TradeStateSnapshot(
+        symbol='THB_BTC',
+        state=TradeLifecycleState.IN_POSITION,
+        entry_order_id='entry-1',
+        filled_amount=0.01,
+        entry_price=1_500_000.0,
+        total_entry_cost=15_000.0,
+        opened_at=datetime.now(),
+    )
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [{
+        'order_id': 'entry-1',
+        'symbol': 'THB_BTC',
+        'side': OrderSide.BUY,
+        'amount': 0.01,
+        'remaining_amount': 0.01,
+        'entry_price': 1_500_000.0,
+        'total_entry_cost': 15_000.0,
+        'timestamp': datetime.now(),
+    }]
+    bot._submit_managed_exit = Mock(return_value=True)
+    bot._enforce_min_profit_gate_for_voluntary_exit = True
+    bot._min_voluntary_exit_net_profit_pct = 0.2
+
+    decision = _make_sell_decision()
+    decision.plan.entry_price = 1_503_000.0
+
+    submitted = TradingBotOrchestrator._try_submit_managed_signal_sell(bot, decision)
+
+    assert submitted is False
+    bot._submit_managed_exit.assert_not_called()
+
+
+def test_register_filled_position_from_state_persists_live_remaining_amount():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot._log_filled_order = Mock()
+    snapshot = TradeStateSnapshot(
+        symbol='THB_BTC',
+        state=TradeLifecycleState.PENDING_BUY,
+        entry_order_id='ord-1',
+        total_entry_cost=1500.0,
+        stop_loss=1_470_000.0,
+        take_profit=1_560_000.0,
+        opened_at=datetime.now(),
+    )
+
+    TradingBotOrchestrator._register_filled_position_from_state(bot, snapshot, 0.001, 1_500_000.0)
+
+    pos_data = bot.executor.register_tracked_position.call_args.args[1]
+    assert pos_data['remaining_amount'] == pytest.approx(0.001)

@@ -3,6 +3,8 @@ import threading
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
+import pytest
+
 os.environ.setdefault("BITKUB_API_KEY", "test-key")
 os.environ.setdefault("BITKUB_API_SECRET", "test-secret")
 
@@ -113,6 +115,7 @@ def test_handle_balance_event_crypto_deposit_alerts_when_untracked():
     bot._reconcile_tracked_positions_with_balance_state = Mock(return_value=[])
     bot._clear_pause_reason = Mock()
     bot._set_pause_reason = Mock()
+    bot._get_trading_pairs = Mock(return_value=[])
 
     bot._handle_balance_event(
         BalanceEvent(
@@ -132,9 +135,45 @@ def test_handle_balance_event_crypto_deposit_alerts_when_untracked():
     assert "not auto-converted into a managed bot position" in alert_message
 
 
+def test_handle_balance_event_crypto_deposit_bootstraps_active_runtime_pair_into_position_book():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._portfolio_cache = {"data": object(), "timestamp": 1.0}
+    bot.executor = Mock()
+    bot.alert_system = Mock()
+    bot.send_alerts = True
+    bot._reconcile_tracked_positions_with_balance_state = Mock(return_value=[])
+    bot._clear_pause_reason = Mock()
+    bot._set_pause_reason = Mock()
+    bot._get_trading_pairs = Mock(return_value=["THB_SOL"])
+    bot._bootstrap_held_positions = Mock()
+    bot._find_tracked_position_by_symbol = Mock(side_effect=[None, {
+        "order_id": "bootstrap_THB_SOL_1",
+        "symbol": "THB_SOL",
+        "entry_price": 2_750.0,
+        "bootstrap_source": "estimated_from_ticker",
+    }])
+
+    bot._handle_balance_event(
+        BalanceEvent(
+            event_type="DEPOSIT",
+            coin="SOL",
+            amount=0.5,
+            balance=1.25,
+            occurred_at=None,
+            source="crypto",
+        ),
+        {"balances": {"SOL": {"available": 1.25, "reserved": 0.0, "total": 1.25}}},
+    )
+
+    bot._bootstrap_held_positions.assert_called_once()
+    alert_message = bot.alert_system.send.call_args.args[1]
+    assert "External crypto deposit detected: SOL +0.50000000" in alert_message
+    assert "THB_SOL was registered into Position Book" in alert_message
+
+
 def test_bootstrap_held_positions_assigns_sl_tp_to_synthetic_positions():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
-    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0, "use_dynamic_sl_tp": False}}
     bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {
@@ -227,6 +266,256 @@ def test_bootstrap_held_positions_prefers_trade_state_entry_price_over_current_p
     assert pos_data["total_entry_cost"] == 1250.0
 
 
+def test_bootstrap_held_positions_ignores_newer_bootstrap_row_when_real_position_exists():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.min_trade_value_thb = 15.0
+    bot.api_client = Mock()
+    bot.api_client.get_balances.return_value = {
+        "BTC": {"available": 0.0000605, "reserved": 0.0}
+    }
+    bot.api_client.get_ticker.return_value = {"last": 2_390_512.0}
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = []
+    bot.db = Mock()
+    bot.db.load_all_positions.return_value = [
+        {
+            "order_id": "bootstrap_THB_BTC_1713085845",
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "amount": 0.0000605,
+            "entry_price": 2_390_512.0,
+            "stop_loss": 2_372_583.16,
+            "take_profit": 2_432_345.96,
+            "total_entry_cost": 144.626,
+            "timestamp": datetime(2026, 4, 14, 15, 10, 45),
+        },
+        {
+            "order_id": "ord-rec-1",
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "amount": 0.0000605,
+            "entry_price": 2_393_000.0,
+            "stop_loss": 2_375_052.5,
+            "take_profit": 2_434_877.5,
+            "total_entry_cost": 144.7765,
+            "timestamp": datetime(2026, 4, 14, 14, 31, 0),
+        },
+    ]
+    bot.db.get_trades.return_value = []
+    bot.db.get_trade_state.return_value = {
+        "symbol": "THB_BTC",
+        "state": TradeLifecycleState.IN_POSITION.value,
+        "entry_price": 2_390_512.0,
+        "total_entry_cost": 144.626,
+    }
+    bot._get_trading_pairs = Mock(return_value=["THB_BTC"])
+
+    with patch("trading_bot.time.sleep"):
+        bot._bootstrap_held_positions()
+
+    _, pos_data = bot.executor.register_tracked_position.call_args.args
+    assert pos_data["entry_price"] == 2_393_000.0
+    assert pos_data["filled_price"] == 2_393_000.0
+    assert pos_data["total_entry_cost"] == 144.7765
+
+
+def test_bootstrap_held_positions_uses_trade_history_when_only_bootstrap_context_exists():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.min_trade_value_thb = 15.0
+    bot.api_client = Mock()
+    bot.api_client.get_balances.return_value = {
+        "BTC": {"available": 0.0000605, "reserved": 0.0}
+    }
+    bot.api_client.get_ticker.return_value = {"last": 2_390_512.0}
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = []
+    bot.db = Mock()
+    bot.db.load_all_positions.return_value = [{
+        "order_id": "bootstrap_THB_BTC_1713085845",
+        "symbol": "THB_BTC",
+        "side": "buy",
+        "amount": 0.0000605,
+        "entry_price": 2_390_512.0,
+        "stop_loss": 2_372_583.16,
+        "take_profit": 2_432_345.96,
+        "total_entry_cost": 144.626,
+        "timestamp": datetime(2026, 4, 14, 15, 10, 45),
+    }]
+    bot.db.get_trades.return_value = [Mock(
+        pair="THB_BTC",
+        side="buy",
+        quantity=0.0000605,
+        price=2_393_000.0,
+        timestamp=datetime(2026, 4, 14, 14, 31, 0),
+    )]
+    bot.db.get_trade_state.return_value = {
+        "symbol": "THB_BTC",
+        "state": TradeLifecycleState.IN_POSITION.value,
+        "entry_price": 2_390_512.0,
+        "total_entry_cost": 144.626,
+    }
+    bot._get_trading_pairs = Mock(return_value=["THB_BTC"])
+
+    with patch("trading_bot.time.sleep"):
+        bot._bootstrap_held_positions()
+
+    _, pos_data = bot.executor.register_tracked_position.call_args.args
+    assert pos_data["entry_price"] == 2_393_000.0
+    assert pos_data["filled_price"] == 2_393_000.0
+    assert pos_data["total_entry_cost"] == 0.0000605 * 2_393_000.0
+
+
+def test_bootstrap_held_positions_uses_exchange_order_history_when_local_state_is_bootstrap_only():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.min_trade_value_thb = 15.0
+    bot.api_client = Mock()
+    bot.api_client.get_balances.return_value = {
+        "BTC": {"available": 0.0000605, "reserved": 0.0}
+    }
+    bot.api_client.get_ticker.return_value = {"last": 2_390_515.0}
+    bot.api_client.get_order_history.return_value = [{
+        "txn_id": "txn-real-btc-1",
+        "order_id": "ord-real-btc-1",
+        "side": "buy",
+        "rate": "2393000.01",
+        "amount": "145.15",
+        "fee": "0.37",
+        "ts": 1776151909388,
+    }]
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = []
+    bot.db = Mock()
+    bot.db.load_all_positions.return_value = [{
+        "order_id": "bootstrap_THB_BTC_1776154258",
+        "symbol": "THB_BTC",
+        "side": "buy",
+        "amount": 0.0000605,
+        "entry_price": 2_390_515.0,
+        "stop_loss": 2_372_586.14,
+        "take_profit": 2_432_349.01,
+        "total_entry_cost": 144.6261575,
+        "timestamp": datetime(2026, 4, 14, 15, 10, 58),
+    }]
+    bot.db.get_trades.return_value = [Mock(
+        pair="THB_BTC",
+        side="buy",
+        quantity=0.00000836,
+        price=2_293_139.40,
+        timestamp=datetime(2026, 4, 14, 14, 20, 0),
+    )]
+    bot.db.get_trade_state.return_value = {
+        "symbol": "THB_BTC",
+        "state": TradeLifecycleState.IN_POSITION.value,
+        "entry_price": 2_390_515.0,
+        "total_entry_cost": 144.6261575,
+        "entry_order_id": "bootstrap_THB_BTC_1776154258",
+    }
+    bot._get_trading_pairs = Mock(return_value=["THB_BTC"])
+
+    with patch("trading_bot.time.sleep"):
+        bot._bootstrap_held_positions()
+
+    _, pos_data = bot.executor.register_tracked_position.call_args.args
+    assert pos_data["entry_price"] == pytest.approx(2_393_000.01)
+    assert pos_data["filled_price"] == pytest.approx(2_393_000.01)
+    assert pos_data["total_entry_cost"] == pytest.approx(145.15)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "history_rows", "quantity", "expected_price", "expected_cost"),
+    [
+        (
+            "THB_BTC",
+            [
+                {"side": "buy", "rate": "10", "amount": "100", "fee": "0", "ts": 1},
+                {"side": "buy", "rate": "20", "amount": "100", "fee": "0", "ts": 2},
+                {"side": "sell", "rate": "30", "amount": "8", "fee": "0", "ts": 3},
+            ],
+            7.0,
+            200.0 / 15.0,
+            (200.0 / 15.0) * 7.0,
+        ),
+        (
+            "THB_DOGE",
+            [
+                {"side": "buy", "rate": "2.5", "amount": "25", "fee": "0", "ts": 1},
+                {"side": "buy", "rate": "3.5", "amount": "35", "fee": "0", "ts": 2},
+                {"side": "sell", "rate": "4.0", "amount": "4", "fee": "0", "ts": 3},
+            ],
+            16.0,
+            3.0,
+            48.0,
+        ),
+    ],
+)
+def test_exchange_history_context_uses_weighted_average_inventory(symbol, history_rows, quantity, expected_price, expected_cost):
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.api_client = Mock()
+    bot.api_client.get_order_history.return_value = history_rows
+
+    ctx = TradingBotOrchestrator._resolve_bootstrap_exchange_history_context(bot, symbol, quantity)
+
+    assert ctx["source"] == "exchange_history"
+    assert ctx["entry_price"] == pytest.approx(expected_price)
+    assert ctx["total_entry_cost"] == pytest.approx(expected_cost)
+
+
+@pytest.mark.parametrize("symbol", ["THB_BTC", "THB_DOGE", "THB_ETH"])
+def test_bootstrap_position_context_uses_weighted_average_trade_history(symbol):
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.api_client = Mock()
+    bot.api_client.get_order_history.return_value = []
+    bot.db = Mock()
+    bot.db.load_all_positions.return_value = [{
+        "order_id": f"bootstrap_{symbol}_1",
+        "symbol": symbol,
+        "side": "buy",
+        "amount": 7.0,
+        "entry_price": 12.0,
+        "total_entry_cost": 84.0,
+        "timestamp": datetime(2026, 4, 14, 12, 0, 0),
+    }]
+    bot.db.get_trades.return_value = [
+        Mock(pair=symbol, side="buy", quantity=10.0, price=10.0, timestamp=datetime(2026, 4, 14, 11, 0, 0)),
+        Mock(pair=symbol, side="buy", quantity=5.0, price=20.0, timestamp=datetime(2026, 4, 14, 11, 5, 0)),
+        Mock(pair=symbol, side="sell", quantity=8.0, price=25.0, timestamp=datetime(2026, 4, 14, 11, 10, 0)),
+    ]
+    bot.db.get_trade_state.return_value = None
+
+    ctx = TradingBotOrchestrator._resolve_bootstrap_position_context(bot, symbol, 7.0)
+
+    assert ctx["source"] == "trade_history"
+    assert ctx["entry_price"] == pytest.approx(200.0 / 15.0)
+    assert ctx["total_entry_cost"] == pytest.approx((200.0 / 15.0) * 7.0)
+
+
+def test_exchange_history_context_uses_default_history_window_limit():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.api_client = Mock()
+    bot.api_client.get_order_history.return_value = []
+    bot.config = {}
+
+    ctx = TradingBotOrchestrator._resolve_bootstrap_exchange_history_context(bot, "THB_BTC", 1.0)
+
+    assert ctx == {}
+    bot.api_client.get_order_history.assert_called_once_with("THB_BTC", limit=200)
+
+
+def test_lookup_order_history_status_uses_configured_history_window_limit():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.api_client = Mock()
+    bot.api_client.get_order_history.return_value = [{"id": "ord-123", "status": "filled"}]
+    bot.config = {"data": {"order_history_limit": 180}}
+
+    row = TradingBotOrchestrator._lookup_order_history_status(bot, "THB_BTC", "ord-123")
+
+    assert row == {"id": "ord-123", "status": "filled"}
+    bot.api_client.get_order_history.assert_called_once_with("THB_BTC", limit=180)
+
+
 def test_reconcile_tracked_positions_drops_manual_sold_coin_when_balance_is_zero():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.executor = Mock()
@@ -309,6 +598,68 @@ def test_scalping_mode_forces_time_exit_after_timeout():
     assert bot._submit_managed_exit.call_args.kwargs["triggered"] == "TIME"
 
 
+def test_scalping_time_exit_is_suppressed_when_net_profit_is_below_fee_gate():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [{
+        "order_id": "scalp_sol_1",
+        "symbol": "THB_SOL",
+        "side": "buy",
+        "amount": 1.0,
+        "entry_price": 100.0,
+        "stop_loss": 99.0,
+        "take_profit": 102.5,
+        "timestamp": datetime.now() - timedelta(minutes=31),
+        "total_entry_cost": 100.0,
+    }]
+    bot.api_client = Mock()
+    bot.api_client.get_ticker.return_value = {"last": 100.35}
+    bot._ws_client = None
+    bot.trading_pair = "THB_SOL"
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = Mock(state=TradeLifecycleState.IN_POSITION)
+    bot._submit_managed_exit = Mock()
+    bot._scalping_mode_enabled = True
+    bot._scalping_position_timeout_minutes = 30
+    bot._enforce_min_profit_gate_for_voluntary_exit = True
+    bot._min_voluntary_exit_net_profit_pct = 0.2
+
+    bot._check_positions_for_sl_tp()
+
+    bot._submit_managed_exit.assert_not_called()
+
+
+def test_voluntary_exit_gate_uses_position_side_for_pnl_math():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._enforce_min_profit_gate_for_voluntary_exit = True
+    bot._min_voluntary_exit_net_profit_pct = 0.2
+
+    # BUY from 100 -> 99 is a loss and should fail the gate.
+    allow_buy = bot._should_allow_voluntary_exit(
+        symbol="THB_TEST",
+        trigger="TIME",
+        entry_price=100.0,
+        exit_price=99.0,
+        amount=1.0,
+        total_entry_cost=100.0,
+        side="buy",
+    )
+    assert allow_buy is False
+
+    # SELL/short from 100 -> 99 is profitable after entry fee deduction and should pass.
+    allow_short = bot._should_allow_voluntary_exit(
+        symbol="THB_TEST",
+        trigger="TIME",
+        entry_price=100.0,
+        exit_price=99.0,
+        amount=1.0,
+        total_entry_cost=100.0,
+        side="sell",
+    )
+    assert allow_short is True
+
+
 def test_preserve_bootstrap_position_keeps_existing_entry_price_from_db():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
@@ -316,6 +667,7 @@ def test_preserve_bootstrap_position_keeps_existing_entry_price_from_db():
     bot.executor._orders_lock = threading.Lock()
     bot.executor._open_orders = {}
     bot.db = Mock()
+    bot._resolve_bootstrap_position_context = Mock(return_value={})
 
     local_pos = {
         "order_id": "bootstrap_THB_BTC_1",
@@ -349,11 +701,12 @@ def test_preserve_bootstrap_position_keeps_existing_entry_price_from_db():
 
 def test_preserve_bootstrap_position_rebuilds_missing_sl_tp_from_existing_entry_price():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
-    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0, "use_dynamic_sl_tp": False}}
     bot.executor = Mock()
     bot.executor._orders_lock = threading.Lock()
     bot.executor._open_orders = {}
     bot.db = Mock()
+    bot._resolve_bootstrap_position_context = Mock(return_value={})
 
     preserved = bot._preserve_bootstrap_position_from_balances(
         "bootstrap_THB_BTC_1",
@@ -380,6 +733,7 @@ def test_preserve_bootstrap_position_does_not_average_in_external_balance_increa
     bot.executor._orders_lock = threading.Lock()
     bot.executor._open_orders = {}
     bot.db = Mock()
+    bot._resolve_bootstrap_position_context = Mock(return_value={})
 
     preserved = bot._preserve_bootstrap_position_from_balances(
         "bootstrap_THB_BTC_1",
@@ -411,6 +765,7 @@ def test_preserve_bootstrap_position_returns_false_without_live_balance():
     bot.executor._orders_lock = threading.Lock()
     bot.executor._open_orders = {}
     bot.db = Mock()
+    bot._resolve_bootstrap_position_context = Mock(return_value={})
 
     preserved = bot._preserve_bootstrap_position_from_balances(
         "bootstrap_THB_BTC_1",
@@ -420,3 +775,41 @@ def test_preserve_bootstrap_position_returns_false_without_live_balance():
 
     assert preserved is False
     bot.db.save_position.assert_not_called()
+
+
+def test_preserve_bootstrap_position_upgrades_entry_from_exchange_history_context():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.executor = Mock()
+    bot.executor._orders_lock = threading.Lock()
+    bot.executor._open_orders = {}
+    bot.db = Mock()
+    bot._resolve_bootstrap_position_context = Mock(return_value={
+        "entry_price": 2_393_000.01,
+        "total_entry_cost": 145.15,
+        "source": "exchange_history",
+    })
+
+    preserved = bot._preserve_bootstrap_position_from_balances(
+        "bootstrap_THB_BTC_1",
+        {
+            "order_id": "bootstrap_THB_BTC_1",
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "amount": 0.0000279,
+            "filled_amount": 0.0000279,
+            "entry_price": 2_390_515.0,
+            "stop_loss": 2_372_586.14,
+            "take_profit": 2_432_349.01,
+            "total_entry_cost": 144.6261575,
+        },
+        {"BTC": {"available": 0.0000605, "reserved": 0.0, "total": 0.0000605}},
+    )
+
+    assert preserved is True
+    saved_payload = bot.db.save_position.call_args.args[0]
+    assert saved_payload["amount"] == pytest.approx(0.0000605)
+    assert saved_payload["filled_amount"] == pytest.approx(0.0000605)
+    assert saved_payload["entry_price"] == pytest.approx(2_393_000.01)
+    assert saved_payload["filled_price"] == pytest.approx(2_393_000.01)
+    assert saved_payload["total_entry_cost"] == pytest.approx(145.15)

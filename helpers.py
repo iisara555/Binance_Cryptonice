@@ -62,6 +62,9 @@ def format_bitkub_time(value: Any, fmt: str = "%H:%M:%S") -> str:
 
 # ── Price Fetching ──────────────────────────────────────────────────────────────
 
+_WS_TICK_MAX_AGE_SECONDS = 30.0  # fallback to REST if WS tick is older than this
+
+
 def get_current_price(
     symbol: str,
     api_client: Any = None,
@@ -70,7 +73,7 @@ def get_current_price(
     """
     Get the current market price for a symbol using fastest available source.
 
-    Priority: WebSocket cache → REST API ticker → None
+    Priority: WebSocket cache (fresh) → REST API ticker → stale WebSocket cache → None
 
     Args:
         symbol: Trading pair symbol (e.g. 'THB_BTC' or 'BTC_THB')
@@ -79,20 +82,28 @@ def get_current_price(
 
     Returns:
         (price, source) tuple where source is one of:
-        - 'ws' — live WebSocket data
+        - 'ws' — live WebSocket data (fresh)
+        - 'ws_stale' — WebSocket data older than _WS_TICK_MAX_AGE_SECONDS (used only when REST unavailable)
         - 'rest' — REST API fallback
         - 'none' — unavailable
     """
-    # Try WebSocket cache first
+    import time as _time
+
+    # Try WebSocket cache first — only accept fresh ticks
+    stale_ws_price: Optional[float] = None
     if ws_client is not None:
         try:
             # Direct import of module-level function — avoids circular deps
             from bitkub_websocket import get_latest_ticker
             tick = get_latest_ticker(symbol)
             if tick and getattr(tick, "last", 0) > 0:
-                return float(tick.last), "ws"
-        except Exception:
-            pass  # Fall through to REST
+                tick_age = _time.time() - getattr(tick, "timestamp", 0.0)
+                if tick_age <= _WS_TICK_MAX_AGE_SECONDS:
+                    return float(tick.last), "ws"
+                # Keep stale value as last-resort fallback only when REST is off
+                stale_ws_price = float(tick.last)
+        except Exception as exc:
+            logger.debug("WS ticker lookup failed for %s: %s", symbol, exc)
 
     # REST API fallback
     if api_client is not None:
@@ -104,6 +115,10 @@ def get_current_price(
                 return float(ticker.get("last", ticker.get("close", 0))), "rest"
         except Exception as e:
             logger.debug(f"REST ticker failed for {symbol}: {e}")
+
+    # Last resort: return stale WS price (better than None during reconnect window)
+    if stale_ws_price is not None:
+        return stale_ws_price, "ws_stale"
 
     return None, "none"
 
@@ -210,6 +225,12 @@ def extract_base_asset(symbol: str) -> str:
     return symbol.upper()
 
 
+def normalize_side_value(side: Any, default: str = "") -> str:
+    """Normalize side-like values to lowercase strings (e.g. 'buy'/'sell')."""
+    normalized = str(getattr(side, "value", side) or "").strip().lower()
+    return normalized or str(default or "").strip().lower()
+
+
 def symbol_for_api(symbol: str) -> str:
     """
     Format symbol for Bitkub API calls.
@@ -218,55 +239,6 @@ def symbol_for_api(symbol: str) -> str:
     lowercase. This ensures consistent uppercase format.
     """
     return normalize_symbol(symbol)
-
-
-# ── Logging Helpers ────────────────────────────────────────────────────────────
-
-def format_price(price: float, symbol: str = "THB") -> str:
-    """Format a price value with appropriate commas/decimals."""
-    base = extract_base_asset(symbol) if symbol else ""
-    if base in ("BTC", "ETH", "XAUT", "SOL"):
-        return f"{price:,.2f}"
-    return f"{price:,.0f}"
-
-
-def format_thb(value: float) -> str:
-    """Format THB amount with 2 decimal places."""
-    return f"{value:,.2f}"
-
-
-def format_crypto(qty: float, asset: str) -> str:
-    """Format crypto quantity with appropriate precision."""
-    decimals = {
-        "BTC": 8,
-        "ETH": 8,
-        "XAUT": 8,
-        "BNB": 8,
-        "SOL": 8,
-        "XRP": 0,
-        "ADA": 0,
-        "DOGE": 0,
-    }.get(asset.upper(), 4)
-    return f"{qty:.{decimals}f}"
-
-
-# ── Trade Value Calculations ──────────────────────────────────────────────────
-
-def calc_order_value(price: float, quantity: float, side: str) -> float:
-    """
-    Calculate order value in THB.
-
-    Args:
-        price: Order price per unit
-        quantity: Amount to trade
-        side: 'buy' or 'sell'
-
-    For BUY on Bitkub: quantity is already THB amount.
-    For SELL: value = price × quantity (in THB).
-    """
-    if side.lower() == "buy":
-        return quantity  # quantity is THB spent
-    return price * quantity
 
 
 def calc_net_pnl(
@@ -287,11 +259,12 @@ def calc_net_pnl(
     exit_fee = gross_exit * fee_pct
     total_fees = entry_fee + exit_fee
     net_exit = gross_exit - exit_fee
+    normalized_side = str(getattr(side, "value", side) or "").lower()
 
-    if side.lower() == "buy":
+    if normalized_side == "buy":
         net_pnl = net_exit - entry_cost
     else:
-        net_pnl = entry_cost - (net_exit + exit_fee)
+        net_pnl = (entry_cost - gross_exit) - entry_fee
 
     return {
         "entry_fee": entry_fee,

@@ -105,6 +105,25 @@ def test_submit_manual_market_buy_places_market_order_and_tracks_position(tmp_pa
     assert tracked_payload["remaining_amount"] == pytest.approx(0.0)
 
 
+def test_submit_manual_market_buy_rounds_down_request_amount(tmp_path):
+    app = _build_app(tmp_path)
+    app.api_client = Mock()
+    app.executor = Mock()
+    app.executor.execute_order.return_value = OrderResult(
+        success=True,
+        status=OrderStatus.FILLED,
+        order_id="buy-2",
+        filled_amount=0.00025,
+        filled_price=2_000_000.0,
+        remaining_amount=0.0,
+    )
+
+    app.submit_manual_market_buy("btc", 500.129)
+
+    order_request = app.executor.execute_order.call_args.args[0]
+    assert order_request.amount == pytest.approx(500.12)
+
+
 def test_submit_manual_market_buy_normalizes_pending_market_fill_into_coin_quantity(tmp_path):
     app = _build_app(tmp_path)
     app.api_client = Mock()
@@ -141,8 +160,8 @@ def test_track_manual_position_registers_real_cost_basis_with_sl_tp(tmp_path):
     assert result["symbol"] == "THB_BTC"
     assert result["entry_price"] == 1_500_000.0
     assert result["total_entry_cost"] == 1500.0
-    assert result["stop_loss"] == 1_447_500.0
-    assert result["take_profit"] == 1_590_000.0
+    assert result["stop_loss"] == 1_470_000.0
+    assert result["take_profit"] == 1_560_000.0
     app.executor.register_tracked_position.assert_called_once()
 
 
@@ -411,6 +430,76 @@ def test_cli_snapshot_uses_lightweight_status_during_live_dashboard(tmp_path):
     app.bot.get_status.assert_called_once_with(lightweight=True)
 
 
+def test_cli_snapshot_live_dashboard_falls_back_to_rest_for_position_prices(tmp_path):
+    app = _build_app(tmp_path)
+    app._live_dashboard_active = True
+    app.executor = Mock()
+    app.executor.get_open_orders.return_value = [
+        {
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "entry_price": 100.0,
+            "stop_loss": 98.0,
+            "take_profit": 104.0,
+        }
+    ]
+    app.bot = Mock()
+    app.bot.get_status.return_value = {
+        "mode": "full_auto",
+        "trading_pairs": ["THB_BTC"],
+        "strategy_engine": {"strategies": []},
+        "risk_summary": {},
+        "last_loop": None,
+        "multi_timeframe": {},
+    }
+    app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+    app._sample_api_latency = Mock(return_value=None)
+    app._get_cli_price = Mock(side_effect=[None, 105.0])
+    app._get_cli_position_price_hint = Mock(return_value=None)
+
+    snapshot = app.get_cli_snapshot()
+
+    position = snapshot["positions"][0]
+    assert position["current_price"] == 105.0
+    assert position["pnl_pct"] == pytest.approx(5.0)
+    assert app._get_cli_price.call_args_list[0].args == ("THB_BTC", False)
+    assert app._get_cli_price.call_args_list[1].args == ("THB_BTC", True)
+
+
+def test_cli_snapshot_uses_blank_pnl_when_position_price_unavailable(tmp_path):
+    app = _build_app(tmp_path)
+    app._live_dashboard_active = True
+    app.executor = Mock()
+    app.executor.get_open_orders.return_value = [
+        {
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "entry_price": 100.0,
+            "stop_loss": 98.0,
+            "take_profit": 104.0,
+        }
+    ]
+    app.bot = Mock()
+    app.bot.get_status.return_value = {
+        "mode": "full_auto",
+        "trading_pairs": ["THB_BTC"],
+        "strategy_engine": {"strategies": []},
+        "risk_summary": {},
+        "last_loop": None,
+        "multi_timeframe": {},
+    }
+    app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+    app._sample_api_latency = Mock(return_value=None)
+    app._get_cli_price = Mock(side_effect=[None, None])
+    app._get_cli_position_price_hint = Mock(return_value=None)
+
+    snapshot = app.get_cli_snapshot()
+
+    position = snapshot["positions"][0]
+    assert position["current_price"] is None
+    assert position["pnl_pct"] is None
+
+
 def test_help_includes_track_command(tmp_path):
     app = _build_app(tmp_path)
 
@@ -612,6 +701,17 @@ def test_render_signature_changes_when_visible_logs_change(tmp_path):
     sig_after = command_center._build_render_signature(snapshot)
 
     assert sig_before != sig_after
+
+
+def test_footer_size_handles_zero_terminal_height(tmp_path):
+    app = _build_app(tmp_path)
+    command_center = CLICommandCenter(app, console=Console(record=True, width=80, height=32))
+
+    compact_size = command_center._resolve_footer_size(80, 0, "compact")
+    verbose_size = command_center._resolve_footer_size(80, 0, "verbose")
+
+    assert compact_size >= 9
+    assert verbose_size >= 9
 
 
 def test_signal_alignment_reports_waiting_for_market_data(tmp_path):

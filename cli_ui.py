@@ -36,7 +36,8 @@ class _UILogBufferHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             self._sink(record)
-        except Exception:
+        except Exception as exc:
+            CLICommandCenter._safe_stderr_write(f"[cli_ui] log sink failure: {exc}\n")
             self.handleError(record)
 
 
@@ -86,6 +87,7 @@ class CLICommandCenter:
         self._log_handler: Optional[_UILogBufferHandler] = None
         self._muted_console_handlers: List[tuple[logging.Handler, int]] = []
         self._footer_size_cache: Dict[tuple[int, int, str], int] = {}
+        self._dropped_log_count = 0
         self._trend_history: Dict[str, deque[float]] = {
             "available_balance": deque(maxlen=24),
             "total_balance": deque(maxlen=24),
@@ -100,6 +102,13 @@ class CLICommandCenter:
             "top_allocation_pct": deque(maxlen=24),
             "cash_allocation_pct": deque(maxlen=24),
         }
+
+    @staticmethod
+    def _safe_stderr_write(message: str) -> None:
+        try:
+            sys.stderr.write(message)
+        except Exception:
+            return
 
     def start_log_capture(self) -> None:
         """Start mirroring runtime logs into an in-memory ring buffer for UI rendering."""
@@ -119,8 +128,8 @@ class CLICommandCenter:
         root = logging.getLogger()
         try:
             root.removeHandler(handler)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._safe_stderr_write(f"[cli_ui] failed to remove log capture handler: {exc}\n")
         self._log_handler = None
         self._restore_console_handlers()
 
@@ -146,8 +155,8 @@ class CLICommandCenter:
         for handler, original_level in self._muted_console_handlers:
             try:
                 handler.setLevel(original_level)
-            except Exception:
-                continue
+            except Exception as exc:
+                self._safe_stderr_write(f"[cli_ui] failed to restore console handler level: {exc}\n")
         self._muted_console_handlers.clear()
 
     @classmethod
@@ -175,8 +184,22 @@ class CLICommandCenter:
             rendered = f"{rendered[:147]}..."
 
         if not self._log_lock.acquire(blocking=False):
+            self._dropped_log_count += 1
+            if self._dropped_log_count == 1:
+                self._safe_stderr_write("[cli_ui] warning: dashboard log buffer busy; dropping log records until lock is available\n")
             return
         try:
+            if self._dropped_log_count > 0:
+                dropped_count = self._dropped_log_count
+                self._dropped_log_count = 0
+                self._log_lines.append(
+                    {
+                        "timestamp": timestamp,
+                        "level": "WARNING",
+                        "logger": "cli_ui",
+                        "message": f"Dropped {dropped_count} log record(s) due to dashboard lock contention",
+                    }
+                )
             self._log_lines.append(
                 {
                     "timestamp": timestamp,
@@ -346,7 +369,9 @@ class CLICommandCenter:
 
     def _resolve_footer_size(self, term_width: int, term_height: int, footer_mode: str) -> int:
         normalized_mode = str(footer_mode or "compact").lower()
-        cache_key = (int(term_width or 0), int(term_height or 0), normalized_mode)
+        safe_width = max(1, int(term_width or 120))
+        safe_height = max(1, int(term_height or 30))
+        cache_key = (safe_width, safe_height, normalized_mode)
         cached_size = self._footer_size_cache.get(cache_key)
         if cached_size is not None:
             return cached_size
@@ -354,9 +379,9 @@ class CLICommandCenter:
         min_content_rows = self._footer_content_budget(normalized_mode)
         min_panel_rows = min_content_rows + 2  # top/bottom panel borders
         if normalized_mode == "verbose":
-            target_size = max(8, min(11, term_height // 3))
+            target_size = max(8, min(11, safe_height // 3))
         else:
-            target_size = max(6, min(8, term_height // 4))
+            target_size = max(6, min(8, safe_height // 4))
 
         resolved = max(min_panel_rows, target_size)
         self._footer_size_cache[cache_key] = resolved

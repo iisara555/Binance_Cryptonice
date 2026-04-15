@@ -18,8 +18,9 @@ import sqlite3
 import threading
 import logging
 import textwrap
+import copy
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any, Callable, TypeVar, Mapping
+from typing import List, Optional, Dict, Any, Callable, TypeVar, Mapping, Tuple
 
 import pandas as pd
 
@@ -100,6 +101,10 @@ class Database:
 
         # Serialise writes at module level
         self._write_lock = threading.Lock()
+        self._candle_cache_lock = threading.Lock()
+        self._candle_cache: Dict[Tuple[str, str, Optional[datetime], Optional[datetime], Optional[int]], Tuple[float, pd.DataFrame]] = {}
+        self._candle_cache_ttl: float = 5.0
+        self._candle_cache_max_size: int = 256
 
         # Create all tables (new tables only — does NOT alter existing ones)
         Base.metadata.create_all(self.engine)
@@ -108,6 +113,62 @@ class Database:
         self._migrate_schema()
 
         _logger.info("Database initialized: %s (WAL mode enabled)", self.db_path)
+
+    def _clear_candle_cache(self) -> None:
+        with self._candle_cache_lock:
+            self._candle_cache.clear()
+
+    def _make_candle_cache_key(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        limit: Optional[int],
+    ) -> Tuple[str, str, Optional[datetime], Optional[datetime], Optional[int]]:
+        return (
+            str(symbol or "").upper(),
+            str(interval or "1h"),
+            _normalize_utc_naive_timestamp(start_time),
+            _normalize_utc_naive_timestamp(end_time),
+            int(limit) if limit is not None else None,
+        )
+
+    def _get_cached_candles(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        limit: Optional[int],
+    ) -> Optional[pd.DataFrame]:
+        key = self._make_candle_cache_key(symbol, interval, start_time, end_time, limit)
+        now = time.time()
+        with self._candle_cache_lock:
+            cached = self._candle_cache.get(key)
+            if not cached:
+                return None
+            cached_at, cached_frame = cached
+            if now - cached_at >= self._candle_cache_ttl:
+                self._candle_cache.pop(key, None)
+                return None
+            return cached_frame.copy(deep=True)
+
+    def _store_cached_candles(
+        self,
+        symbol: str,
+        interval: str,
+        start_time: Optional[datetime],
+        end_time: Optional[datetime],
+        limit: Optional[int],
+        frame: pd.DataFrame,
+    ) -> None:
+        key = self._make_candle_cache_key(symbol, interval, start_time, end_time, limit)
+        with self._candle_cache_lock:
+            if len(self._candle_cache) >= self._candle_cache_max_size:
+                oldest_key = min(self._candle_cache.items(), key=lambda item: item[1][0])[0]
+                self._candle_cache.pop(oldest_key, None)
+            self._candle_cache[key] = (time.time(), frame.copy(deep=True))
 
     # ── Retry helper ───────────────────────────────────────────────────────────
 
@@ -299,6 +360,17 @@ class Database:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_prices_pair_timeframe_timestamp ON prices (pair, timeframe, timestamp)"
         )
+        # Position & trade state indexes for runtime lookups
+        for stmt in [
+            "CREATE INDEX IF NOT EXISTS ix_positions_symbol ON positions (symbol)",
+            "CREATE INDEX IF NOT EXISTS ix_closed_trades_symbol_closed_at ON closed_trades (symbol, closed_at)",
+            "CREATE INDEX IF NOT EXISTS ix_trade_states_symbol ON trade_states (symbol)",
+            "CREATE INDEX IF NOT EXISTS ix_orders_symbol_timestamp ON orders (symbol, timestamp)",
+        ]:
+            try:
+                cursor.execute(stmt)
+            except Exception:
+                pass  # Table may not exist yet during initial migration
 
     def get_session(self) -> Session:
         """Get a new database session"""
@@ -384,7 +456,9 @@ class Database:
                 session.close()
 
         with self._write_lock:
-            return self._with_retry(_do_insert)
+            result = self._with_retry(_do_insert)
+        self._clear_candle_cache()
+        return result
 
     def insert_prices_batch(self, prices: List[Dict]) -> int:
         """
@@ -438,7 +512,9 @@ class Database:
                 conn.close()
 
         with self._write_lock:
-            return self._with_retry(_do_batch)
+            inserted = self._with_retry(_do_batch)
+        self._clear_candle_cache()
+        return inserted
 
     def get_latest_price(self, pair: str, timeframe: str = None) -> Optional[Price]:
         """Get the most recent price for a trading pair"""
@@ -506,6 +582,10 @@ class Database:
                     end_time: datetime = None,
                     limit: int = None) -> pd.DataFrame:
         """Return candle data as a pandas DataFrame for model training/backtesting."""
+        cached = self._get_cached_candles(symbol, interval, start_time, end_time, limit)
+        if cached is not None:
+            return cached
+
         session = self.get_session()
         try:
             query = session.query(Price).filter(Price.pair == symbol)
@@ -537,11 +617,14 @@ class Database:
             ]
             frame = pd.DataFrame(rows)
             if frame.empty:
+                self._store_cached_candles(symbol, interval, start_time, end_time, limit, frame)
                 return frame
 
             frame['timestamp'] = pd.to_datetime(frame['timestamp'], errors='coerce', utc=True).dt.tz_localize(None)
             frame = frame.dropna(subset=['timestamp'])
-            return frame.sort_values('timestamp').reset_index(drop=True)
+            frame = frame.sort_values('timestamp').reset_index(drop=True)
+            self._store_cached_candles(symbol, interval, start_time, end_time, limit, frame)
+            return frame.copy(deep=True)
         finally:
             session.close()
 
@@ -1373,7 +1456,10 @@ class Database:
                 session.close()
 
         with self._write_lock:
-            return self._with_retry(_do_cleanup)
+            deleted = self._with_retry(_do_cleanup)
+        if deleted.get("total", 0) > 0:
+            self._clear_candle_cache()
+        return deleted
 
     def cleanup_price_history_by_timeframe(self, retention_days_by_timeframe: Mapping[str, int]) -> Dict[str, int]:
         """Prune old candle rows using timeframe-specific retention windows."""

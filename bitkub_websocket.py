@@ -81,6 +81,7 @@ class BitkubWebSocket:
     CONNECTION_TIMEOUT = 15.0            # connection establishment timeout
     HEARTBEAT_WARNING_MULTIPLIER = 2.0   # warn after 60 seconds of silence
     HEARTBEAT_RECONNECT_MULTIPLIER = 4.0 # force reconnect only after extended silence
+    CONNECTION_RECYCLE_SECONDS = 55.0 * 60.0  # proactively recycle before exchange hourly reset
     
     def __init__(self, symbols: List[str], on_tick: Callable[[PriceTick], None]):
         """
@@ -111,6 +112,7 @@ class BitkubWebSocket:
         self._last_pong_time: float = time.time()
         self._last_activity_time: float = 0.0
         self._heartbeat_warning_emitted = False
+        self._recycle_requested = False
         
         # Circuit breaker
         self._consecutive_failures = 0
@@ -121,6 +123,7 @@ class BitkubWebSocket:
         self._stats = {
             'total_messages': 0,
             'reconnections': 0,
+            'proactive_recycles': 0,
             'last_error': None,
             'uptime_start': None,
         }
@@ -293,6 +296,7 @@ class BitkubWebSocket:
         self._last_pong_time = now
         self._last_activity_time = now
         self._heartbeat_warning_emitted = False
+        self._recycle_requested = False
         
         # Reset reconnection state
         self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
@@ -317,6 +321,12 @@ class BitkubWebSocket:
         if last_activity <= 0:
             return float('inf')
         return current_time - last_activity
+
+    def _connection_age_seconds(self, now: Optional[float] = None) -> float:
+        current_time = time.time() if now is None else now
+        if self._last_connection_time <= 0:
+            return 0.0
+        return max(0.0, current_time - self._last_connection_time)
 
     def _heartbeat_warning_threshold(self) -> float:
         return self.HEARTBEAT_INTERVAL * self.HEARTBEAT_WARNING_MULTIPLIER
@@ -366,8 +376,23 @@ class BitkubWebSocket:
                     if self.ws:
                         try:
                             self.ws.close()
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("[WS] Failed to close websocket during forced reconnect: %s", exc)
+                    break
+
+                connection_age = self._connection_age_seconds()
+                if connection_age >= self.CONNECTION_RECYCLE_SECONDS and not self._recycle_requested:
+                    self._recycle_requested = True
+                    self._stats['proactive_recycles'] += 1
+                    logger.info(
+                        "[WS] Proactive recycle at connection age %.1fs to avoid exchange-side hard disconnect",
+                        connection_age,
+                    )
+                    if self.ws:
+                        try:
+                            self.ws.close()
+                        except Exception as exc:
+                            logger.debug("[WS] Failed to close websocket during proactive recycle: %s", exc)
                     break
         
         self._heartbeat_thread = threading.Thread(
@@ -491,9 +516,11 @@ class BitkubWebSocket:
                 'state': self._state.value,
                 'total_messages': self._stats['total_messages'],
                 'reconnections': self._stats['reconnections'],
+                'proactive_recycles': self._stats['proactive_recycles'],
                 'consecutive_failures': self._consecutive_failures,
                 'uptime_seconds': uptime,
                 'last_error': self._stats['last_error'],
+                'connection_age_seconds': self._connection_age_seconds(),
                 'last_pong_ago': time.time() - self._last_pong_time,
                 'last_activity_ago': self._seconds_since_last_activity(),
             }

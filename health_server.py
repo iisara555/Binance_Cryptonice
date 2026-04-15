@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
@@ -18,6 +19,12 @@ def _normalize_health_path(path: str) -> str:
     if not text:
         return "/health"
     return text if text.startswith("/") else f"/{text}"
+
+
+def _health_metrics_paths(path: str) -> set[str]:
+    normalized = _normalize_health_path(path)
+    base_metrics_path = f"{normalized.rstrip('/')}/metrics" if normalized != "/" else "/metrics"
+    return {"/metrics", base_metrics_path}
 
 
 class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -42,10 +49,13 @@ class BotHealthServer:
 
     def _make_handler(self):
         server_ref = self
+        metrics_paths = _health_metrics_paths(server_ref.path)
+        health_paths = {server_ref.path, "/health"}
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path == "/metrics":
+                request_path = urlsplit(self.path).path or "/"
+                if request_path in metrics_paths:
                     try:
                         from metrics import get_metrics
                         metrics_data = get_metrics().export().encode("utf-8")
@@ -58,7 +68,7 @@ class BotHealthServer:
                     except ImportError:
                         pass
 
-                if self.path not in {server_ref.path, "/health"} and self.path != "/metrics":
+                if request_path not in health_paths and request_path not in metrics_paths:
                     self.send_response(404)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.end_headers()

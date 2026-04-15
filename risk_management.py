@@ -10,7 +10,7 @@ import logging
 import threading
 from pathlib import Path
 from datetime import datetime, date
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 
 from config import MIN_RISK_REWARD_RATIO
@@ -24,28 +24,34 @@ diag_logger = logging.getLogger("crypto-bot.signal_flow")
 # Financial Precision Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _safe_decimal(v: float) -> Decimal:
+    """Convert float to Decimal, treating NaN/Inf as zero."""
+    if v != v or v == float('inf') or v == float('-inf'):
+        return Decimal("0")
+    return Decimal(str(v))
+
 def precise_add(a: float, b: float) -> float:
     """Precise addition using Decimal to avoid float accumulation errors."""
-    return float(Decimal(str(a)) + Decimal(str(b)))
+    return float(_safe_decimal(a) + _safe_decimal(b))
 
 def precise_subtract(a: float, b: float) -> float:
     """Precise subtraction using Decimal."""
-    return float(Decimal(str(a)) - Decimal(str(b)))
+    return float(_safe_decimal(a) - _safe_decimal(b))
 
 def precise_multiply(a: float, b: float) -> float:
     """Precise multiplication using Decimal."""
-    return float(Decimal(str(a)) * Decimal(str(b)))
+    return float(_safe_decimal(a) * _safe_decimal(b))
 
 def precise_divide(a: float, b: float) -> float:
     """Precise division using Decimal with safety check."""
-    if b == 0:
+    if b == 0 or b != b:
         return 0.0
-    return float(Decimal(str(a)) / Decimal(str(b)))
+    return float(_safe_decimal(a) / _safe_decimal(b))
 
 def precise_round(value: float, decimals: int = 8) -> float:
     """Precise rounding for financial calculations."""
     quantize_str = '0.' + '0' * decimals
-    return float(Decimal(str(value)).quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
+    return float(_safe_decimal(value).quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
 
 def _diag(pair: str, step: str, result: str, reason: str = ""):
     """Emit a standardised [SIGNAL_FLOW] diagnostic line."""
@@ -90,8 +96,8 @@ MIN_ORDER_BUFFER = 1.10   # 10% safety buffer
 # These are NET percentages (after fees deducted)
 # SL: negative (loss), TP: positive (profit)
 DEFAULT_SL_TP = {
-    "low": {"stop_loss_pct": -3.5, "take_profit_pct": 6.0},    # BTC: wider SL/TP for crypto wick noise
-    "high": {"stop_loss_pct": -5.0, "take_profit_pct": 10.0},  # ALT: aggressive high-volatility profile
+    "low": {"stop_loss_pct": -2.0, "take_profit_pct": 4.0},    # BTC: tighter pair-specific default profile
+    "high": {"stop_loss_pct": -8.0, "take_profit_pct": 12.0},  # ALT: much wider stop for high-volatility pairs
 }
 
 
@@ -110,6 +116,37 @@ def get_default_sl_tp(symbol: str) -> tuple[float, float]:
     vol = classify_pair_volatility(symbol)
     d = DEFAULT_SL_TP[vol]
     return d["stop_loss_pct"], d["take_profit_pct"]
+
+
+def resolve_effective_sl_tp_percentages(
+    symbol: str,
+    risk_config: Optional[Dict[str, Any]] = None,
+) -> tuple[float, float]:
+    """
+    Resolve effective SL/TP percentages for a symbol.
+
+    When dynamic SL/TP is enabled, pair-specific defaults are the source of
+    truth for bootstrap/manual positions that do not have an ATR-derived stop.
+    Otherwise, fall back to configured global percentages.
+    """
+    default_sl_pct, default_tp_pct = get_default_sl_tp(symbol)
+    cfg = dict(risk_config or {})
+
+    if bool(cfg.get("use_dynamic_sl_tp", True)):
+        return float(default_sl_pct), float(default_tp_pct)
+
+    try:
+        stop_loss_pct = float(cfg.get("stop_loss_pct", default_sl_pct) or default_sl_pct)
+    except (TypeError, ValueError):
+        stop_loss_pct = float(default_sl_pct)
+    try:
+        take_profit_pct = float(cfg.get("take_profit_pct", default_tp_pct) or default_tp_pct)
+    except (TypeError, ValueError):
+        take_profit_pct = float(default_tp_pct)
+
+    stop_loss_pct = -abs(stop_loss_pct) if stop_loss_pct else float(default_sl_pct)
+    take_profit_pct = abs(take_profit_pct) if take_profit_pct else float(default_tp_pct)
+    return stop_loss_pct, take_profit_pct
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,15 +197,15 @@ def calculate_atr(
 
 @dataclass
 class RiskConfig:
-    max_risk_per_trade_pct: float = 4.0       # % of portfolio per trade (crypto-aggressive profile)
-    max_daily_loss_pct: float = 10.0          # % of portfolio per day
+    max_risk_per_trade_pct: float = 1.0       # % of portfolio per trade
+    max_daily_loss_pct: float = 5.0           # % of portfolio per day
     max_position_per_trade_pct: float = 10.0  # % of portfolio per single order
     max_drawdown_threshold_pct: float = 12.0  # hard block new BUY entries above this drawdown
     drawdown_soft_reduce_start_pct: float = 5.0  # start reducing risk above this drawdown
     min_drawdown_risk_multiplier: float = 0.35   # never reduce below this multiplier when soft-reducing
     drawdown_block_new_entries: bool = True
-    stop_loss_pct: float = -2.0               # % from entry price (deprecated/ignored)
-    take_profit_pct: float = 3.0              # % from entry price (deprecated/ignored)
+    stop_loss_pct: float = -5.0               # % from entry price (deprecated/ignored)
+    take_profit_pct: float = 12.0             # % from entry price (deprecated/ignored)
     initial_balance: float = 1000.0
     min_balance_threshold: float = 100.0
     max_open_positions: int = 5
@@ -176,7 +213,7 @@ class RiskConfig:
     cool_down_minutes: int = 5
     min_order_amount: float = DEFAULT_MIN_ORDER_THB
     # ATR-based SL settings
-    atr_multiplier: float = 3.0               # SL distance = ATR * this
+    atr_multiplier: float = 2.5               # SL distance = ATR * this
     atr_period: int = 14                      # ATR lookback period
     use_dynamic_sl_tp: bool = True            # Use pair-specific SL/TP
 
@@ -426,22 +463,21 @@ class RiskManager:
                 b = reward_dist / risk_dist # Risk-Reward Payout Ratio
                 # Full Kelly Fraction
                 kelly_pct = p - (q / b)
-                
-                # SRG-3 fix: clamp negative Kelly to zero.  A negative
-                # edge means the strategy is expected to lose money — the
-                # correct response is to refuse the bet entirely, not to
-                # fall through to the 0.1% floor which still risks capital
-                # on a negative-expectation trade.
-                kelly_pct = max(0.0, kelly_pct)
+                if kelly_pct <= 0.0:
+                    reason = (
+                        f"Non-positive Kelly edge: kelly={kelly_pct:.4f} "
+                        f"(p={p:.2f}, b={b:.2f})"
+                    )
+                    _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", reason)
+                    logger.info("[Kelly Sizing] Trade rejected due to non-positive edge: %s", reason)
+                    return RiskCheckResult(False, reason)
 
                 # Apply Half-Kelly (Fractional) for safety in crypto
                 half_kelly = kelly_pct / 2.0
                 
                 # Bound between min 0.1% and max_risk_per_trade_pct
                 # Max constraint: If Kelly wants to bet 5%, we still limit to 1.0% max
-                # When kelly_pct clamped to 0, half_kelly is 0 → dynamic_risk stays
-                # at effective_risk_pct (the institutional default), letting the
-                # downstream SL-based sizer decide the position.
+                # A zero Kelly edge (break-even) falls back to the minimum floor.
                 dynamic_risk = max(0.1, min(half_kelly * 100, effective_risk_pct))
                 
                 logger.debug(f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%")
@@ -586,22 +622,21 @@ class RiskManager:
         Args:
             entry_price: Position entry price
             atr_value: Current ATR value
-            direction: 'long' or 'short'
+            direction: 'long' only for spot mode
             risk_reward_ratio: TP distance = SL distance * this ratio
 
         Returns:
             (stop_loss_price, take_profit_price)
         """
         # Use precise calculations to avoid float accumulation errors
+        if str(direction or "long").lower() != "long":
+            return 0.0, 0.0
+
         sl_distance = precise_multiply(atr_value, self.config.atr_multiplier)
         tp_distance = precise_multiply(sl_distance, risk_reward_ratio)
 
-        if direction == "long":
-            sl = precise_round(precise_subtract(entry_price, sl_distance), 6)
-            tp = precise_round(precise_add(entry_price, tp_distance), 6)
-        else:  # short
-            sl = precise_round(precise_add(entry_price, sl_distance), 6)
-            tp = precise_round(precise_subtract(entry_price, tp_distance), 6)
+        sl = precise_round(precise_subtract(entry_price, sl_distance), 6)
+        tp = precise_round(precise_add(entry_price, tp_distance), 6)
 
         return sl, tp
 

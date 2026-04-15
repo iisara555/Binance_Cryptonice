@@ -48,6 +48,13 @@ def _make_aggregated_signal(symbol: str = "THB_BTC", sig_type: SignalType = Sign
     )
 
 
+def _attach_trigger_metadata(signal: AggregatedSignal, trigger_timestamp: str) -> AggregatedSignal:
+    raw_signal = Mock()
+    raw_signal.metadata = {"macd_cross_timestamp": trigger_timestamp}
+    signal.signals = [raw_signal]
+    return signal
+
+
 def _make_sg(config: dict | None = None) -> SignalGenerator:
     cfg = {
         "min_confidence": 0.5,
@@ -599,3 +606,43 @@ class TestBotSyncsStateBeforeSignals:
 
         bot._state_manager.confirm_idle_sell_signal.assert_called_once()
         bot._create_execution_plan_for_symbol.assert_called_once()
+
+    def test_duplicate_trigger_timestamp_is_not_reused_for_second_entry(self):
+        """A signal with the same MACD trigger timestamp should not be re-consumed."""
+        mock_api = Mock()
+        mock_api.get_balances.return_value = {"THB": {"available": 100_000.0}}
+        mock_api.is_circuit_open.return_value = False
+
+        mock_sg = Mock(spec=SignalGenerator)
+        buy_signal = _attach_trigger_metadata(
+            _make_aggregated_signal(sig_type=SignalType.BUY),
+            "2026-04-14 10:15:00",
+        )
+        mock_sg.generate_sniper_signal.return_value = [buy_signal]
+        mock_sg.check_risk.return_value = Mock(passed=True, reasons=[])
+
+        mock_rm = Mock()
+        mock_rm.trade_count_today = 0
+
+        mock_executor = Mock()
+        mock_executor.get_open_orders.return_value = []
+
+        bot = _build_bot(
+            config_overrides={"mode": "dry_run", "state_management": {"enabled": False}},
+            api_client=mock_api,
+            signal_generator=mock_sg,
+            risk_manager=mock_rm,
+            executor=mock_executor,
+        )
+        bot._last_consumed_signal_triggers = {"THB_BTC:buy": "2026-04-14 10:15:00"}
+        bot._create_execution_plan_for_symbol = Mock()
+        bot._process_dry_run = Mock()
+
+        data = _make_ohlcv(rows=250)
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
+             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
+             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+            bot._process_pair_iteration("THB_BTC")
+
+        mock_sg.check_risk.assert_not_called()
+        bot._create_execution_plan_for_symbol.assert_not_called()

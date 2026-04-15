@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
-from trade_executor import TradeExecutor, OrderSide, OrderResult
+from trade_executor import TradeExecutor, OrderSide, OrderRequest, OrderResult, OrderStatus
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -190,6 +190,107 @@ def test_oms_processing_is_cleared_when_replacement_thread_fails_to_start():
 
         # Either False (unknown order) or depends on impl — must not raise
         assert isinstance(result, bool)
+
+
+def test_place_order_buy_uses_rec_quantity_as_immediate_fill():
+    ex = _make_executor()
+    ex._min_order_thb = 15.0
+    ex.api_client.get_balances.return_value = {"THB": {"available": 200.0}}
+    ex.api_client.place_bid.return_value = {
+        "result": {
+            "id": "ord-rec-1",
+            "amt": 144.79,
+            "fee": 0.37,
+            "rat": 2_393_042.39,
+            "rec": 6.05e-05,
+        }
+    }
+
+    result = ex._place_order(
+        OrderRequest(
+            symbol="THB_BTC",
+            side=OrderSide.BUY,
+            amount=145.16,
+            price=2_393_042.39,
+            order_type="limit",
+        )
+    )
+
+    assert result.success is True
+    assert result.status == OrderStatus.FILLED
+    assert result.filled_amount == pytest.approx(6.05e-05)
+    assert result.remaining_amount == pytest.approx(0.0)
+
+
+def test_place_order_buy_rounds_down_thb_amount_to_two_decimals():
+    ex = _make_executor()
+    ex._min_order_thb = 15.0
+    ex.api_client.get_balances.return_value = {"THB": {"available": 200.0}}
+    ex.api_client.place_bid.return_value = {"result": {"id": "ord-buy-round-1"}}
+
+    result = ex._place_order(
+        OrderRequest(
+            symbol="THB_BTC",
+            side=OrderSide.BUY,
+            amount=145.169,
+            price=2_393_042.39,
+            order_type="limit",
+        )
+    )
+
+    assert result.success is True
+    assert ex.api_client.place_bid.call_args.kwargs["amount"] == pytest.approx(145.16)
+
+
+def test_place_order_rejects_malformed_place_bid_response():
+    ex = _make_executor()
+    ex._min_order_thb = 15.0
+    ex.api_client.get_balances.return_value = {"THB": {"available": 200.0}}
+    ex.api_client.place_bid.return_value = {"result": {}}
+
+    result = ex._place_order(
+        OrderRequest(
+            symbol="THB_BTC",
+            side=OrderSide.BUY,
+            amount=100.0,
+            price=2_393_042.39,
+            order_type="limit",
+        )
+    )
+
+    assert result.success is False
+    assert result.status == OrderStatus.ERROR
+    assert "missing order id" in result.message.lower()
+
+
+def test_check_order_status_rejects_missing_status_field():
+    ex = _make_executor()
+    ex.api_client.get_order_info.return_value = {"filled": 0.0, "avg_price": 0.0}
+
+    result = ex.check_order_status("ord-1", symbol="THB_BTC", side="buy")
+
+    assert result.success is False
+    assert result.status == OrderStatus.ERROR
+    assert "missing status" in result.message.lower()
+
+
+def test_place_order_sell_rounds_down_decimal_balance_to_exchange_precision():
+    ex = _make_executor()
+    ex.api_client.get_balances.return_value = {"BTC": {"available": "0.123456789"}}
+    ex.api_client.place_ask.return_value = {"result": {"id": "ord-sell-1"}}
+
+    result = ex._place_order(
+        OrderRequest(
+            symbol="THB_BTC",
+            side=OrderSide.SELL,
+            amount=0.123456789,
+            price=2_393_042.39,
+            order_type="limit",
+        )
+    )
+
+    assert result.success is True
+    assert ex.api_client.place_ask.call_args.kwargs["amount"] == pytest.approx(0.12345678)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

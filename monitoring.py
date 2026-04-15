@@ -145,7 +145,8 @@ class MonitoringService:
             # Simple API ping check
             ticker = self.api_client.get_ticker("THB_BTC")
             return ticker is not None
-        except Exception:
+        except Exception as exc:
+            logger.warning("API health check failed: %s", exc)
             return False
     
     def _check_executor_health(self) -> str:
@@ -178,8 +179,8 @@ class MonitoringService:
             if hasattr(self.api_client, 'circuit_breaker'):
                 cb_state = self.api_client.circuit_breaker.state
                 cb_failure_count = self.api_client.circuit_breaker._failure_count
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to read circuit breaker status: %s", exc)
         
         return {
             "running": self.running,
@@ -236,6 +237,64 @@ class ReconciliationState:
     def get_issues(self) -> List[str]:
         """Get all reconciliation issues."""
         return self._issues.copy()
+
+    @staticmethod
+    def _normalize_symbol(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if not text:
+            return ""
+        if text.startswith("THB_"):
+            return text
+        if text.endswith("_THB"):
+            return f"THB_{text.split('_', 1)[0]}"
+        return text
+
+    @classmethod
+    def _extract_symbol(cls, order: Any) -> str:
+        if not isinstance(order, dict):
+            return ""
+        return (
+            cls._normalize_symbol(order.get("symbol"))
+            or cls._normalize_symbol(order.get("_checked_symbol"))
+            or cls._normalize_symbol(order.get("pair"))
+            or cls._normalize_symbol(order.get("sym"))
+        )
+
+    @staticmethod
+    def _extract_order_id(order: Any) -> str:
+        if not isinstance(order, dict):
+            return ""
+        value = order.get("order_id") or order.get("id")
+        return str(value or "").strip()
+
+    def _fetch_exchange_orders(self, bot_positions: List[Any], api_client: Any) -> List[Any]:
+        symbols = sorted({self._extract_symbol(position) for position in bot_positions if self._extract_symbol(position)})
+        if not symbols:
+            symbols = [""]
+
+        remote_orders: List[Any] = []
+        seen_order_ids: set[str] = set()
+        for symbol in symbols:
+            try:
+                rows = api_client.get_open_orders(symbol or None)
+            except TypeError:
+                rows = api_client.get_open_orders()
+            rows = list(rows or [])
+            for row in rows:
+                order_id = self._extract_order_id(row)
+                if order_id and order_id in seen_order_ids:
+                    continue
+                if order_id:
+                    seen_order_ids.add(order_id)
+                remote_orders.append(row)
+        return remote_orders
+
+    def _replace_issues(self, issues: List[str]) -> None:
+        previous = set(self._issues)
+        self._issues = list(issues)
+        for issue in self._issues:
+            if issue not in previous:
+                logger.warning("Reconciliation issue: %s", issue)
     
     def check_positions(self, executor, api_client):
         """
@@ -244,18 +303,35 @@ class ReconciliationState:
         """
         try:
             # Get bot's view of positions
-            bot_positions = executor.get_open_orders()
-            
-            # Get exchange's view (simplified check)
-            # In production, this would call api_client.get_open_orders() or similar
-            
-            # For now, just ensure bot state is consistent
+            bot_positions = list(executor.get_open_orders() or [])
+            issues: List[str] = []
+
             if len(bot_positions) > 10:
-                self.add_issue(f"Unusually high position count: {len(bot_positions)}")
-            
-            # Auto-resume if no issues for a while
-            if self._paused and len(self._issues) == 0:
+                issues.append(f"Unusually high position count: {len(bot_positions)}")
+
+            remote_orders = self._fetch_exchange_orders(bot_positions, api_client)
+            bot_order_ids = {self._extract_order_id(order) for order in bot_positions if self._extract_order_id(order)}
+            remote_order_ids = {self._extract_order_id(order) for order in remote_orders if self._extract_order_id(order)}
+            if bot_order_ids and remote_order_ids:
+                missing_on_exchange = sorted(bot_order_ids - remote_order_ids)
+                unexpected_on_exchange = sorted(remote_order_ids - bot_order_ids)
+                if missing_on_exchange:
+                    issues.append(f"Bot orders missing on exchange: {', '.join(missing_on_exchange[:3])}")
+                if unexpected_on_exchange:
+                    issues.append(f"Exchange-only open orders detected: {', '.join(unexpected_on_exchange[:3])}")
+            elif len(bot_positions) != len(remote_orders):
+                issues.append(
+                    f"Open-order count mismatch: bot={len(bot_positions)} exchange={len(remote_orders)}"
+                )
+
+            self._replace_issues(issues)
+            if issues:
+                if not self._paused or self._pause_reason != issues[0]:
+                    self.pause(issues[0])
+            elif self._paused:
                 self.resume()
                 
         except Exception as e:
-            self.add_issue(f"Position check failed: {e}")
+            self._replace_issues([f"Position check failed: {e}"])
+            if not self._paused or self._pause_reason != self._issues[0]:
+                self.pause(self._issues[0])

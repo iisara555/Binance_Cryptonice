@@ -112,13 +112,9 @@ class TestSRG3NegativeKelly:
             max_position_per_trade_pct=10.0,
         ))
 
-    def test_negative_edge_does_not_reduce_below_institutional_floor(self):
+    def test_negative_edge_trade_is_rejected(self):
         """With win-rate=30% and payoff=1:1 the full Kelly is −0.40.
-        Before the fix, half_kelly=−0.20 → dynamic_risk = max(0.1, −20) = 0.1,
-        which still risked 0.1% on a negative-edge trade.
-        After the fix, kelly_pct is clamped to 0 → half_kelly = 0 → the
-        Kelly branch cannot push effective_risk_pct *below* the
-        institutional default."""
+        Negative Kelly implies negative expectancy and must be rejected."""
         rm = self._make_rm()
         entry = 100_000.0
         sl = 99_000.0   # risk distance 1 000
@@ -132,16 +128,12 @@ class TestSRG3NegativeKelly:
             take_profit_price=tp,
             confidence=confidence,
         )
-        assert result.allowed
-        # The suggested size must use the institutional default (1.0%) not 0.1%
-        # 1% of 1M = 10 000 THB risk budget; SL distance = 1%
-        # qty = 10 000 / 1 000 = 10;  investment = 10 * 100 000 = 1 000 000
-        # but hard cap = 10% * 1M = 100 000  →  min(1 000 000, 100 000) = 100 000
-        assert result.suggested_size == pytest.approx(100_000.0, rel=0.01)
+        assert not result.allowed
+        assert "Non-positive Kelly edge" in result.reason
 
-    def test_zero_edge_clamps_kelly_to_zero(self):
+    def test_zero_edge_trade_is_rejected(self):
         """With win-rate=50% and payoff=1:1, full Kelly = 0.0.
-        Half-Kelly = 0.0 → falls back to institutional default."""
+        Zero edge implies no statistical advantage and must be rejected."""
         rm = self._make_rm()
         entry = 100_000.0
         sl = 99_000.0
@@ -155,9 +147,8 @@ class TestSRG3NegativeKelly:
             take_profit_price=tp,
             confidence=confidence,
         )
-        assert result.allowed
-        # Same as above — 0 kelly → institutional default
-        assert result.suggested_size == pytest.approx(100_000.0, rel=0.01)
+        assert not result.allowed
+        assert "Non-positive Kelly edge" in result.reason
 
     def test_positive_edge_uses_kelly_sizing(self):
         """With win-rate=70% and payoff=2:1 the Kelly is strongly positive.
@@ -183,7 +174,7 @@ class TestSRG3NegativeKelly:
 
     def test_severely_negative_kelly_does_not_crash(self):
         """Extreme case: win_rate=5%, RR=0.5 → Kelly deeply negative.
-        Must not error or return negative size."""
+        Must be rejected."""
         rm = self._make_rm()
         entry = 100_000.0
         sl = 98_000.0     # risk = 2 000
@@ -197,5 +188,5 @@ class TestSRG3NegativeKelly:
             take_profit_price=tp,
             confidence=confidence,
         )
-        assert result.allowed
-        assert result.suggested_size > 0
+        assert not result.allowed
+        assert "Non-positive Kelly edge" in result.reason

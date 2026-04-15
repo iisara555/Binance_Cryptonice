@@ -17,6 +17,7 @@ import threading
 import json
 import shlex
 import re
+import atexit
 import faulthandler
 from datetime import datetime
 from os import PathLike
@@ -32,7 +33,7 @@ _termios = None
 try:
     import termios as _termios  # type: ignore[import-untyped]
 except ImportError:
-    pass
+    _termios = None
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
@@ -43,8 +44,9 @@ from config import BITKUB, TRADING, validate_config
 from api_client import BitkubClient, BitkubAPIError
 from data_collector import BitkubCollector
 from signal_generator import SignalGenerator, get_latest_signal_flow_snapshot
-from risk_management import RiskManager, RiskConfig, get_default_sl_tp
-from trade_executor import TradeExecutor
+from risk_management import RiskManager, RiskConfig, resolve_effective_sl_tp_percentages
+from trade_executor import TradeExecutor, _quantize_decimal
+from strategies.adaptive_router import AdaptiveStrategyRouter, ModeDecision
 from trading_bot import TradingBotOrchestrator
 from telegram_bot import TelegramBotHandler
 from alerts import AlertSystem
@@ -629,6 +631,7 @@ class TradingBotApp:
         self.executor: Optional[TradeExecutor] = None
         self.alert_sender = None
         self.telegram_handler: Optional[TelegramBotHandler] = None
+        self.adaptive_router: Optional[AdaptiveStrategyRouter] = None
         self.trading_disabled = threading.Event()  # Kill switch event
         self._shutdown_event = threading.Event()
         self._pair_reload_thread: Optional[threading.Thread] = None
@@ -669,6 +672,8 @@ class TradingBotApp:
         self._restart_requested = False
         self._restart_reason = ""
         self._restart_lock = threading.Lock()
+        self._last_mode_check_time = 0.0
+        self._current_strategy_mode = "standard"
     
 
     def _get_default_cli_chat_status(self) -> str:
@@ -807,8 +812,8 @@ class TradingBotApp:
         try:
             _, _, configured_assets = self._load_runtime_pairlist_document()
             known_pairs.extend(f"THB_{asset}" for asset in configured_assets)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[CLI] Failed to load runtime pair list document: %s", exc)
         known_pairs.extend(order.get("symbol") for order in self.list_active_orders() if order.get("symbol"))
         known_pairs.extend([
             "THB_BTC",
@@ -1323,7 +1328,7 @@ class TradingBotApp:
             OrderRequest(
                 symbol=symbol,
                 side=OrderSide.BUY,
-                amount=round(amount_value, 2),
+                amount=float(_quantize_decimal(amount_value, 2)),
                 price=0.0,
                 order_type="market",
             )
@@ -1366,20 +1371,8 @@ class TradingBotApp:
         if entry_price <= 0:
             return None, None
 
-        default_sl_pct, default_tp_pct = get_default_sl_tp(symbol)
         risk_cfg = (self.config.get("risk", {}) or {})
-
-        try:
-            stop_loss_pct = float(risk_cfg.get("stop_loss_pct", default_sl_pct) or default_sl_pct)
-        except (TypeError, ValueError):
-            stop_loss_pct = float(default_sl_pct)
-        try:
-            take_profit_pct = float(risk_cfg.get("take_profit_pct", default_tp_pct) or default_tp_pct)
-        except (TypeError, ValueError):
-            take_profit_pct = float(default_tp_pct)
-
-        stop_loss_pct = -abs(stop_loss_pct) if stop_loss_pct else float(default_sl_pct)
-        take_profit_pct = abs(take_profit_pct) if take_profit_pct else float(default_tp_pct)
+        stop_loss_pct, take_profit_pct = resolve_effective_sl_tp_percentages(symbol, risk_cfg)
 
         stop_loss = round(entry_price * (1 + (stop_loss_pct / 100.0)), 6)
         take_profit = round(entry_price * (1 + (take_profit_pct / 100.0)), 6)
@@ -1621,7 +1614,12 @@ class TradingBotApp:
                 risk_manager = getattr(bot_ref, 'risk_manager', None) if bot_ref else None
                 if bot_ref and risk_manager:
                     portfolio_state = bot_ref._get_portfolio_state() if hasattr(bot_ref, '_get_portfolio_state') else {}
-                    rs = risk_manager.get_risk_summary(portfolio_state.get('balance', 0))
+                    portfolio_value = (
+                        bot_ref._get_risk_portfolio_value(portfolio_state)
+                        if hasattr(bot_ref, '_get_risk_portfolio_value')
+                        else float(portfolio_state.get('total_balance', portfolio_state.get('balance', 0)) or 0)
+                    )
+                    rs = risk_manager.get_risk_summary(portfolio_value)
                     lines.append(f"Today: {rs.get('trades_today', 0)}/{rs.get('max_daily_trades', '-')} trades | Loss: {rs.get('daily_loss', 0):.2f}/{rs.get('daily_loss_max', 0):.2f} THB ({rs.get('daily_loss_pct', 0):.2f}%)")
                     lines.append(f"Cooldown active: {'Yes' if rs.get('cooling_down') else 'No'}")
                 return "\n".join(lines)
@@ -1804,15 +1802,15 @@ class TradingBotApp:
 
                     key = msvcrt.getwch()
                     if key in {"\x00", "\xe0"}:
+                        special_key = None
                         try:
                             special_key = msvcrt.getwch()
-                        except Exception:
-                            pass
-                        else:
-                            if special_key in {"H", "\x48"}:
-                                self._navigate_cli_history(-1)
-                            elif special_key in {"P", "\x50"}:
-                                self._navigate_cli_history(1)
+                        except Exception as exc:
+                            logger.debug("[CLI] Failed reading special key: %s", exc)
+                        if special_key in {"H", "\x48"}:
+                            self._navigate_cli_history(-1)
+                        elif special_key in {"P", "\x50"}:
+                            self._navigate_cli_history(1)
                         continue
                     if key == "\r":
                         with self._cli_chat_lock:
@@ -2295,21 +2293,33 @@ class TradingBotApp:
             side_value = position.get("side")
             side = str(getattr(side_value, "value", side_value) or "")
             entry_price = float(position.get("entry_price") or 0.0)
+            bootstrap_src = position.get("bootstrap_source") or ""
             current_price = (
                 self._get_cli_price(symbol)
                 if symbol and allow_rest_fallback
                 else self._get_cli_price(symbol, False) if symbol else None
             )
+            if (not current_price or current_price <= 0) and symbol and not allow_rest_fallback:
+                current_price = self._get_cli_price(symbol, True)
             # Never use entry_price as a current-price fallback in the positions panel.
             # That masks the preserved cost basis after restart and makes PnL read 0.00%.
             if (not current_price or current_price <= 0) and symbol:
                 current_price = self._get_cli_position_price_hint(symbol, include_entry_price=False)
-            pnl_pct = 0.0
+            pnl_pct = None
             if current_price and entry_price > 0:
                 if side.lower() == "sell":
                     pnl_pct = ((entry_price - current_price) / entry_price) * 100.0
                 else:
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+            if str(bootstrap_src) == "estimated_from_ticker":
+                pnl_pct = None
+
+            current_price_value: Optional[float] = None
+            try:
+                if current_price is not None:
+                    current_price_value = float(current_price)
+            except (TypeError, ValueError):
+                current_price_value = None
 
             # Resolve SL/TP: prefer executor value, fallback to state machine snapshot
             pos_sl = position.get("stop_loss")
@@ -2322,11 +2332,22 @@ class TradingBotApp:
                             pos_sl = snapshot.stop_loss if snapshot.stop_loss else pos_sl
                         if not pos_tp or float(pos_tp or 0) == 0:
                             pos_tp = snapshot.take_profit if snapshot.take_profit else pos_tp
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("[CLI] Failed loading persisted SL/TP for %s: %s", symbol, exc)
 
-            # Bootstrap source tag for dashboard clarity
-            bootstrap_src = position.get("bootstrap_source") or ""
+            sl_distance_pct = None
+            tp_distance_pct = None
+            if current_price_value is not None and current_price_value > 0.0:
+                if pos_sl is not None:
+                    try:
+                        sl_distance_pct = ((float(pos_sl) - current_price_value) / current_price_value) * 100.0
+                    except (TypeError, ValueError):
+                        sl_distance_pct = None
+                if pos_tp is not None:
+                    try:
+                        tp_distance_pct = ((float(pos_tp) - current_price_value) / current_price_value) * 100.0
+                    except (TypeError, ValueError):
+                        tp_distance_pct = None
 
             positions.append({
                 "symbol": symbol or "-",
@@ -2336,8 +2357,8 @@ class TradingBotApp:
                 "pnl_pct": pnl_pct,
                 "stop_loss": pos_sl,
                 "take_profit": pos_tp,
-                "sl_distance_pct": (((float(pos_sl) - float(current_price)) / float(current_price)) * 100.0) if current_price and pos_sl else None,
-                "tp_distance_pct": (((float(pos_tp) - float(current_price)) / float(current_price)) * 100.0) if current_price and pos_tp else None,
+                "sl_distance_pct": sl_distance_pct,
+                "tp_distance_pct": tp_distance_pct,
                 "bootstrap_source": bootstrap_src,
             })
         _warn_snapshot_step("positions", step_started)
@@ -2453,6 +2474,92 @@ class TradingBotApp:
             },
             "auth_degraded_reason": str(self.config.get("auth_degraded_reason") or ""),
         }
+
+    def _check_adaptive_mode_switch(self) -> None:
+        """Check if adaptive router recommends a mode switch and apply if needed."""
+        if not self.adaptive_router or not self.adaptive_router.enabled:
+            return
+        
+        try:
+            # Get current trading pair for analysis
+            trading_pairs = list(self.config.get("data", {}).get("pairs") or [])
+            if not trading_pairs:
+                return
+            
+            # Use first pair for analysis (could be extended to multi-pair analysis)
+            symbol = trading_pairs[0]
+            
+            # Get latest price data from collector if available
+            data = None
+            if self.collector and hasattr(self.collector, 'get_pair_candles'):
+                try:
+                    data = self.collector.get_pair_candles(symbol, "15m", limit=200)
+                except Exception:
+                    data = None
+            
+            # Run adaptive mode switching
+            decision: ModeDecision = self.adaptive_router.auto_switch_mode(symbol, data)
+            
+            if decision.should_switch:
+                new_mode = decision.recommended_mode
+                logger.warning(
+                    f"[AdaptiveRouter] MODE SWITCH TRIGGERED: {self._current_strategy_mode} → {new_mode} | "
+                    f"{decision.reasoning} | Confidence: {decision.confidence:.2f}"
+                )
+                
+                # Apply the new strategy mode
+                self._apply_new_strategy_mode(new_mode)
+            else:
+                logger.debug(f"[AdaptiveRouter] {decision.reasoning}")
+        
+        except Exception as e:
+            logger.warning(f"[AdaptiveRouter] Mode switch check failed: {e}", exc_info=True)
+
+    def _apply_new_strategy_mode(self, mode: str) -> None:
+        """Apply a new strategy mode by updating config and reloading strategy engine."""
+        mode = str(mode or "standard").lower()
+        
+        if mode == self._current_strategy_mode:
+            logger.debug(f"[AdaptiveRouter] Already in mode {mode}, skipping")
+            return
+        
+        try:
+            # Update config with new mode profile
+            strategy_mode_cfg = self.config.setdefault("strategy_mode", {})
+            strategy_mode_cfg["active"] = mode
+            self.config["active_strategy_mode"] = mode
+            
+            # Re-apply strategy mode profile
+            updated_config = _apply_strategy_mode_profile(self.config)
+            self.config = updated_config
+            self._current_strategy_mode = mode
+            
+            # Restart signal generator with new strategy config
+            if self.signal_generator:
+                strategies_config = self.config.get("strategies", {})
+                self.signal_generator = SignalGenerator({
+                    "min_confidence": strategies_config.get("min_confidence", 0.5),
+                    "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
+                    "max_open_positions": self.config.get("risk", {}).get("max_open_positions", 3),
+                    "max_daily_trades": self.config.get("risk", {}).get("max_daily_trades", 10),
+                    "scalping": strategies_config.get("scalping", {}),
+                    "sniper": strategies_config.get("sniper", {}) or strategies_config.get("scalping", {}),
+                })
+                if self.risk_manager and self.signal_generator.set_database:
+                    from database import get_database
+                    self.signal_generator.set_database(get_database())
+            
+            # Update trade executor config if needed
+            if self.executor:
+                risk_cfg = self.config.get("risk", {})
+                self.executor.retry_delay = risk_cfg.get("retry_delay_seconds", 5)
+                self.executor.order_timeout = risk_cfg.get("order_timeout_seconds", 30)
+            
+            logger.info(f"[AdaptiveRouter] Strategy mode switched to: {mode}")
+            logger.info(f"[AdaptiveRouter] Configuration updated with new strategy profile")
+        
+        except Exception as e:
+            logger.error(f"[AdaptiveRouter] Failed to apply new strategy mode {mode}: {e}", exc_info=True)
 
     def _emit_terminal_status(self) -> None:
         """Emit a compact status line for terminal-first operations."""
@@ -2695,6 +2802,10 @@ class TradingBotApp:
         """Initialize all components."""
         logger.info("กำลังเริ่มต้นระบบ Crypto Trading Bot...")
         logger.info(f"โหมดการทำงาน: {self.config.get('trading', {}).get('mode', 'semi_auto')}")
+        
+        # Extract current strategy mode from config
+        self._current_strategy_mode = str(self.config.get("active_strategy_mode") or "standard").lower()
+        logger.info(f"Initial strategy mode: {self._current_strategy_mode}")
 
         # Validate configuration before starting
         critical_errors, warnings = validate_config()
@@ -2835,6 +2946,8 @@ class TradingBotApp:
                 "retry_delay_seconds": execution_config.get("retry_delay_seconds", 5),
                 "order_timeout_seconds": execution_config.get("order_timeout_seconds", 30),
                 "order_type": execution_config.get("order_type", "limit"),
+                "trailing_stop_pct": execution_config.get("trailing_stop_pct", 1.0),
+                "trailing_activation_pct": execution_config.get("trailing_activation_pct", 0.5),
                 "allow_trailing_stop": state_config.get(
                     "allow_trailing_stop",
                     execution_config.get("allow_trailing_stop", True),
@@ -2895,6 +3008,18 @@ class TradingBotApp:
             multi_timeframe_config=self.config.get("multi_timeframe", {}),
         )
         logger.info("ระบบเก็บข้อมูลเริ่มทำงาน (Data Collector initialized)")
+        
+        # 8. Initialize Adaptive Strategy Router (auto mode switching)
+        self.adaptive_router = AdaptiveStrategyRouter(
+            config=self.config,
+            db=db,
+            api_client=self.api_client,
+        )
+        self.adaptive_router.set_current_mode(self._current_strategy_mode)
+        if self.adaptive_router.enabled:
+            logger.info("Adaptive Strategy Router initialized (auto mode switching enabled)")
+        else:
+            logger.info("Adaptive Strategy Router initialized (auto mode switching disabled in config)")
         
         logger.info("คอมโพเนนต์ทั้งหมดเริ่มต้นสำเร็จพร้อมใช้งาน")
         return True
@@ -2995,13 +3120,6 @@ class TradingBotApp:
                     last_render_signature: Optional[str] = None
                     _render_failure_count = 0
                     while self.bot and self.bot.running:
-                        from api_client import SHOULD_SHUTDOWN as _shutdown_flag
-                        if _shutdown_flag:
-                            logger.critical(
-                                "🚨 Main thread detected SHOULD_SHUTDOWN — "
-                                "initiating graceful exit"
-                            )
-                            break
                         now = time.time()
                         if now >= next_refresh_at:
                             try:
@@ -3026,39 +3144,29 @@ class TradingBotApp:
                         if self._cli_command_thread and not self._cli_command_thread.is_alive():
                             self._cli_command_thread = None
                             self._start_cli_command_listener()
+                        # Check for auto mode switch
+                        self._check_adaptive_mode_switch()
                         time.sleep(1)
                 # Fallback: if Live dashboard broke, continue running without it
                 if self.bot and self.bot.running and _render_failure_count >= 10:
                     self._live_dashboard_active = False
                     logger.info("Falling back to plain log mode (no Live dashboard)")
                     while self.bot and self.bot.running:
-                        from api_client import SHOULD_SHUTDOWN as _shutdown_flag
-                        if _shutdown_flag:
-                            logger.critical(
-                                "🚨 Main thread detected SHOULD_SHUTDOWN — "
-                                "initiating graceful exit"
-                            )
-                            break
                         now = time.time()
                         if now - self._last_status_log_at >= self._status_interval_seconds:
                             self._emit_terminal_status()
                             self._last_status_log_at = now
+                        self._check_adaptive_mode_switch()
                         time.sleep(1)
             else:
                 self.start(register_signal_handlers=register_signal_handlers)
                 self._start_cli_command_listener()
                 while self.bot and self.bot.running:
-                    from api_client import SHOULD_SHUTDOWN as _shutdown_flag
-                    if _shutdown_flag:
-                        logger.critical(
-                            "🚨 Main thread detected SHOULD_SHUTDOWN — "
-                            "initiating graceful exit"
-                        )
-                        break
                     now = time.time()
                     if now - self._last_status_log_at >= self._status_interval_seconds:
                         self._emit_terminal_status()
                         self._last_status_log_at = now
+                    self._check_adaptive_mode_switch()
                     time.sleep(1)
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
@@ -3122,6 +3230,9 @@ def main():
             lock_info.get("pid"), lock_info.get("started_at"),
         )
         sys.exit(1)
+
+    # Guarantee lock release even on abnormal exits (uncaught exceptions, os._exit)
+    atexit.register(release_bot_lock)
 
     # Proactive IP check — detect changes before Bitkub rejects us
     try:

@@ -27,7 +27,7 @@ from typing import Optional, Dict, Any, List
 
 import requests
 
-from alerts import TelegramSender
+from alerts import TelegramSender, escape_html
 
 try:
     from bitkub_websocket import get_latest_ticker
@@ -85,8 +85,8 @@ class TelegramBotHandler:
         app_ref,
         bot_token: str,
         chat_id: str,
-        pairs: List[str] = None,
-        trading_disabled: threading.Event = None,
+        pairs: Optional[List[str]] = None,
+        trading_disabled: Optional[threading.Event] = None,
     ):
         self.app_ref = app_ref
         self.bot_token = bot_token
@@ -244,19 +244,21 @@ class TelegramBotHandler:
         cq_id = cq.get("id")
 
         if data == "kill_confirm":
-            try:
-                self.telegram.answer_callback(cq_id)
-            except Exception as e:
-                logger.warning("Failed to answer callback kill_confirm: %s", e)
+            if cq_id is not None:
+                try:
+                    self.telegram.answer_callback(str(cq_id))
+                except Exception as e:
+                    logger.warning("Failed to answer callback kill_confirm: %s", e)
             threading.Thread(
                 target=self._execute_kill, args=(msg,),
                 daemon=True, name="emergency-kill"
             ).start()
         elif data == "kill_cancel":
-            try:
-                self.telegram.answer_callback(cq_id)
-            except Exception as e:
-                logger.warning("Failed to answer callback kill_cancel: %s", e)
+            if cq_id is not None:
+                try:
+                    self.telegram.answer_callback(str(cq_id))
+                except Exception as e:
+                    logger.warning("Failed to answer callback kill_cancel: %s", e)
             if message_id:
                 self.telegram.edit_message(
                     message_id,
@@ -264,10 +266,11 @@ class TelegramBotHandler:
                     reply_markup=no_keyboard(),
                 )
         elif data == "resume_confirm":
-            try:
-                self.telegram.answer_callback(cq_id)
-            except Exception as e:
-                logger.warning("Failed to answer callback resume_confirm: %s", e)
+            if cq_id is not None:
+                try:
+                    self.telegram.answer_callback(str(cq_id))
+                except Exception as e:
+                    logger.warning("Failed to answer callback resume_confirm: %s", e)
             self._execute_resume(msg)
 
     # ── Command handlers ───────────────────────────────────────────────────────
@@ -355,7 +358,7 @@ class TelegramBotHandler:
         bot_status = bot_ref.get_status() if bot_ref and hasattr(bot_ref, "get_status") else {}
         degraded_info = bot_status.get("auth_degraded") or {}
         auth_degraded = bool(degraded_info.get("active", False))
-        auth_reason = str(degraded_info.get("reason") or "")
+        auth_reason = escape_html(degraded_info.get("reason") or "")
         uptime_secs = time.time() - self._start_time
         hours, rem = divmod(int(uptime_secs), 3600)
         mins, secs = divmod(rem, 60)

@@ -355,6 +355,8 @@ class TestRiskManagement:
         # Should return negative SL and positive TP percentages
         assert sl_pct < 0  # SL should be negative (loss)
         assert tp_pct > 0  # TP should be positive (profit)
+        assert sl_pct == -2.0
+        assert tp_pct == 4.0
         
         # Test for ALT (high volatility)
         sl_pct_alt, tp_pct_alt = get_default_sl_tp('THB_ETH')
@@ -362,6 +364,8 @@ class TestRiskManagement:
         # ALT should have wider SL/TP than BTC
         assert abs(sl_pct_alt) >= abs(sl_pct)  # Wider SL for ALT
         assert tp_pct_alt >= tp_pct  # Wider TP for ALT
+        assert sl_pct_alt == -8.0
+        assert tp_pct_alt == 12.0
     
     def test_sl_tp_with_atr(self):
         """Test ATR-based SL/TP calculation."""
@@ -386,6 +390,38 @@ class TestRiskManagement:
         
         assert abs(sl - expected_sl) < 10
         assert abs(tp - expected_tp) < 10
+
+    def test_resolve_effective_sl_tp_percentages_prefers_dynamic_pair_defaults(self):
+        """Dynamic SL/TP should preserve pair-specific defaults even if global risk values differ."""
+        from risk_management import resolve_effective_sl_tp_percentages
+
+        sl_pct, tp_pct = resolve_effective_sl_tp_percentages(
+            'THB_BTC',
+            {
+                'use_dynamic_sl_tp': True,
+                'stop_loss_pct': 1.0,
+                'take_profit_pct': 2.5,
+            },
+        )
+
+        assert sl_pct == -2.0
+        assert tp_pct == 4.0
+
+    def test_resolve_effective_sl_tp_percentages_uses_config_when_dynamic_disabled(self):
+        """Configured fixed SL/TP should be used when dynamic SL/TP is disabled."""
+        from risk_management import resolve_effective_sl_tp_percentages
+
+        sl_pct, tp_pct = resolve_effective_sl_tp_percentages(
+            'THB_BTC',
+            {
+                'use_dynamic_sl_tp': False,
+                'stop_loss_pct': 1.0,
+                'take_profit_pct': 2.5,
+            },
+        )
+
+        assert sl_pct == -1.0
+        assert tp_pct == 2.5
 
 
 # ============================================================================
@@ -682,6 +718,33 @@ class TestSignalGenerator:
         assert signals[0].signals[0].metadata['macd_cross_bar'] == 'current'
         assert signals[0].signals[0].metadata['macd_cross_direction'] == 'buy'
 
+    def test_sniper_accepts_exact_minimum_bar_count(self):
+        """Exactly 210 confirmed bars should not be rejected as insufficient data."""
+        from signal_generator import SignalGenerator
+        from strategy_base import SignalType
+
+        data = self._make_sniper_test_data(n=210)
+        generator = SignalGenerator()
+
+        full_macd = pd.Series([-2.0, -1.0, 1.0])
+        full_signal = pd.Series([-1.5, -0.5, 0.5])
+        confirmed_macd = pd.Series([-2.0, -1.0, 1.0])
+        confirmed_signal = pd.Series([-1.5, -0.5, 0.5])
+
+        def macd_side_effect(prices, fast=12, slow=26, signal=9):
+            if len(prices) == len(data):
+                return full_macd, full_signal, full_macd - full_signal
+            if len(prices) == len(data) - 1:
+                return confirmed_macd, confirmed_signal, confirmed_macd - confirmed_signal
+            raise AssertionError(f"Unexpected MACD input length: {len(prices)}")
+
+        with patch('signal_generator.TechnicalIndicators.calculate_macd', side_effect=macd_side_effect), \
+             patch('signal_generator.TechnicalIndicators.calculate_atr', return_value=pd.Series(np.full(len(data), 5.0))):
+            signals = generator.generate_sniper_signal(data=data, symbol='THB_BTC')
+
+        assert len(signals) == 1
+        assert signals[0].signal_type is SignalType.BUY
+
     def test_sniper_accepts_confirmed_closed_candle_macd_crossunder(self):
         """A MACD crossunder on confirmed closed candles must trigger a SELL."""
         from signal_generator import SignalGenerator
@@ -738,6 +801,34 @@ class TestSignalGenerator:
         assert len(signals) == 1
         assert signals[0].signal_type is SignalType.SELL
         assert signals[0].signals[0].metadata['macd_cross_bar'] == '2_bars_ago'
+
+    def test_sniper_generation_delegates_to_registered_strategy(self):
+        from signal_generator import SignalGenerator
+        from strategy_base import SignalType, TradingSignal
+
+        data = self._make_sniper_test_data()
+        generator = SignalGenerator()
+        delegated_signal = TradingSignal(
+            strategy_name='sniper_dual_ema_macd',
+            symbol='THB_BTC',
+            signal_type=SignalType.BUY,
+            confidence=1.0,
+            price=float(data['close'].iloc[-1]),
+            stop_loss=95.0,
+            take_profit=110.0,
+            risk_reward_ratio=3.0,
+            metadata={'trade_rationale': '[Sniper] delegated'},
+        )
+
+        generator.strategies['sniper'].generate_signal = Mock(return_value=delegated_signal)
+        generator.strategies['sniper'].get_last_diagnostics = Mock(return_value={})
+
+        signals = generator.generate_sniper_signal(data=data, symbol='THB_BTC')
+
+        generator.strategies['sniper'].generate_signal.assert_called_once_with(data, 'THB_BTC')
+        assert len(signals) == 1
+        assert signals[0].signals[0] is delegated_signal
+        assert signals[0].trade_rationale == '[Sniper] delegated'
 
 
 # ============================================================================
@@ -837,13 +928,7 @@ class TestHelpers:
     
     def test_datetime_utilities(self):
         """Test datetime utilities."""
-        from helpers import format_price, format_thb, format_crypto
-        
-        # Test price formatting
-        assert isinstance(format_price(100000), str)
-        assert isinstance(format_thb(1000.50), str)
-        assert isinstance(format_crypto(0.00123456, 'BTC'), str)
-        
+
         # Test that datetime objects work correctly
         now = datetime.now()
         assert isinstance(now, datetime)

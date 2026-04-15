@@ -54,8 +54,8 @@ strategy_mode:
     confirmation_window_seconds: 90
     pending_buy_timeout_seconds: 60
     pending_sell_timeout_seconds: 60
-    stop_loss_pct: 0.75
-    take_profit_pct: 1.75
+    stop_loss_pct: 1.0
+    take_profit_pct: 2.5
     position_timeout_minutes: 30
     max_trades_per_day: 50
     min_time_between_trades_minutes: 2
@@ -64,6 +64,34 @@ strategy_mode:
     max_risk_per_trade_pct: 1.0
     position_risk_per_trade_pct: 0.75
     position_size_cap_pct: 15.0
+
+# Adaptive Strategy Router - Auto Mode Switching
+auto_mode_switch:
+  enabled: false                      # Set to true to enable auto mode switching
+  check_interval_seconds: 300         # Check market every 5 minutes
+  min_switch_interval_seconds: 1800   # Min 30 minutes between mode switches (hysteresis)
+  persistence_threshold: 3            # Mode recommendation must persist 3 checks before switching
+
+# Market Analysis Configuration  
+market_analysis:
+  adx_thresholds:
+    strong_trend: 40                  # ADX > 40 = strong trend
+    weak_trend: 25                    # ADX > 25 = weak trend
+  
+  volatility_thresholds:
+    high_pct: 3.0                     # ATR > 3% of price = high volatility
+    low_pct: 1.0                      # ATR < 1% of price = low volatility
+  
+  volume_thresholds:
+    high_ratio: 1.5                   # Current volume / 20d avg > 1.5 = high volume
+    low_ratio: 0.7                    # Current volume / 20d avg < 0.7 = low volume
+
+# BTC Correlation Analysis
+btc_correlation:
+  enabled: true                       # Include BTC correlation in mode decisions
+  lookback_bars: 100                  # Bars to use for correlation calculation
+  min_correlation_strong: 0.7         # > 0.7 = strong BTC correlation
+  min_correlation_moderate: 0.5       # > 0.5 = moderate BTC correlation
 
 # Multi-Timeframe Analysis Settings
 multi_timeframe:
@@ -94,16 +122,16 @@ multi_timeframe:
 
 # Risk Management
 risk:
-  max_risk_per_trade_pct: 2.0        # Max risk per trade for high-volatility crypto profile
-  max_daily_loss_pct: 10.0           # Higher daily drawdown budget for crypto volatility
-  max_position_per_trade_pct: 20.0   # Max position size (% of portfolio)
+  max_risk_per_trade_pct: 1.0        # 1% risk per trade
+  max_daily_loss_pct: 5.0            # 5% max daily loss
+  max_position_per_trade_pct: 10.0   # Max 10% of portfolio per trade
   max_open_positions: 4              # Maximum open positions (adjust based on active pairs)
   max_daily_trades: 50               # Maximum trades per day
-  stop_loss_pct: 4.5                 # Wider stop loss to survive deep wick noise
-  take_profit_pct: 10.0              # Target larger moves during momentum expansions
+  stop_loss_pct: 5.0                 # 5% stop loss for crypto volatility
+  take_profit_pct: 12.0              # 12% take profit (R:R ~= 2.4)
   cool_down_minutes: 5               # Cooldown between trades
   use_dynamic_sl_tp: true            # Enable pair-specific SL/TP percentages
-  atr_multiplier: 3.0               # 3x ATR for wider SL/TP in high-vol regimes
+  atr_multiplier: 2.5                # 2.5x ATR for dynamic SL/TP
   atr_period: 14                     # ATR lookback period
 
 # Strategies
@@ -124,8 +152,8 @@ strategies:
     bollinger_period: 20
     bollinger_std: 2.0
     min_entry_confidence: 0.30
-    stop_loss_pct: 0.75
-    take_profit_pct: 1.75
+    stop_loss_pct: 1.0
+    take_profit_pct: 2.5
     position_timeout_minutes: 30
 
 # Trading Strategy Parameters (NEW - Easy to edit)
@@ -199,6 +227,10 @@ execution:
   retry_attempts: 3                  # Number of retry attempts for failed orders
   retry_delay_seconds: 5             # Delay between retries
   order_timeout_seconds: 30          # Timeout for order execution
+  enforce_min_profit_gate_for_voluntary_exit: true  # Block TIME/SIGSELL exits until net profit clears the threshold below
+  min_voluntary_exit_net_profit_pct: 0.2  # Minimum net profit % after fees for TIME/SIGSELL exits
+  trailing_activation_pct: 3.0       # เริ่ม ratchet trailing stop เมื่อกำไรอย่างน้อย 3.0%
+  trailing_stop_pct: 1.5             # ลาก stop loss ตามหลังราคาปัจจุบัน 1.5%
   allow_trailing_stop: true          # อนุญาตให้ระบบประมวลผลการเลื่อนจุดตัดขาดทุนได้
 
 # Execution State Machine

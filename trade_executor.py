@@ -9,8 +9,9 @@ import time
 import logging
 import threading
 import hashlib
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -24,6 +25,27 @@ BITKUB_FEE_PCT = 0.0025
 
 # Late-bound WS import (avoids circular dep at module load)
 _ws_mod = None
+
+
+def _to_decimal(value: Any) -> Decimal:
+    if isinstance(value, Decimal):
+        if value.is_nan() or value.is_infinite():
+            return Decimal("0")
+        return value
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def _quantize_decimal(value: Any, decimals: int) -> Decimal:
+    digits = max(0, int(decimals or 0))
+    quantizer = Decimal("1") if digits == 0 else Decimal("1").scaleb(-digits)
+    return _to_decimal(value).quantize(quantizer, rounding=ROUND_DOWN)
 
 
 def _ws_ticker(symbol: str):
@@ -221,7 +243,7 @@ class TradeExecutor:
         "XRP": 0, "ADA": 0, "DOGE": 0, "THB": 2, "SHIB": 0, "USDT": 2,
     }
 
-    def _format_balance_for_display(self, symbol: str, amount: float) -> str:
+    def _format_balance_for_display(self, symbol: str, amount: Any) -> str:
         """Format balance with 8 decimal places for crypto, 2 for THB.
         Keep all decimals to avoid losing value opportunities.
         
@@ -232,10 +254,18 @@ class TradeExecutor:
         Returns:
             Formatted string with full decimal places
         """
-        # Use 8 decimals for crypto (BTC, ETH, etc.), 2 for THB/USDT
+        amount_dec = _to_decimal(amount)
         if symbol.upper() in ("THB", "USDT"):
-            return f"{amount:.2f}"
-        return f"{amount:.8f}".rstrip('0').rstrip('.')
+            return f"{amount_dec:.2f}"
+        return f"{amount_dec:.8f}".rstrip('0').rstrip('.')
+
+    def _get_decimal_balance(self, balances: Dict[str, Dict[str, Any]], asset: str) -> Decimal:
+        upper_asset = asset.upper()
+        lower_asset = asset.lower()
+        asset_data = balances.get(upper_asset) or balances.get(lower_asset) or {}
+        if not isinstance(asset_data, dict):
+            return _to_decimal(asset_data)
+        return _to_decimal(asset_data.get("available", 0))
 
     def _get_balance(self, balances: Dict[str, Dict[str, float]], asset: str) -> float:
         """Get balance for an asset, trying both uppercase and lowercase keys.
@@ -249,12 +279,58 @@ class TradeExecutor:
         Returns:
             The available balance for the asset, or 0.0 if not found
         """
-        upper_asset = asset.upper()
-        lower_asset = asset.lower()
-        
-        # Try uppercase first, then lowercase
-        asset_data = balances.get(upper_asset) or balances.get(lower_asset) or {}
-        return float(asset_data.get("available", 0))
+        return float(self._get_decimal_balance(balances, asset))
+
+    def _invalid_api_response(self, context: str, detail: str) -> OrderResult:
+        logger.error("[%s] Invalid API response: %s", context, detail)
+        return OrderResult(
+            success=False,
+            status=OrderStatus.ERROR,
+            message=f"{context}: {detail}",
+        )
+
+    def _normalize_side(self, side: Any, default: str = "") -> str:
+        """Normalize side to lowercase string ('buy'/'sell') when possible."""
+        if isinstance(side, Enum):
+            side = side.value
+        if isinstance(side, str):
+            return side.lower()
+        return str(side or default).lower()
+
+    def _to_order_side(self, side: Any, default: OrderSide = OrderSide.SELL) -> OrderSide:
+        """Convert side-like values to OrderSide enum with a deterministic fallback."""
+        return OrderSide.BUY if self._normalize_side(side) == "buy" else default
+
+    def _extract_base_asset(self, symbol: Optional[str]) -> str:
+        """Extract base asset from THB_BASE symbol format."""
+        sym = str(symbol or "")
+        return sym.split("_")[1] if "_" in sym else sym
+
+    def _reject_nonpositive_amount(self, amount_dec: Decimal, side_label: str, symbol: str) -> Optional[OrderResult]:
+        """Reject orders with non-positive amount using a consistent response shape."""
+        if amount_dec > 0:
+            return None
+        logger.warning(
+            "[Pre-flight] %s order rejected: amount=%.6f <= 0 for %s",
+            side_label,
+            float(amount_dec),
+            symbol,
+        )
+        return OrderResult(False, OrderStatus.REJECTED, message="Amount <= 0", error_code=-1)
+
+    def _extract_payload_dict(
+        self,
+        response: Any,
+        context: str,
+        missing_payload_detail: str,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[OrderResult]]:
+        """Extract dict payload from API response while preserving context-specific errors."""
+        if not isinstance(response, dict):
+            return None, self._invalid_api_response(context, "non-dict response")
+        data = response.get("result", response)
+        if not isinstance(data, dict):
+            return None, self._invalid_api_response(context, missing_payload_detail)
+        return data, None
 
     def __init__(
         self,
@@ -417,10 +493,7 @@ class TradeExecutor:
     def _position_row_valid_for_sync(self, pos: Dict[str, Any]) -> bool:
         """Keep rows with open size; only SELL BTC quantities must pass the BTC sanity cap."""
         sym = (pos.get("symbol") or "").upper()
-        side = pos.get("side")
-        if isinstance(side, Enum):
-            side = side.value
-        side = str(side or "").lower()
+        side = self._normalize_side(pos.get("side"))
         amt = float(pos.get("amount") or 0)
         rem = float(pos.get("remaining_amount") or 0)
         partial = bool(pos.get("is_partial_fill"))
@@ -452,7 +525,7 @@ class TradeExecutor:
                 continue
             side_str = pos.get("side", "buy")
             if isinstance(side_str, str):
-                pos["side"] = OrderSide.BUY if side_str.lower() == "buy" else OrderSide.SELL
+                pos["side"] = self._to_order_side(side_str)
             if pos.get("side") == OrderSide.BUY:
                 normalized_amount = normalize_buy_quantity(
                     float(pos.get("amount") or 0.0),
@@ -569,11 +642,7 @@ class TradeExecutor:
                             "[OMS] Order %s stale (%.0fs > 24h) — attempting cancel before removing tracking",
                             order_id, elapsed,
                         )
-                        _aged_side = order_info.get("side")
-                        if isinstance(_aged_side, Enum):
-                            _aged_side = _aged_side.value
-                        if isinstance(_aged_side, str):
-                            _aged_side = _aged_side.lower()
+                        _aged_side = self._normalize_side(order_info.get("side"))
                         if not self.cancel_order(
                             order_id,
                             symbol=order_info.get("symbol"),
@@ -595,11 +664,7 @@ class TradeExecutor:
                             "[OMS] Order %s exceeded timeout (%.1fs) -> cancelling for repricing",
                             order_id, elapsed,
                         )
-                        side_val = order_info.get("side")
-                        if isinstance(side_val, Enum):
-                            side_val = side_val.value
-                        if isinstance(side_val, str):
-                            side_val = side_val.lower()
+                        side_val = self._normalize_side(order_info.get("side"))
 
                         status_result = self.check_order_status(
                             order_id, symbol=order_info.get("symbol"), side=side_val,
@@ -635,10 +700,10 @@ class TradeExecutor:
                             amount = order_info.get("remaining_amount", amount)
 
                         # Balance check after cancel - use _get_balance for case-insensitivity
-                        side_str = side.value if isinstance(side, Enum) else str(side).lower()
+                        side_str = self._normalize_side(side)
                         if side_str == "sell" and amount > 0:
                             try:
-                                _base = symbol.split("_")[1] if "_" in symbol else symbol
+                                _base = self._extract_base_asset(symbol)
                                 _bals = self.api_client.get_balances()
                                 _avail = self._get_balance(_bals, _base)
                                 if _avail <= 0:
@@ -728,10 +793,8 @@ class TradeExecutor:
                                 "remaining_amount": order_info.get("remaining_amount", order_info["amount"]),
                                 "total_entry_cost": order_info.get("total_entry_cost", 0),
                             }
-                            if isinstance(side, str):
-                                side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
-                            elif not isinstance(side, OrderSide):
-                                side = OrderSide.BUY if str(side).lower() == "buy" else OrderSide.SELL
+                            if not isinstance(side, OrderSide):
+                                side = self._to_order_side(side)
                             new_order = OrderRequest(
                                 symbol=symbol, side=side, amount=amount,
                                 price=new_price, order_type=self.order_type,
@@ -941,134 +1004,161 @@ class TradeExecutor:
             
             symbol = order.symbol
             price = 0.0 if order.order_type == "market" else (order.price or 0.0)
-            min_order_thb = self._min_order_thb
+            price_dec = _to_decimal(price)
+            min_order_thb = _to_decimal(getattr(self, "_min_order_thb", 15.0))
 
             if order.side == OrderSide.BUY:
-                if order.amount <= 0:
-                    logger.warning("[Pre-flight] BUY order rejected: amount=%.6f <= 0 for %s", order.amount, symbol)
-                    return OrderResult(False, OrderStatus.REJECTED, message="Amount <= 0", error_code=-1)
-                thb_amount = order.amount
+                order_amount_dec = _to_decimal(order.amount)
+                reject_result = self._reject_nonpositive_amount(order_amount_dec, "BUY", symbol)
+                if reject_result:
+                    return reject_result
+                thb_amount = order_amount_dec
                 balances = self.api_client.get_balances(force_refresh=True, allow_stale=False)
-                available_thb = self._get_balance(balances, "THB")
+                available_thb = self._get_decimal_balance(balances, "THB")
 
                 logger.info("[BUY] Order details:")
                 logger.info("  Coin: %s", symbol)
                 logger.info("  Type: %s", order.order_type.upper())
                 logger.info("  THB amount: %s", self._format_balance_for_display("THB", thb_amount))
                 logger.info("  THB avail: %s", self._format_balance_for_display("THB", available_thb))
-                logger.info("  Price: %s THB", self._format_balance_for_display("THB", price))
+                logger.info("  Price: %s THB", self._format_balance_for_display("THB", price_dec))
 
                 if thb_amount < min_order_thb:
-                    logger.error("[Cancel] THB %.2f < minimum %.2f — not sending", thb_amount, min_order_thb)
+                    logger.error("[Cancel] THB %.2f < minimum %.2f — not sending", float(thb_amount), float(min_order_thb))
                     return OrderResult(False, OrderStatus.REJECTED,
-                                       message="Order %.2f THB below minimum %.2f" % (thb_amount, min_order_thb),
-                                       error_code=-1, ordered_amount=thb_amount)
+                                       message="Order %.2f THB below minimum %.2f" % (float(thb_amount), float(min_order_thb)),
+                                       error_code=-1, ordered_amount=float(thb_amount))
 
                 if thb_amount > available_thb:
-                    logger.warning("[Balance Check] Insufficient THB (%.2f < %.2f) — skipping", available_thb, thb_amount)
+                    logger.warning("[Balance Check] Insufficient THB (%.2f < %.2f) — skipping", float(available_thb), float(thb_amount))
                     return OrderResult(False, OrderStatus.REJECTED, message="THB insufficient", error_code=18)
 
-                max_thb = round(available_thb * 0.95, 2)
+                max_thb = _quantize_decimal(available_thb * Decimal("0.95"), 2)
                 if thb_amount > max_thb:
-                    logger.warning("[Size] %.2f THB > 95%% of %.2f — capping", thb_amount, max_thb)
+                    logger.warning("[Size] %.2f THB > 95%% of %.2f — capping", float(thb_amount), float(max_thb))
                     thb_amount = max_thb
-                # Bitkub rejects THB amounts with > 2 decimal places (Error 12)
-                thb_amount = round(thb_amount, 2)
+                thb_amount = _quantize_decimal(thb_amount, 2)
 
-                response = self.api_client.place_bid(symbol=symbol, amount=thb_amount, rate=price, order_type=order.order_type, client_id=idempotency_key)
+                response = self.api_client.place_bid(symbol=symbol, amount=float(thb_amount), rate=float(price_dec), order_type=order.order_type, client_id=idempotency_key)
                 logger.info("[Response] %s", str(response)[:500])
+                response_context = "place_bid"
             else:
-                base_asset = symbol.split("_")[1] if "_" in symbol else symbol
+                base_asset = self._extract_base_asset(symbol)
                 base_asset_upper = base_asset.upper()
+                order_amount_dec = _to_decimal(order.amount)
 
-                if order.amount <= 0:
-                    logger.warning("[Pre-flight] SELL order rejected: amount=%.6f <= 0 for %s", order.amount, symbol)
-                    return OrderResult(False, OrderStatus.REJECTED, message="Amount <= 0", error_code=-1)
+                reject_result = self._reject_nonpositive_amount(order_amount_dec, "SELL", symbol)
+                if reject_result:
+                    return reject_result
 
                 balances = self.api_client.get_balances(force_refresh=True, allow_stale=False)
-                # Use _get_balance for case-insensitive balance lookup
-                available_base = self._get_balance(balances, base_asset)
+                available_base = self._get_decimal_balance(balances, base_asset)
 
                 logger.info("[SELL] Order details:")
                 logger.info("  Coin: %s", symbol)
                 logger.info("  Type: %s", order.order_type.upper())
-                logger.info("  Amount: %s", self._format_balance_for_display(base_asset_upper, order.amount))
+                logger.info("  Amount: %s", self._format_balance_for_display(base_asset_upper, order_amount_dec))
                 logger.info("  %s avail: %s", base_asset_upper, self._format_balance_for_display(base_asset_upper, available_base))
-                logger.info("  Price: %s THB", self._format_balance_for_display("THB", price))
+                logger.info("  Price: %s THB", self._format_balance_for_display("THB", price_dec))
 
                 # Only check THB value — don't reject by balance amount
                 # Bitkub min trade value is ~10-15 THB
-                check_price = price
-                if check_price <= 0.0:
+                check_price = price_dec
+                if check_price <= 0:
                     try:
                         from helpers import parse_ticker_last
                         ticker = self.api_client.get_ticker(symbol)
-                        check_price = parse_ticker_last(ticker) or 0.0
+                        check_price = _to_decimal(parse_ticker_last(ticker) or 0.0)
                     except Exception:
                         logger.warning("[Value Check] Could not fetch market price for zero-price validation.")
 
-                order_value_thb = order.amount * check_price
+                order_value_thb = order_amount_dec * check_price
                 if check_price > 0 and order_value_thb < min_order_thb:
                     logger.warning(
                         "[Value Check] %s order value %.4f THB < MIN %.2f THB — rejecting",
-                        base_asset_upper, order_value_thb, min_order_thb
+                        base_asset_upper, float(order_value_thb), float(min_order_thb)
                     )
                     return OrderResult(False, OrderStatus.REJECTED,
-                                       message="Order value %.2f THB below minimum %.2f" % (order_value_thb, min_order_thb),
+                                       message="Order value %.2f THB below minimum %.2f" % (float(order_value_thb), float(min_order_thb)),
                                        error_code=18)
 
-                if order.amount > available_base:
+                if order_amount_dec > available_base:
                     logger.warning("[Balance Check] %s insufficient (%.8f < %.8f) — rejecting",
-                                   base_asset_upper, available_base, order.amount)
+                                   base_asset_upper, float(available_base), float(order_amount_dec))
                     return OrderResult(False, OrderStatus.REJECTED, message="%s insufficient" % base_asset_upper, error_code=18)
 
-                # Bitkub rejects crypto amounts with > 8 decimal places (Error 12)
-                sell_amount = round(order.amount, 8)
-                response = self.api_client.place_ask(symbol=symbol, amount=sell_amount, rate=price, order_type=order.order_type, client_id=idempotency_key)
+                sell_amount = _quantize_decimal(order_amount_dec, self.ASSET_DECIMALS.get(base_asset_upper, 8))
+                response = self.api_client.place_ask(symbol=symbol, amount=float(sell_amount), rate=float(price_dec), order_type=order.order_type, client_id=idempotency_key)
                 logger.info("[Response] %s", str(response)[:500])
+                response_context = "place_ask"
 
-            if isinstance(response, dict) and response.get("error", 0) != 0:
+            response_payload, invalid_response_result = self._extract_payload_dict(
+                response,
+                response_context,
+                "missing result payload object",
+            )
+            if invalid_response_result:
+                return invalid_response_result
+
+            if response.get("error", 0) != 0:
                 err_code = response.get("error", 0)
                 err_msg = response.get("message", "Unknown error")
                 logger.error("[ORDER ERROR] Code=%d, Message=%s", err_code, err_msg)
                 return OrderResult(False, OrderStatus.REJECTED, message="[%d] %s" % (err_code, err_msg), error_code=err_code)
 
-            data = response.get("result", response) if isinstance(response, dict) else {}
-            order_id = str(data.get("id", ""))
+            data = response_payload or {}
+            order_id = str(data.get("id", "") or "")
+            if not order_id:
+                return self._invalid_api_response(response_context, "missing order id in response payload")
+
             raw_filled = data.get("filled")
             explicit_fill = raw_filled is not None
-            filled_amt = float(raw_filled or 0.0)
-            fill_rate = float(data.get("rat", order.price or 0) or 0.0)
-            is_partial = explicit_fill and 0 < filled_amt < order.amount
-            is_filled = explicit_fill and filled_amt >= order.amount * 0.9999
+            matched_value = Decimal("0")
+
+            if order.side == OrderSide.BUY and raw_filled is None and data.get("rec") is not None:
+                raw_filled = data.get("rec")
+                explicit_fill = True
+                matched_value = _to_decimal(data.get("amt", 0.0) or 0.0) + _to_decimal(data.get("fee", 0.0) or 0.0)
+
+            filled_amt = _to_decimal(raw_filled or 0.0)
+            fill_rate = _to_decimal(data.get("rat", order.price or 0) or 0.0)
             status = OrderStatus.PENDING
             message = "Order accepted and awaiting match"
-            remaining_amount = order.amount
+            ordered_amount = _to_decimal(order.amount)
+            remaining_amount = ordered_amount
+
+            if order.side == OrderSide.BUY and explicit_fill:
+                effective_matched_value = matched_value or ordered_amount
+                is_partial = Decimal("0") < effective_matched_value < ordered_amount * Decimal("0.9999")
+                is_filled = effective_matched_value >= ordered_amount * Decimal("0.9999")
+                remaining_amount = max(ordered_amount - effective_matched_value, Decimal("0"))
+            else:
+                is_partial = explicit_fill and Decimal("0") < filled_amt < ordered_amount
+                is_filled = explicit_fill and filled_amt >= ordered_amount * Decimal("0.9999")
 
             if is_partial:
                 status = OrderStatus.PARTIAL
-                message = "Partial fill: %.6f/%.6f @ %.4f" % (filled_amt, order.amount, fill_rate)
-                remaining_amount = max(order.amount - filled_amt, 0.0)
+                message = "Partial fill: %.6f/%.6f @ %.4f" % (float(filled_amt), float(ordered_amount), float(fill_rate))
             elif is_filled:
                 status = OrderStatus.FILLED
                 message = "Order filled"
-                remaining_amount = 0.0
+                remaining_amount = Decimal("0")
 
             result = OrderResult(
                 success=True,
                 status=status,
-                order_id=order_id, filled_amount=filled_amt,
-                filled_price=fill_rate if fill_rate else order.price,
-                ordered_amount=order.amount,
-                remaining_amount=remaining_amount,
+                order_id=order_id, filled_amount=float(filled_amt),
+                filled_price=float(fill_rate) if fill_rate else order.price,
+                ordered_amount=float(ordered_amount),
+                remaining_amount=float(remaining_amount),
                 message=message,
             )
 
             if is_partial and order_id:
                 info = PartialFillInfo(
                     order_id=order_id, symbol=symbol, side=order.side,
-                    original_amount=order.amount, filled_amount=filled_amt,
-                    avg_fill_price=fill_rate or order.price or 0,
+                    original_amount=float(ordered_amount), filled_amount=float(filled_amt),
+                    avg_fill_price=float(fill_rate or _to_decimal(order.price or 0)),
                 )
                 self._fill_tracker.start_tracking(order_id, info)
                 result.partial_fill_info = info
@@ -1157,11 +1247,10 @@ class TradeExecutor:
 
         # Position sizing
         if plan.side == OrderSide.SELL:
-            base_asset = plan.symbol.split("_")[1] if "_" in plan.symbol else plan.symbol
+            base_asset = self._extract_base_asset(plan.symbol)
             try:
                 balances = self.api_client.get_balances()
-                # Use _get_balance for case-insensitive balance lookup
-                avail = self._get_balance(balances, base_asset)
+                avail = float(self._get_decimal_balance(balances, base_asset))
             except Exception as e:
                 logger.error("Failed to fetch crypto balance for SELL: %s", e, exc_info=True)
                 avail = 0.0
@@ -1187,7 +1276,7 @@ class TradeExecutor:
             if plan.close_position:
                 try:
                     balances = self.api_client.get_balances()
-                    avail_thb = self._get_balance(balances, "THB")
+                    avail_thb = float(self._get_decimal_balance(balances, "THB"))
                 except Exception as e:
                     logger.error("Failed to fetch THB balance: %s", e, exc_info=True)
                     avail_thb = 0.0
@@ -1209,21 +1298,22 @@ class TradeExecutor:
 
         # Rounding
         if plan.side == OrderSide.BUY:
-            amount = round(amount, 2)
+            amount = float(_quantize_decimal(amount, 2))
         else:
             amount = self._round_amount(amount, plan.symbol)
 
-        order_value_thb = amount if plan.side == OrderSide.BUY else amount * plan.entry_price
-        min_order_thb = self._min_order_thb
+        amount_dec = _to_decimal(amount)
+        order_value_thb = amount_dec if plan.side == OrderSide.BUY else (amount_dec * _to_decimal(plan.entry_price))
+        min_order_thb = _to_decimal(getattr(self, "_min_order_thb", 15.0))
         if plan.side == OrderSide.SELL and not plan.close_position:
-            if amount <= 0 or order_value_thb < min_order_thb:
+            if amount_dec <= 0 or order_value_thb < min_order_thb:
                 logger.info("SELL signal but insufficient balance — skipping")
                 return OrderResult(False, OrderStatus.CANCELLED, message="Insufficient balance", ordered_amount=amount)
 
         if order_value_thb < min_order_thb:
             logger.error("[Cancel] Order value %.2f THB < minimum %.2f | amount=%.6f, price=%.2f",
-                         order_value_thb, min_order_thb, amount, plan.entry_price)
-            return OrderResult(False, OrderStatus.REJECTED, message="Order value %.2f THB below minimum" % order_value_thb)
+                         float(order_value_thb), float(min_order_thb), amount, plan.entry_price)
+            return OrderResult(False, OrderStatus.REJECTED, message="Order value %.2f THB below minimum" % float(order_value_thb))
 
         order = OrderRequest(symbol=plan.symbol, side=plan.side, amount=amount, price=plan.entry_price, order_type=self.order_type)
         result = self.execute_order(order)
@@ -1265,13 +1355,35 @@ class TradeExecutor:
                     self._open_orders[result.order_id] = pos_data
                 self._persist_position(result.order_id, pos_data)
             else:
-                _entry_cost = amount if plan.side == OrderSide.BUY else amount * plan.entry_price
+                tracked_amount = actual_filled if (plan.side == OrderSide.BUY and is_filled_now and actual_filled > 0) else amount
+                tracked_remaining_amount = (
+                    actual_filled
+                    if (plan.side == OrderSide.BUY and is_filled_now and actual_filled > 0)
+                    else result.remaining_amount
+                )
+                # Use actual fill price as entry_price when available
+                effective_entry = actual_price if (is_filled_now and actual_price > 0) else plan.entry_price
+                # Recalculate SL/TP proportionally if fill price differs from signal price
+                if is_filled_now and actual_price > 0 and plan.entry_price > 0 and abs(actual_price - plan.entry_price) > 0.01:
+                    price_ratio = actual_price / plan.entry_price
+                    effective_sl = plan.stop_loss * price_ratio if plan.stop_loss else plan.stop_loss
+                    effective_tp = plan.take_profit * price_ratio if plan.take_profit else plan.take_profit
+                    logger.info(
+                        "[SL/TP Adjust] %s fill price %.2f differs from signal %.2f — "
+                        "SL: %.2f→%.2f, TP: %.2f→%.2f",
+                        plan.symbol, actual_price, plan.entry_price,
+                        plan.stop_loss, effective_sl, plan.take_profit, effective_tp,
+                    )
+                else:
+                    effective_sl = plan.stop_loss
+                    effective_tp = plan.take_profit
+                _entry_cost = amount if plan.side == OrderSide.BUY else amount * effective_entry
                 with self._orders_lock:
                     pos_data = {
-                        "symbol": plan.symbol, "side": plan.side, "amount": amount,
-                        "entry_price": plan.entry_price, "stop_loss": plan.stop_loss, "take_profit": plan.take_profit,
+                        "symbol": plan.symbol, "side": plan.side, "amount": tracked_amount,
+                        "entry_price": effective_entry, "stop_loss": effective_sl, "take_profit": effective_tp,
                         "order_id": result.order_id, "timestamp": datetime.now(),
-                        "is_partial_fill": False, "remaining_amount": result.remaining_amount,
+                        "is_partial_fill": False, "remaining_amount": tracked_remaining_amount,
                         "total_entry_cost": _entry_cost, "filled": is_filled_now,
                         "filled_amount": actual_filled if is_filled_now else 0.0,
                         "filled_price": actual_price if is_filled_now else 0.0,
@@ -1279,9 +1391,9 @@ class TradeExecutor:
                     self._open_orders[result.order_id] = pos_data
                 self._persist_position(result.order_id, pos_data)
                 logger.info(
-                    "[Position Open] %s %s | amount=%.6f @ %.2f | SL=%.2f TP=%.2f | state=%s",
+                    "[Position Open] %s %s | amount=%.6f @ %.2f (signal: %.2f) | SL=%.2f TP=%.2f | state=%s",
                     "BUY" if plan.side == OrderSide.BUY else "SELL",
-                    plan.symbol, amount, plan.entry_price, plan.stop_loss, plan.take_profit, result.status.value,
+                    plan.symbol, amount, effective_entry, plan.entry_price, effective_sl, effective_tp, result.status.value,
                 )
 
             if self.risk_manager:
@@ -1293,11 +1405,16 @@ class TradeExecutor:
         self, position_id: str, order_id: str, side: OrderSide,
         amount: float, price: Optional[float] = None,
         defer_cleanup: bool = False,
+        exit_trigger: Optional[str] = None,
     ) -> OrderResult:
         """Execute exit for a position with per-position lock.
 
         Sniper mode: always sells the ACTUAL exchange balance for the asset,
         ensuring 100% position closure and full return to cash.
+
+        exit_trigger: "SL", "TP", "TIME", or None.
+            SL exits use market orders for guaranteed fill during crashes.
+            TP/other exits use the configured order_type (default: limit).
         """
         with self._exit_in_progress_lock:
             if position_id in self._exit_in_progress:
@@ -1317,7 +1434,7 @@ class TradeExecutor:
             symbol = pos_data["symbol"]
             if side == OrderSide.SELL:
                 try:
-                    base_asset = symbol.split("_")[1] if "_" in symbol else symbol
+                    base_asset = self._extract_base_asset(symbol)
                     balances = self.api_client.get_balances(force_refresh=True, allow_stale=False)
                     actual_balance = self._get_balance(balances, base_asset)
                     if actual_balance > 0:
@@ -1333,10 +1450,23 @@ class TradeExecutor:
                         symbol, sell_amount, bal_err,
                     )
 
+            # SL exits use market orders for guaranteed fill during fast moves.
+            # TP/other exits use the configured order_type (limit by default).
+            if exit_trigger == "SL":
+                exit_order_type = "market"
+                exit_price = 0  # Bitkub market orders require rate=0
+                logger.info(
+                    "[SL-Market] %s SL exit → market order for guaranteed fill | tracked_price=%.2f",
+                    symbol, price or 0,
+                )
+            else:
+                exit_order_type = self.order_type
+                exit_price = price or pos_data.get("entry_price", 0)
+
             order = OrderRequest(
                 symbol=symbol, side=side, amount=sell_amount,
-                price=price or pos_data.get("entry_price", 0),
-                order_type=self.order_type,
+                price=exit_price,
+                order_type=exit_order_type,
             )
             result = self.execute_order(order)
             if result.success and not defer_cleanup:
@@ -1375,11 +1505,7 @@ class TradeExecutor:
                         if order_id in self._open_orders:
                             order_info = self._open_orders[order_id]
                             symbol = symbol or order_info.get("symbol")
-                            side_val = side or order_info.get("side")
-                            if isinstance(side_val, Enum):
-                                side = side_val.value
-                            elif isinstance(side_val, str):
-                                side = side_val.lower()
+                            side = self._normalize_side(side or order_info.get("side"))
                 if not symbol or not side:
                     self._last_cancel_error = "missing symbol=%s or side=%s" % (symbol, side)
                     logger.error("Cannot cancel order %s: %s", order_id, self._last_cancel_error)
@@ -1452,20 +1578,25 @@ class TradeExecutor:
                     if order_id in self._open_orders:
                         tracked = self._open_orders[order_id]
                         symbol = symbol or tracked.get("symbol")
-                        raw_side = side or tracked.get("side")
-                        if isinstance(raw_side, Enum):
-                            side = raw_side.value.lower()
-                        elif isinstance(raw_side, str):
-                            side = raw_side.lower()
+                        side = self._normalize_side(side or tracked.get("side"))
             if not symbol:
                 return OrderResult(success=False, status=OrderStatus.ERROR, message="Missing symbol")
 
             response = self.api_client.get_order_info(symbol=symbol, order_id=order_id, side=side or "")
+            response_payload, invalid_response_result = self._extract_payload_dict(
+                response,
+                "order_info",
+                "missing payload object",
+            )
+            if invalid_response_result:
+                return invalid_response_result
             if response.get("error", 0) != 0:
                 return OrderResult(success=False, status=OrderStatus.ERROR, message=response.get("message", "Failed"))
 
-            data = response if isinstance(response, dict) else {}
-            status_str = data.get("status", "").lower()
+            data = response_payload or {}
+            status_str = str(data.get("status", "") or "").lower()
+            if not status_str:
+                return self._invalid_api_response("order_info", "missing status field")
             status_map = {
                 "filled": OrderStatus.FILLED, "partial": OrderStatus.PARTIAL,
                 "pending": OrderStatus.PENDING, "cancelled": OrderStatus.CANCELLED,
@@ -1473,8 +1604,8 @@ class TradeExecutor:
             }
             return OrderResult(
                 success=status_str == "filled", status=status_map.get(status_str, OrderStatus.PENDING),
-                order_id=order_id, filled_amount=data.get("filled", 0),
-                filled_price=data.get("avg_price"), message="Status: %s" % status_str,
+                order_id=order_id, filled_amount=float(_to_decimal(data.get("filled", 0) or 0)),
+                filled_price=float(_to_decimal(data.get("avg_price", data.get("rat", 0)) or 0)), message="Status: %s" % status_str,
             )
         except Exception as e:
             return OrderResult(success=False, status=OrderStatus.ERROR, message=str(e))
@@ -1499,10 +1630,7 @@ class TradeExecutor:
                 return  # Already marked as filled
             symbol = current_order.get("symbol")
             side_val = current_order.get("side")
-            if isinstance(side_val, Enum):
-                side_val = side_val.value
-            elif isinstance(side_val, str):
-                side_val = side_val.lower()
+            side_val = self._normalize_side(side_val)
         
         try:
             status_result = self.check_order_status(
@@ -1516,20 +1644,18 @@ class TradeExecutor:
                     order_id, status_result.filled_amount, 
                     status_result.filled_price or 0,
                 )
+                persisted_position = None
                 with self._orders_lock:
                     if order_id in self._open_orders:
                         self._open_orders[order_id]["filled"] = True
                         self._open_orders[order_id]["filled_amount"] = status_result.filled_amount
                         self._open_orders[order_id]["filled_price"] = status_result.filled_price
+                        persisted_position = dict(self._open_orders[order_id])
                 
-                # Update DB using save_position (handles both insert and update)
-                if self._db:
+                # Persist a detached snapshot after releasing _orders_lock.
+                if self._db and persisted_position is not None:
                     try:
-                        pos_data = dict(order_info)
-                        pos_data["filled"] = True
-                        pos_data["filled_amount"] = status_result.filled_amount
-                        pos_data["filled_price"] = status_result.filled_price
-                        self._db.save_position(pos_data)
+                        self._db.save_position(persisted_position)
                     except Exception as db_err:
                         logger.warning("[OMS] DB update failed for filled order %s: %s", order_id, db_err)
                 
@@ -1585,12 +1711,12 @@ class TradeExecutor:
         Use 2 decimals for THB/USDT only.
         """
         if symbol:
-            base = symbol.split("_")[1] if "_" in symbol else symbol
+            base = self._extract_base_asset(symbol)
             # Keep full 8 decimals for crypto to avoid losing value
             if base.upper() in ("THB", "USDT"):
-                return round(amount, 2)
+                return float(_quantize_decimal(amount, 2))
         # Default to 8 decimals for all crypto (BTC, ETH, DOGE, etc.)
-        return round(amount, 8)
+        return float(_quantize_decimal(amount, 8))
 
     def get_execution_summary(self) -> Dict[str, Any]:
         """Get summary of execution performance."""

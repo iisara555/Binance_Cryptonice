@@ -7,6 +7,7 @@ import time
 import logging
 import threading
 import copy
+import hashlib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
@@ -58,6 +59,7 @@ from strategies.trend_following import TrendFollowingStrategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.breakout import BreakoutStrategy
 from strategies.scalping import ScalpingStrategy
+from strategies.sniper import SniperStrategy
 from indicators import TechnicalIndicators
 
 # Multi-timeframe imports
@@ -158,7 +160,17 @@ class SignalGenerator:
             "scalping": ScalpingStrategy(
                 self.config.get("scalping", {})
             ),
+            "sniper": SniperStrategy(
+                sniper_cfg,
+                indicators=TechnicalIndicators,
+            ),
         }
+        self._aggregate_strategy_names = [
+            "trend_following",
+            "mean_reversion",
+            "breakout",
+            "scalping",
+        ]
         
         # Risk parameters
         self.risk_config = {
@@ -186,49 +198,41 @@ class SignalGenerator:
         self._strategy_perf_cache_at: float = 0.0
         self._strategy_perf_cache_ttl: float = 300.0  # refresh every 5 minutes
         self._strategy_perf_lookback_days: int = int(self.config.get("strategy_perf_lookback_days", 30))
-        self._sniper_micro_trend_tolerance_pct: float = max(
-            0.0,
-            float(sniper_cfg.get("micro_trend_tolerance_pct", 0.15) or 0.15),
-        )
-        self._sniper_trigger_lookback_bars: int = max(
-            1,
-            int(sniper_cfg.get("macd_trigger_lookback_bars", 3) or 3),
-        )
+        self._mtf_cache: Dict[str, tuple] = {}
+        self._mtf_cache_lock = threading.Lock()
+        self._mtf_cache_ttl: float = float((self.config.get("multi_timeframe", {}) or {}).get("cache_ttl_seconds", 10.0) or 10.0)
+        self._mtf_cache_max_size: int = int((self.config.get("multi_timeframe", {}) or {}).get("cache_max_size", 100) or 100)
+        self._mtf_indicator_cache: Dict[tuple, tuple] = {}
+        self._mtf_indicator_cache_lock = threading.Lock()
+        self._mtf_indicator_cache_ttl: float = float((self.config.get("multi_timeframe", {}) or {}).get("indicator_cache_ttl_seconds", 300.0) or 300.0)
+        self._mtf_indicator_cache_max_size: int = int((self.config.get("multi_timeframe", {}) or {}).get("indicator_cache_max_size", 500) or 500)
 
-    @staticmethod
-    def _find_recent_macd_cross(
-        macd_line: pd.Series,
-        signal_line: pd.Series,
-        *,
-        direction: str,
-        lookback_bars: int,
-    ) -> Optional[int]:
-        """Return how many confirmed bars ago the last crossover happened."""
-        if len(macd_line) < 2 or len(signal_line) < 2:
-            return None
-
-        max_offset = min(max(1, int(lookback_bars or 1)), len(macd_line) - 1)
-        for offset in range(max_offset):
-            idx = len(macd_line) - 1 - offset
-            prev_idx = idx - 1
-            if prev_idx < 0:
-                break
-
-            current_macd = float(macd_line.iloc[idx])
-            previous_macd = float(macd_line.iloc[prev_idx])
-            current_signal = float(signal_line.iloc[idx])
-            previous_signal = float(signal_line.iloc[prev_idx])
-
-            if direction == "buy":
-                if current_macd > current_signal and previous_macd <= previous_signal:
-                    return offset
-            elif current_macd < current_signal and previous_macd >= previous_signal:
-                return offset
-        return None
-    
     def set_database(self, db) -> None:
         """Inject the database handle for dynamic strategy performance lookups."""
         self._db = db
+
+    def _make_mtf_cache_key(self, pair: str, timeframes: List[str], db: Any) -> str:
+        raw = f"{str(pair or '').upper()}|{','.join(str(tf) for tf in timeframes)}|{type(db).__name__}:{id(db)}"
+        return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+    def _get_cached_mtf_result(self, cache_key: str):
+        now = time.time()
+        with self._mtf_cache_lock:
+            cached = self._mtf_cache.get(cache_key)
+            if not cached:
+                return None
+            result, cached_at = cached
+            if now - cached_at >= self._mtf_cache_ttl:
+                self._mtf_cache.pop(cache_key, None)
+                return None
+            return copy.deepcopy(result)
+
+    def _store_cached_mtf_result(self, cache_key: str, result) -> None:
+        with self._mtf_cache_lock:
+            if len(self._mtf_cache) >= self._mtf_cache_max_size:
+                oldest_key = min(self._mtf_cache.items(), key=lambda item: item[1][1])[0]
+                self._mtf_cache.pop(oldest_key, None)
+            self._mtf_cache[cache_key] = (copy.deepcopy(result), time.time())
 
     def _get_strategy_performance(self) -> Dict[str, Dict[str, Any]]:
         """Return cached per-strategy performance stats, refreshing every 5 min."""
@@ -291,11 +295,12 @@ class SignalGenerator:
         with self._signal_cache_lock:
             if len(self._signal_cache) >= self._signal_cache_max_size:
                 # Remove oldest 20%
+                evict_count = max(len(self._signal_cache) // 5, 1)
                 sorted_keys = sorted(
                     self._signal_cache.keys(),
                     key=lambda k: self._signal_cache[k][1]
                 )
-                for key in sorted_keys[:20]:
+                for key in sorted_keys[:evict_count]:
                     del self._signal_cache[key]
 
         # Detect market condition
@@ -304,7 +309,7 @@ class SignalGenerator:
         # Collect signals from each strategy
         all_signals: List[TradingSignal] = []
 
-        strategies_to_use = use_strategies or list(self.strategies.keys())
+        strategies_to_use = use_strategies or list(self._aggregate_strategy_names)
 
         for name in strategies_to_use:
             if name not in self.strategies:
@@ -339,6 +344,17 @@ class SignalGenerator:
         aggregated = self._aggregate_signals(all_signals, market_condition, symbol, data)
 
         if not aggregated:
+            if all_signals:
+                raw_mix: Dict[str, int] = {}
+                for raw_signal in all_signals:
+                    key = raw_signal.signal_type.value
+                    raw_mix[key] = raw_mix.get(key, 0) + 1
+                logger.warning(
+                    "[SignalDrop] %s | raw_signals=%d | mix=%s | reason=no actionable aggregated signals",
+                    symbol,
+                    len(all_signals),
+                    ", ".join(f"{key}={value}" for key, value in sorted(raw_mix.items())) or "none",
+                )
             _diag(symbol, "Aggregation", "REJECT",
                   "No actionable aggregated signals (all HOLD or empty)")
         else:
@@ -360,220 +376,45 @@ class SignalGenerator:
         data: pd.DataFrame,
         symbol: str,
     ) -> List[AggregatedSignal]:
-        """Generate a signal using the Pro Trader Dual EMA + MACD strategy.
-
-                Entry requires ALL of one directional set:
-                    BUY:
-                        1. Macro Trend : EMA 50 > EMA 200
-                        2. Micro Trend : Close > EMA 50
-                        3. Trigger     : MACD line crosses above Signal line on a closed candle
-
-                    SELL:
-                        1. Macro Trend : EMA 50 < EMA 200
-                        2. Micro Trend : Close < EMA 50
-                        3. Trigger     : MACD line crosses below Signal line on a closed candle
-
-        SL/TP are ATR-based:
-                    BUY : SL = Entry - 1.5 × ATR(14), TP = Entry + 3.0 × ATR(14)
-                    SELL: SL = Entry + 1.5 × ATR(14), TP = Entry - 3.0 × ATR(14)
-
-        Returns an AggregatedSignal list (0 or 1 element) so the existing
-        risk-check and execution pipeline can consume it unchanged.
-        """
+        """Generate sniper signals by delegating the strategy logic to SniperStrategy."""
         self._reset_daily_state()
 
-        MIN_BARS = 210  # need 200 for EMA-200 + some warmup; +1 for closed-candle slice
-        if data is None or len(data) <= MIN_BARS:
-            _diag(symbol, "Sniper:DataCheck", "REJECT",
-                  f"Insufficient data ({len(data) if data is not None else 0}/{MIN_BARS} bars)")
+        strategy = self.strategies.get("sniper")
+        if strategy is None:
             return []
 
-        close = data["close"].astype(float)
-        high = data["high"].astype(float)
-        low = data["low"].astype(float)
-
-        # ── Indicators ────────────────────────────────────────────────
-        ema_50 = close.ewm(span=50, adjust=False).mean()
-        ema_200 = close.ewm(span=200, adjust=False).mean()
-        macd_line, signal_line, macd_hist = TechnicalIndicators.calculate_macd(close)
-        atr = TechnicalIndicators.calculate_atr(high, low, close, period=14)
-
-        current_close = float(close.iloc[-1])
-        current_ema50 = float(ema_50.iloc[-1])
-        current_ema200 = float(ema_200.iloc[-1])
-        current_atr = float(atr.iloc[-1])
-
-        bullish_macro = current_ema50 > current_ema200
-        bearish_macro = current_ema50 < current_ema200
-        _diag(
-            symbol,
+        raw_signal = strategy.generate_signal(data, symbol)
+        diagnostics = getattr(strategy, "get_last_diagnostics", lambda: {})()
+        for step in (
+            "Sniper:DataCheck",
             "Sniper:MacroTrend",
-            "PASS" if bullish_macro or bearish_macro else "REJECT",
-            (
-                f"buy_ok={bullish_macro}, sell_ok={bearish_macro}, "
-                f"EMA50={current_ema50:,.2f} vs EMA200={current_ema200:,.2f}"
-            ),
-        )
-
-        if not bullish_macro and not bearish_macro:
-            return []
-
-        micro_tolerance = self._sniper_micro_trend_tolerance_pct / 100.0
-        bullish_micro = current_close >= (current_ema50 * (1.0 - micro_tolerance))
-        bearish_micro = current_close <= (current_ema50 * (1.0 + micro_tolerance))
-        _diag(
-            symbol,
             "Sniper:MicroTrend",
-            "PASS" if bullish_micro or bearish_micro else "REJECT",
-            (
-                f"buy_ok={bullish_micro}, sell_ok={bearish_micro}, "
-                f"Close={current_close:,.2f} vs EMA50={current_ema50:,.2f}, "
-                f"tolerance={self._sniper_micro_trend_tolerance_pct:.2f}%"
-            ),
-        )
-
-        if not bullish_micro and not bearish_micro:
-            return []
-
-        # ── Condition 3: MACD Crossover — confirmed closed candles only ──
-        # Drop the last (possibly forming/incomplete) candle so the crossover
-        # check is stable and won't flip between bot loops mid-candle.
-        confirmed_close = close.iloc[:-1]
-        confirmed_timestamps = None
-        if "timestamp" in data.columns:
-            confirmed_timestamps = pd.to_datetime(data["timestamp"], errors="coerce").iloc[:-1]
-        macd_line_conf, signal_line_conf, _ = TechnicalIndicators.calculate_macd(confirmed_close)
-        buy_cross_offset = self._find_recent_macd_cross(
-            macd_line_conf,
-            signal_line_conf,
-            direction="buy",
-            lookback_bars=self._sniper_trigger_lookback_bars,
-        )
-        sell_cross_offset = self._find_recent_macd_cross(
-            macd_line_conf,
-            signal_line_conf,
-            direction="sell",
-            lookback_bars=self._sniper_trigger_lookback_bars,
-        )
-
-        macd_cross_up_now = buy_cross_offset == 0
-        macd_cross_up_prev = buy_cross_offset == 1
-        macd_cross_down_now = sell_cross_offset == 0
-        macd_cross_down_prev = sell_cross_offset == 1
-
-        buy_trigger_ok = buy_cross_offset is not None
-        sell_trigger_ok = sell_cross_offset is not None
-
-        trigger_bar = ""
-        trigger_timestamp = ""
-        if buy_trigger_ok:
-            trigger_bar = "current" if buy_cross_offset == 0 else ("previous" if buy_cross_offset == 1 else f"{buy_cross_offset}_bars_ago")
-            if confirmed_timestamps is not None and len(confirmed_timestamps) >= (buy_cross_offset or 0) + 1:
-                trigger_ts = confirmed_timestamps.iloc[-1 - int(buy_cross_offset or 0)]
-                if pd.notna(trigger_ts):
-                    trigger_timestamp = str(trigger_ts)
-        elif sell_trigger_ok:
-            trigger_bar = "current" if sell_cross_offset == 0 else ("previous" if sell_cross_offset == 1 else f"{sell_cross_offset}_bars_ago")
-            if confirmed_timestamps is not None and len(confirmed_timestamps) >= (sell_cross_offset or 0) + 1:
-                trigger_ts = confirmed_timestamps.iloc[-1 - int(sell_cross_offset or 0)]
-                if pd.notna(trigger_ts):
-                    trigger_timestamp = str(trigger_ts)
-
-        _diag(
-            symbol,
             "Sniper:MACDTrigger",
-            "PASS" if buy_trigger_ok or sell_trigger_ok else "REJECT",
-            (
-                f"buy_now={macd_cross_up_now}, buy_prev={macd_cross_up_prev}, "
-                f"sell_now={macd_cross_down_now}, sell_prev={macd_cross_down_prev}, "
-                f"lookback={self._sniper_trigger_lookback_bars}, "
-                f"trigger_bar={trigger_bar or 'none'}, trigger_timestamp={trigger_timestamp or 'n/a'}"
-            ),
-        )
+            "Sniper:ATR",
+            "Sniper:Result",
+        ):
+            record = diagnostics.get(step)
+            if record:
+                _diag(symbol, step, record.get("result", ""), record.get("reason", ""))
 
-        signal_type: Optional[SignalType] = None
-        if bullish_macro and bullish_micro and buy_trigger_ok:
-            signal_type = SignalType.BUY
-        elif bearish_macro and bearish_micro and sell_trigger_ok:
-            signal_type = SignalType.SELL
-
-        if signal_type is None:
+        if not raw_signal:
             return []
-
-        if current_atr <= 0:
-            _diag(symbol, "Sniper:ATR", "REJECT", f"ATR={current_atr} (invalid)")
-            return []
-
-        SL_MULT = 1.5
-        TP_MULT = 3.0
-        if signal_type is SignalType.BUY:
-            stop_loss = current_close - (SL_MULT * current_atr)
-            take_profit = current_close + (TP_MULT * current_atr)
-            risk = current_close - stop_loss
-            reward = take_profit - current_close
-            macro_text = f"EMA50({current_ema50:,.0f})>EMA200({current_ema200:,.0f})"
-            micro_text = f"Close({current_close:,.0f})>EMA50"
-            cross_text = "BUY MACD cross"
-            trigger_side = "buy"
-        else:
-            stop_loss = current_close + (SL_MULT * current_atr)
-            take_profit = current_close - (TP_MULT * current_atr)
-            risk = stop_loss - current_close
-            reward = current_close - take_profit
-            macro_text = f"EMA50({current_ema50:,.0f})<EMA200({current_ema200:,.0f})"
-            micro_text = f"Close({current_close:,.0f})<EMA50"
-            cross_text = "SELL MACD cross"
-            trigger_side = "sell"
-        rr_ratio = reward / risk if risk > 0 else 0.0
 
         market_condition = detect_market_condition(data["close"].tolist() if isinstance(data, pd.DataFrame) else data)
-
-        raw_signal = TradingSignal(
-            strategy_name="sniper_dual_ema_macd",
-            symbol=symbol,
-            signal_type=signal_type,
-            confidence=1.0,
-            price=current_close,
-            timestamp=datetime.now(),
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            risk_reward_ratio=rr_ratio,
-            metadata={
-                "ema50": current_ema50,
-                "ema200": current_ema200,
-                "atr": current_atr,
-                "macd": float(macd_line_conf.iloc[-1]),
-                "macd_signal": float(signal_line_conf.iloc[-1]),
-                "macd_cross_bar": trigger_bar,
-                "macd_cross_timestamp": trigger_timestamp,
-                "macd_cross_direction": trigger_side,
-            },
-        )
-
         agg = AggregatedSignal(
             symbol=symbol,
-            signal_type=signal_type,
-            combined_confidence=1.0,
+            signal_type=raw_signal.signal_type,
+            combined_confidence=raw_signal.confidence,
             signals=[raw_signal],
-            avg_price=current_close,
-            avg_stop_loss=stop_loss,
-            avg_take_profit=take_profit,
-            avg_risk_reward=rr_ratio,
-            strategy_votes={"sniper_dual_ema_macd": 1},
+            avg_price=raw_signal.price,
+            avg_stop_loss=float(raw_signal.stop_loss or 0.0),
+            avg_take_profit=float(raw_signal.take_profit or 0.0),
+            avg_risk_reward=float(raw_signal.risk_reward_ratio or 0.0),
+            strategy_votes={raw_signal.strategy_name: 1},
             market_condition=market_condition,
             risk_score=self._calculate_risk_score([raw_signal], market_condition),
         )
-        agg.trade_rationale = (
-                        f"[Sniper] {signal_type.value} | Alignment: "
-                        f"{macro_text}, {micro_text}, "
-                        f"{cross_text} ({trigger_bar or 'n/a'}) | "
-            f"SL={stop_loss:,.0f} TP={take_profit:,.0f} RR={rr_ratio:.2f} | "
-            f"ATR={current_atr:,.0f}"
-        )
-
-        _diag(symbol, "Sniper:Result", "PASS",
-                            f"{signal_type.value} conf=1.0, trigger_bar={trigger_bar or 'n/a'}, trigger_timestamp={trigger_timestamp or 'n/a'}, SL={stop_loss:,.2f}, TP={take_profit:,.2f}, RR={rr_ratio:.2f}")
-
+        agg.trade_rationale = str((raw_signal.metadata or {}).get("trade_rationale") or self._generate_trade_rationale(agg))
         return [agg]
     
     def _aggregate_signals(
@@ -1086,16 +927,30 @@ class SignalGenerator:
         signals = self.generate_signals(data, symbol, use_strategies)
 
         if not signals:
+            logger.info("[SignalDrop] %s | no aggregated signals generated", symbol)
             _diag(symbol, "GetBestSignal", "REJECT",
                   "No signals generated at all")
             return None
-        
+
+        rejected_summaries: List[str] = []
         for signal in signals:
             risk_result = self.check_risk(signal, portfolio)
             if risk_result.passed:
                 _diag(symbol, "GetBestSignal", "PASS",
                       f"type={signal.signal_type.value}, conf={signal.combined_confidence:.3f}")
                 return signal
+
+            rejected_summaries.append(
+                f"{signal.signal_type.value}@{signal.combined_confidence:.3f}: "
+                f"{' ; '.join(risk_result.reasons) if risk_result.reasons else 'no explicit reason'}"
+            )
+
+        logger.warning(
+            "[SignalDrop] %s | aggregated=%d | all candidates failed risk checks | %s",
+            symbol,
+            len(signals),
+            " | ".join(rejected_summaries) if rejected_summaries else "no details",
+        )
         
         _diag(symbol, "GetBestSignal", "REJECT",
               f"All {len(signals)} signal(s) failed risk checks")
@@ -1153,6 +1008,10 @@ class SignalGenerator:
             )
 
         resolved_timeframes: List[str] = list(timeframes) if timeframes else ['1m', '5m', '15m', '1h']
+        cache_key = self._make_mtf_cache_key(pair, resolved_timeframes, db)
+        cached = self._get_cached_mtf_result(cache_key)
+        if cached is not None:
+            return cached
 
         # Collect data for all timeframes
         mtf_collector = MultiTimeframeCollector(pair, resolved_timeframes, db)
@@ -1162,11 +1021,19 @@ class SignalGenerator:
 
         if not mtf_data or all(not d.has_data for d in mtf_data.values()):
             logger.warning(f"No data available for {pair} MTF analysis")
+            self._store_cached_mtf_result(cache_key, None)
             return None
 
         # Use the base analyzer
         mtf_config = self.config.get('multi_timeframe', {})
-        analyzer = MultiTimeframeAnalyzer(mtf_config)
+        analyzer = MultiTimeframeAnalyzer(
+            mtf_config,
+            pair=pair,
+            indicator_cache=self._mtf_indicator_cache,
+            indicator_cache_lock=self._mtf_indicator_cache_lock,
+            indicator_cache_ttl=self._mtf_indicator_cache_ttl,
+            indicator_cache_max_size=self._mtf_indicator_cache_max_size,
+        )
 
         # Generate result
         result = MultiTimeframeResult(
@@ -1197,7 +1064,8 @@ class SignalGenerator:
             result.consensus_count = signal_types.count(most_common)
             result.consensus_strength = result.consensus_count / len(signals)
 
-        return result
+        self._store_cached_mtf_result(cache_key, result)
+        return copy.deepcopy(result)
 
     def get_mtf_signal(
         self,

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Dict, Any, Tuple
+import math
 import pandas as pd
 
 
@@ -94,15 +95,15 @@ class StrategyBase:
         if not atr_value or atr_value <= 0 or entry_price <= 0:
             return 0.0, 0.0
         
+        # Spot bot: only long-side protective levels are supported.
+        if str(direction or "long").lower() != "long":
+            return 0.0, 0.0
+
         sl_distance = atr_value * atr_multiplier
         tp_distance = sl_distance * risk_reward_ratio
-        
-        if direction == "long":
-            sl = round(entry_price - sl_distance, 6)
-            tp = round(entry_price + tp_distance, 6)
-        else:  # short
-            sl = round(entry_price + sl_distance, 6)
-            tp = round(entry_price - tp_distance, 6)
+
+        sl = round(entry_price - sl_distance, 6)
+        tp = round(entry_price + tp_distance, 6)
         
         return sl, tp
     
@@ -133,7 +134,7 @@ class StrategyBase:
         take_profit = 0.0
         rr_ratio = max(MIN_RISK_REWARD_RATIO, 2.0)  # Consistent minimum R:R
         
-        if sig_type in (SignalType.BUY, SignalType.SELL) and current_price > 0:
+        if sig_type is SignalType.BUY and current_price > 0:
             # Calculate ATR from OHLCV data if available
             if all(k in data.columns for k in ['high', 'low', 'close']) and len(data) >= 15:
                 from risk_management import calculate_atr
@@ -146,11 +147,10 @@ class StrategyBase:
                 atr = atr_values[-1] if atr_values else 0.0
                 
                 if atr > 0:
-                    direction = "long" if sig_type == SignalType.BUY else "short"
                     stop_loss, take_profit = self.calculate_sl_tp_from_atr(
                         entry_price=current_price,
                         atr_value=atr,
-                        direction=direction,
+                        direction="long",
                         risk_reward_ratio=rr_ratio,
                     )
         
@@ -175,11 +175,61 @@ class StrategyBase:
     
     def validate_signal(self, signal: Any, data: pd.DataFrame) -> bool:
         """
-        Validate the generated signal against data or indicators.
-        Returns True by default.
+        Validate generated signals with basic structural and risk sanity checks.
         """
-        if not signal or signal.signal_type.value == "HOLD":
+        if not signal or data is None or data.empty:
             return False
+
+        signal_type = getattr(signal, "signal_type", None)
+        confidence = getattr(signal, "confidence", None)
+        price = getattr(signal, "price", None)
+
+        if signal_type is None or confidence is None or price is None:
+            return False
+        if signal_type == SignalType.HOLD:
+            return False
+
+        try:
+            conf_val = float(confidence)
+            price_val = float(price)
+        except (TypeError, ValueError):
+            return False
+
+        if not math.isfinite(conf_val) or not math.isfinite(price_val):
+            return False
+        if conf_val <= 0.0 or conf_val > 1.0 or price_val <= 0.0:
+            return False
+
+        if "close" in data.columns and len(data["close"]) > 0:
+            try:
+                last_close = float(data["close"].iloc[-1])
+            except (TypeError, ValueError):
+                return False
+            if last_close <= 0:
+                return False
+
+        # Spot BUY sanity: SL must be below entry and TP above entry when provided.
+        if signal_type == SignalType.BUY:
+            sl = getattr(signal, "stop_loss", None)
+            tp = getattr(signal, "take_profit", None)
+            if sl is not None and tp is not None:
+                try:
+                    sl_val = float(sl)
+                    tp_val = float(tp)
+                except (TypeError, ValueError):
+                    return False
+                if not (sl_val < price_val < tp_val):
+                    return False
+
+            rr = getattr(signal, "risk_reward_ratio", None)
+            if rr is not None:
+                try:
+                    rr_val = float(rr)
+                except (TypeError, ValueError):
+                    return False
+                if rr_val <= 0:
+                    return False
+
         return True
 
     def get_indicators(self, data: pd.DataFrame) -> Dict[str, Any]:

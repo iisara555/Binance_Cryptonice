@@ -17,22 +17,41 @@ if (-not $ProjectRoot) {
 
 $resolvedProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$remoteServiceUser = if ($SshTarget -match '^(?<user>[^@]+)@') { $Matches['user'] } else { 'root' }
 
 $runtimeFiles = @(
+    'alerts.py',
     'main.py',
     'api_client.py',
+    'helpers.py',
+    'portfolio_manager.py',
     'data_collector.py',
+    'bitkub_websocket.py',
     'trading_bot.py',
     'trade_executor.py',
     'balance_monitor.py',
     'database.py',
+    'multi_timeframe.py',
     'risk_management.py',
     'signal_generator.py',
+    'strategy_base.py',
+    'telegram_bot.py',
     'cli_ui.py',
     'bot_config.yaml',
     'coin_whitelist.json',
+    'strategies/__init__.py',
+    'strategies/sniper.py',
+    'trading/execution_runtime.py',
+    'trading/cost_basis.py',
+    'trading/managed_lifecycle.py',
+    'trading/portfolio_runtime.py',
+    'trading/position_monitor.py',
+    'trading/signal_runtime.py',
+    'trading/startup_runtime.py',
+    'trading/status_runtime.py',
     'deploy/systemd/crypto-bot-tmux.sh',
-    'deploy/systemd/crypto-bot-tmux.service'
+    'deploy/systemd/crypto-bot-tmux.service',
+    'deploy/systemd/crypto-bot-runtime.service'
 )
 
 function Write-Step {
@@ -113,6 +132,138 @@ function Convert-ToRemotePath {
     return "$BasePath/$normalized"
 }
 
+function Get-RemoteFileLoopBody {
+    param([Parameter(Mandatory = $true)][string[]]$RelativePaths)
+
+    return (($RelativePaths | ForEach-Object { $_ -replace '\\', '/' }) -join "`n")
+}
+
+function New-RemoteMirrorScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$DestinationRoot,
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string[]]$RelativePaths
+    )
+
+    $script = @'
+set -euo pipefail
+destination_root='__DESTINATION_ROOT__'
+project_root='__PROJECT_ROOT__'
+
+mkdir -p "$destination_root"
+
+while IFS= read -r relative_path; do
+    [ -n "$relative_path" ] || continue
+    src="$project_root/$relative_path"
+    dst="$destination_root/$relative_path"
+    mkdir -p "$(dirname "$dst")"
+    if [ -e "$src" ]; then
+        cp "$src" "$dst"
+    fi
+done <<'FILES'
+__RUNTIME_FILES__
+FILES
+
+echo "$destination_root"
+'@
+
+    return $script.Replace('__DESTINATION_ROOT__', $DestinationRoot).Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__RUNTIME_FILES__', (Get-RemoteFileLoopBody -RelativePaths $RelativePaths))
+}
+
+function New-RemoteMkdirScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string[]]$RelativePaths
+    )
+
+    $script = @'
+set -euo pipefail
+project_root='__PROJECT_ROOT__'
+
+mkdir -p "$project_root"
+
+while IFS= read -r relative_path; do
+    [ -n "$relative_path" ] || continue
+    mkdir -p "$(dirname "$project_root/$relative_path")"
+done <<'FILES'
+__RUNTIME_FILES__
+FILES
+'@
+
+    return $script.Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__RUNTIME_FILES__', (Get-RemoteFileLoopBody -RelativePaths $RelativePaths))
+}
+
+function New-RemoteValidateAndRestartScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectRoot,
+        [Parameter(Mandatory = $true)][string]$ServiceUser,
+        [Parameter(Mandatory = $true)][string]$ServiceName,
+        [Parameter(Mandatory = $true)][string]$HealthUrl,
+        [Parameter(Mandatory = $true)][int]$SkipHealth,
+        [Parameter(Mandatory = $true)][string[]]$RelativePaths
+    )
+
+    $pythonFiles = @($RelativePaths | Where-Object { $_.EndsWith('.py') })
+    $script = @'
+set -euo pipefail
+project_root='__PROJECT_ROOT__'
+service_user='__REMOTE_SERVICE_USER__'
+service_name='__REMOTE_SERVICE_NAME__'
+health_url='__BOT_HEALTH_URL__'
+skip_health='__SKIP_HEALTH__'
+
+resolve_python_bin() {
+    for candidate in \
+        "$project_root/.venv/bin/python" \
+        "$project_root/.venv-3/bin/python" \
+        "$project_root/venv/bin/python"
+    do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    echo "Could not locate a project Python executable under $project_root" >&2
+    return 1
+}
+
+chmod +x "$project_root/deploy/systemd/crypto-bot-tmux.sh"
+sed \
+    -e "s|^User=.*|User=$service_user|" \
+    -e "s|^Group=.*|Group=$service_user|" \
+    -e "s|/opt/crypto-bot-v1|$project_root|g" \
+    "$project_root/deploy/systemd/crypto-bot-tmux.service" \
+    > "/etc/systemd/system/crypto-bot-tmux.service"
+sed \
+    -e "s|^User=.*|User=$service_user|" \
+    -e "s|^Group=.*|Group=$service_user|" \
+    -e "s|/opt/crypto-bot-v1|$project_root|g" \
+    "$project_root/deploy/systemd/crypto-bot-runtime.service" \
+    > "/etc/systemd/system/crypto-bot-runtime.service"
+systemctl daemon-reload
+cd "$project_root"
+python_bin="$(resolve_python_bin)"
+"$python_bin" -m py_compile __PYTHON_FILES__
+systemctl restart "$service_name"
+systemctl status "$service_name" --no-pager -l
+tmux list-sessions
+
+if [ "$skip_health" = "0" ]; then
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if curl -fsS "$health_url"; then
+            exit 0
+        fi
+        sleep 2
+    done
+    echo "Health check failed: $health_url" >&2
+    exit 1
+fi
+'@
+
+    return $script.Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__REMOTE_SERVICE_USER__', $ServiceUser).Replace('__REMOTE_SERVICE_NAME__', $ServiceName).Replace('__BOT_HEALTH_URL__', $HealthUrl).Replace('__SKIP_HEALTH__', [string]$SkipHealth).Replace('__PYTHON_FILES__', ($pythonFiles -join ' '))
+}
+
 Assert-CommandExists -Name 'ssh'
 Assert-CommandExists -Name 'scp'
 
@@ -134,20 +285,15 @@ $preDeploySnapshot = "$RemoteProjectRoot/.deploy-backups/pre-$timestamp"
 $postDeploySnapshot = "$RemoteProjectRoot/.deploy-snapshots/$timestamp"
 
 Write-Step "Creating pre-deploy backup on VPS"
-$backupScript = @'
-set -euo pipefail
-backup_dir='__PRE_DEPLOY_SNAPSHOT__'
-project_root='__REMOTE_PROJECT_ROOT__'
-mkdir -p "$backup_dir/deploy/systemd"
-cp "$project_root/main.py" "$project_root/api_client.py" "$project_root/data_collector.py" "$project_root/trading_bot.py" "$project_root/trade_executor.py" "$project_root/balance_monitor.py" "$project_root/database.py" "$project_root/risk_management.py" "$project_root/signal_generator.py" "$project_root/cli_ui.py" "$project_root/bot_config.yaml" "$project_root/coin_whitelist.json" "$backup_dir/"
-cp "$project_root/deploy/systemd/crypto-bot-tmux.sh" "$project_root/deploy/systemd/crypto-bot-tmux.service" "$backup_dir/deploy/systemd/" 2>/dev/null || true
-echo "$backup_dir"
-'@
-$backupScript = $backupScript.Replace('__PRE_DEPLOY_SNAPSHOT__', $preDeploySnapshot).Replace('__REMOTE_PROJECT_ROOT__', $RemoteProjectRoot)
+$backupScript = New-RemoteMirrorScript -DestinationRoot $preDeploySnapshot -ProjectRoot $RemoteProjectRoot -RelativePaths $runtimeFiles
 $backupResult = Invoke-SshScript -Target $SshTarget -ScriptBody $backupScript -CaptureOutput
 if ($backupResult) {
     Write-Step ("Pre-deploy backup: {0}" -f ($backupResult.Trim()))
 }
+
+Write-Step "Ensuring remote directories exist"
+$mkdirScript = New-RemoteMkdirScript -ProjectRoot $RemoteProjectRoot -RelativePaths $runtimeFiles
+Invoke-SshScript -Target $SshTarget -ScriptBody $mkdirScript
 
 Write-Step "Uploading runtime files"
 foreach ($relativePath in $runtimeFiles) {
@@ -157,45 +303,11 @@ foreach ($relativePath in $runtimeFiles) {
 }
 
 Write-Step "Validating Python files and restarting service"
-$validateAndRestartScript = @'
-set -euo pipefail
-project_root='__REMOTE_PROJECT_ROOT__'
-service_name='__REMOTE_SERVICE_NAME__'
-health_url='__BOT_HEALTH_URL__'
-skip_health='__SKIP_HEALTH__'
-
-chmod +x "$project_root/deploy/systemd/crypto-bot-tmux.sh"
-cd "$project_root"
-./.venv-3/bin/python -m py_compile main.py api_client.py data_collector.py trading_bot.py trade_executor.py balance_monitor.py database.py risk_management.py signal_generator.py cli_ui.py
-systemctl restart "$service_name"
-systemctl status "$service_name" --no-pager -l
-tmux list-sessions
-
-if [ "$skip_health" = "0" ]; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        if curl -fsS "$health_url"; then
-            exit 0
-        fi
-        sleep 2
-    done
-    echo "Health check failed: $health_url" >&2
-    exit 1
-fi
-'@
-$validateAndRestartScript = $validateAndRestartScript.Replace('__REMOTE_PROJECT_ROOT__', $RemoteProjectRoot).Replace('__REMOTE_SERVICE_NAME__', $RemoteServiceName).Replace('__BOT_HEALTH_URL__', $BotHealthUrl).Replace('__SKIP_HEALTH__', ([int]$SkipHealthCheck.IsPresent))
+$validateAndRestartScript = New-RemoteValidateAndRestartScript -ProjectRoot $RemoteProjectRoot -ServiceUser $remoteServiceUser -ServiceName $RemoteServiceName -HealthUrl $BotHealthUrl -SkipHealth ([int]$SkipHealthCheck.IsPresent) -RelativePaths $runtimeFiles
 Invoke-SshScript -Target $SshTarget -ScriptBody $validateAndRestartScript
 
 Write-Step "Creating post-deploy snapshot on VPS"
-$snapshotScript = @'
-set -euo pipefail
-snapshot_dir='__POST_DEPLOY_SNAPSHOT__'
-project_root='__REMOTE_PROJECT_ROOT__'
-mkdir -p "$snapshot_dir/deploy/systemd"
-cp "$project_root/main.py" "$project_root/api_client.py" "$project_root/data_collector.py" "$project_root/trading_bot.py" "$project_root/trade_executor.py" "$project_root/balance_monitor.py" "$project_root/database.py" "$project_root/risk_management.py" "$project_root/signal_generator.py" "$project_root/cli_ui.py" "$project_root/bot_config.yaml" "$project_root/coin_whitelist.json" "$snapshot_dir/"
-cp "$project_root/deploy/systemd/crypto-bot-tmux.sh" "$project_root/deploy/systemd/crypto-bot-tmux.service" "$snapshot_dir/deploy/systemd/"
-echo "$snapshot_dir"
-'@
-$snapshotScript = $snapshotScript.Replace('__POST_DEPLOY_SNAPSHOT__', $postDeploySnapshot).Replace('__REMOTE_PROJECT_ROOT__', $RemoteProjectRoot)
+$snapshotScript = New-RemoteMirrorScript -DestinationRoot $postDeploySnapshot -ProjectRoot $RemoteProjectRoot -RelativePaths $runtimeFiles
 $snapshotResult = Invoke-SshScript -Target $SshTarget -ScriptBody $snapshotScript -CaptureOutput
 if ($snapshotResult) {
     Write-Step ("Post-deploy snapshot: {0}" -f ($snapshotResult.Trim()))

@@ -5,9 +5,12 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from bitkub_websocket import BitkubWebSocket
+from bitkub_websocket import BitkubWebSocket, PriceTick
 from database import Database
+from helpers import get_current_price
 from telegram_bot import TelegramBotHandler
+from trading.managed_lifecycle import _resolve_sane_entry_cost as resolve_managed_entry_cost
+from trading.position_monitor import _resolve_sane_entry_cost as resolve_monitor_entry_cost
 
 
 def test_database_migrates_legacy_prices_unique_key_to_include_timeframe(tmp_path):
@@ -150,3 +153,109 @@ def test_websocket_heartbeat_uses_warning_and_reconnect_grace_windows():
     assert ws._should_warn_heartbeat_stale(now=131.0) is True      # 31s > 15*2=30s warning
     assert ws._should_force_heartbeat_reconnect(now=159.0) is False  # 59s < 15*4=60s reconnect
     assert ws._should_force_heartbeat_reconnect(now=161.0) is True   # 61s > 60s reconnect
+
+
+def test_websocket_reports_connection_age_and_proactive_recycle_stats():
+    ws = BitkubWebSocket(['THB_BTC'], on_tick=None)
+    ws._last_connection_time = 100.0
+    ws._last_pong_time = 190.0
+    ws._last_activity_time = 190.0
+    ws._stats['proactive_recycles'] = 2
+
+    now = 200.0
+    assert ws._connection_age_seconds(now=now) == pytest.approx(100.0)
+
+    # Keep stats contract stable for dashboards/health endpoints.
+    stats = ws.get_stats()
+    assert 'connection_age_seconds' in stats
+    assert 'proactive_recycles' in stats
+    assert stats['proactive_recycles'] == 2
+
+
+def test_get_current_price_uses_rest_when_ws_tick_is_stale(monkeypatch):
+    stale_tick = PriceTick(
+        symbol='THB_BTC',
+        last=2_300_000.0,
+        bid=2_299_900.0,
+        ask=2_300_100.0,
+        percent_change_24h=0.0,
+        timestamp=1.0,
+    )
+    monkeypatch.setattr('bitkub_websocket.get_latest_ticker', lambda _symbol: stale_tick)
+
+    class _Api:
+        @staticmethod
+        def get_ticker(_symbol):
+            return {'last': 2_350_000.0}
+
+    price, source = get_current_price('THB_BTC', api_client=_Api(), ws_client=object())
+
+    assert source == 'rest'
+    assert price == pytest.approx(2_350_000.0)
+
+
+def test_get_current_price_uses_ws_stale_last_resort_when_rest_unavailable(monkeypatch):
+    stale_tick = PriceTick(
+        symbol='THB_BTC',
+        last=2_300_000.0,
+        bid=2_299_900.0,
+        ask=2_300_100.0,
+        percent_change_24h=0.0,
+        timestamp=1.0,
+    )
+    monkeypatch.setattr('bitkub_websocket.get_latest_ticker', lambda _symbol: stale_tick)
+
+    class _Api:
+        @staticmethod
+        def get_ticker(_symbol):
+            raise RuntimeError('REST down')
+
+    price, source = get_current_price('THB_BTC', api_client=_Api(), ws_client=object())
+
+    assert source == 'ws_stale'
+    assert price == pytest.approx(2_300_000.0)
+
+
+def test_entry_cost_guard_uses_implied_cost_when_reported_cost_drift_is_large():
+    amount = 6.05e-05
+    entry_price = 2_293_139.4
+    reported_cost = 200.0
+    implied_cost = amount * entry_price
+
+    managed_cost = resolve_managed_entry_cost(
+        symbol='THB_BTC',
+        amount=amount,
+        entry_price=entry_price,
+        reported_entry_cost=reported_cost,
+    )
+    monitor_cost = resolve_monitor_entry_cost(
+        symbol='THB_BTC',
+        amount=amount,
+        entry_price=entry_price,
+        reported_entry_cost=reported_cost,
+    )
+
+    assert managed_cost == pytest.approx(implied_cost)
+    assert monitor_cost == pytest.approx(implied_cost)
+
+
+def test_entry_cost_guard_keeps_reported_cost_when_within_tolerance():
+    amount = 0.1
+    entry_price = 1000.0
+    reported_cost = 101.5  # 1.5% drift, below guard threshold
+
+    managed_cost = resolve_managed_entry_cost(
+        symbol='THB_TEST',
+        amount=amount,
+        entry_price=entry_price,
+        reported_entry_cost=reported_cost,
+    )
+    monitor_cost = resolve_monitor_entry_cost(
+        symbol='THB_TEST',
+        amount=amount,
+        entry_price=entry_price,
+        reported_entry_cost=reported_cost,
+    )
+
+    assert managed_cost == pytest.approx(reported_cost)
+    assert monitor_cost == pytest.approx(reported_cost)

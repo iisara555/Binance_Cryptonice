@@ -7,23 +7,33 @@ across the codebase.
 """
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 from typing import Tuple
 
 
 class TechnicalIndicators:
     """Calculate technical indicators for trading signals."""
+
+    @staticmethod
+    def _wilder_smoothing(values: pd.Series, period: int) -> pd.Series:
+        return values.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
     
     @staticmethod
     def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
         """Relative Strength Index (RSI)"""
         delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        gain = delta.clip(lower=0.0)
+        loss = (-delta).clip(lower=0.0)
+        avg_gain = TechnicalIndicators._wilder_smoothing(gain, period)
+        avg_loss = TechnicalIndicators._wilder_smoothing(loss, period)
         # Proper RSI: when loss=0 -> RSI=100, when gain=0 -> RSI=0, when both=0 -> RSI=50
+        avg_gain_values = avg_gain.to_numpy(dtype=float)
+        avg_loss_values = avg_loss.to_numpy(dtype=float)
+        safe_loss_values = np.where(avg_loss_values == 0.0, 1.0, avg_loss_values)
         rs = pd.Series(np.where(
-            (gain == 0) & (loss == 0), 1.0,       # flat market -> RS=1 -> RSI=50
-            np.where(loss == 0, np.inf, gain / loss)
-        ), index=gain.index)
+            (avg_gain_values == 0.0) & (avg_loss_values == 0.0), 1.0,  # flat market -> RS=1 -> RSI=50
+            np.where(avg_loss_values == 0.0, np.inf, avg_gain_values / safe_loss_values)
+        ), index=avg_gain.index)
         rsi = 100 - (100 / (1 + rs))
         return rsi.clip(0, 100)
     
@@ -64,10 +74,10 @@ class TechnicalIndicators:
     ) -> pd.Series:
         """Average True Range (ATR)"""
         tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(window=period).mean()
+        return TechnicalIndicators._wilder_smoothing(tr, period)
     
     @staticmethod
     def calculate_stochastic(
@@ -91,18 +101,45 @@ class TechnicalIndicators:
         period: int = 14
     ) -> pd.Series:
         """Average Directional Index (ADX) - Trend strength"""
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
-        plus_dm[plus_dm < 0] = 0
-        minus_dm[minus_dm < 0] = 0
-        
-        tr = TechnicalIndicators.calculate_atr(high, low, close, period)
-        plus_di = 100 * (plus_dm.rolling(window=period).mean() / tr)
-        minus_di = 100 * (minus_dm.rolling(window=period).mean() / tr)
-        
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.rolling(window=period).mean()
-        return adx
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        atr = TechnicalIndicators.calculate_atr(high, low, close, period)
+        plus_dm_smoothed = TechnicalIndicators._wilder_smoothing(plus_dm, period)
+        minus_dm_smoothed = TechnicalIndicators._wilder_smoothing(minus_dm, period)
+
+        atr_values = atr.to_numpy(dtype=float)
+        plus_dm_values = plus_dm_smoothed.to_numpy(dtype=float)
+        minus_dm_values = minus_dm_smoothed.to_numpy(dtype=float)
+        valid_atr = np.isfinite(atr_values) & (atr_values > 0.0)
+
+        plus_di_values = np.divide(
+            100.0 * plus_dm_values,
+            atr_values,
+            out=np.zeros_like(atr_values, dtype=float),
+            where=valid_atr,
+        )
+        minus_di_values = np.divide(
+            100.0 * minus_dm_values,
+            atr_values,
+            out=np.zeros_like(atr_values, dtype=float),
+            where=valid_atr,
+        )
+
+        di_sum_values = plus_di_values + minus_di_values
+        valid_di_sum = np.isfinite(di_sum_values) & (di_sum_values > 0.0)
+        dx_values = np.divide(
+            100.0 * np.abs(plus_di_values - minus_di_values),
+            di_sum_values,
+            out=np.zeros_like(di_sum_values, dtype=float),
+            where=valid_di_sum,
+        )
+
+        dx = pd.Series(dx_values, index=high.index)
+        adx = TechnicalIndicators._wilder_smoothing(dx, period).fillna(0.0)
+        return adx.clip(0.0, 100.0)
     
     @staticmethod
     def calculate_cci(
@@ -112,64 +149,18 @@ class TechnicalIndicators:
         period: int = 20
     ) -> pd.Series:
         """Commodity Channel Index (CCI)"""
-        tp = (high + low + close) / 3
+        tp = ((high + low + close) / 3).astype(float)
         sma_tp = tp.rolling(window=period).mean()
-        mad = tp.rolling(window=period).apply(lambda x: np.abs(x - x.mean()).mean())
+        tp_values = tp.to_numpy(dtype=float)
+        mad_values = np.full(tp_values.shape, np.nan, dtype=float)
+        if period > 0 and len(tp_values) >= period:
+            windows = sliding_window_view(tp_values, window_shape=period)
+            window_means = windows.mean(axis=1)
+            mad_values[period - 1:] = np.abs(windows - window_means[:, None]).mean(axis=1)
+        mad = pd.Series(mad_values, index=tp.index)
         cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
         return cci
     
-    @staticmethod
-    def calculate_williams_r(
-        high: pd.Series,
-        low: pd.Series,
-        close: pd.Series,
-        period: int = 14
-    ) -> pd.Series:
-        """Williams %R"""
-        highest_high = high.rolling(window=period).max()
-        lowest_low = low.rolling(window=period).min()
-        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-        return williams_r
-    
-    @staticmethod
-    def calculate_mfi(
-        high: pd.Series,
-        low: pd.Series,
-        close: pd.Series,
-        volume: pd.Series,
-        period: int = 14
-    ) -> pd.Series:
-        """Money Flow Index (MFI)"""
-        tp = (high + low + close) / 3
-        raw_money_flow = tp * volume
-        positive_flow = raw_money_flow.where(tp > tp.shift(1), 0)
-        negative_flow = raw_money_flow.where(tp < tp.shift(1), 0)
-        
-        positive_mf = positive_flow.rolling(window=period).sum()
-        negative_mf = negative_flow.rolling(window=period).sum()
-        
-        mfi = 100 - (100 / (1 + positive_mf / (negative_mf + 1e-10)))
-        return mfi
-    
-    @staticmethod
-    def calculate_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
-        """On-Balance Volume (OBV)"""
-        direction = pd.Series(np.sign(close.diff()), index=close.index, dtype=float).fillna(0.0)
-        obv = (direction * volume).cumsum()
-        return obv
-    
-    @staticmethod
-    def calculate_vwap(
-        high: pd.Series,
-        low: pd.Series,
-        close: pd.Series,
-        volume: pd.Series
-    ) -> pd.Series:
-        """Volume Weighted Average Price (VWAP)"""
-        typical_price = (high + low + close) / 3
-        return (typical_price * volume).cumsum() / volume.cumsum()
-
-
 # Convenience functions for direct import
 calculate_rsi = TechnicalIndicators.calculate_rsi
 calculate_macd = TechnicalIndicators.calculate_macd
@@ -178,7 +169,3 @@ calculate_atr = TechnicalIndicators.calculate_atr
 calculate_stochastic = TechnicalIndicators.calculate_stochastic
 calculate_adx = TechnicalIndicators.calculate_adx
 calculate_cci = TechnicalIndicators.calculate_cci
-calculate_williams_r = TechnicalIndicators.calculate_williams_r
-calculate_mfi = TechnicalIndicators.calculate_mfi
-calculate_obv = TechnicalIndicators.calculate_obv
-calculate_vwap = TechnicalIndicators.calculate_vwap

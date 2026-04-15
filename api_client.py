@@ -51,7 +51,8 @@ def get_public_ip(timeout: float = 5) -> Optional[str]:
                 ip = resp.text.strip()
                 if ip:
                     return ip
-        except Exception:
+        except Exception as exc:
+            logger.debug("Public IP lookup failed via %s: %s", url, exc)
             continue
     return None
 
@@ -71,8 +72,8 @@ def check_ip_change_on_startup() -> Optional[str]:
     try:
         if _LAST_KNOWN_IP_FILE.exists():
             previous_ip = _LAST_KNOWN_IP_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed reading last known IP file %s: %s", _LAST_KNOWN_IP_FILE, exc)
 
     if previous_ip and previous_ip != current_ip:
         logger.warning(
@@ -85,8 +86,8 @@ def check_ip_change_on_startup() -> Optional[str]:
 
     try:
         _LAST_KNOWN_IP_FILE.write_text(current_ip, encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed writing last known IP file %s: %s", _LAST_KNOWN_IP_FILE, exc)
 
     return current_ip
 
@@ -128,10 +129,9 @@ def _bitkub_error_message(code: Any, fallback: Optional[str] = None) -> str:
     fallback_text = str(fallback or "").strip()
     return fallback_text or "Unknown error"
 
-# ── Global Shutdown Flag ─────────────────────────────────────────────────────
-# Set to True when a fatal, non-recoverable error occurs (e.g. invalid API
-# credentials, Bitkub Error 5). The main trading loop checks this flag and
-# exits gracefully instead of spam-retrying the exchange.
+# ── Legacy Fatal Auth Flags ──────────────────────────────────────────────────
+# Retained only for backward-compatible startup helpers/tests. Runtime control
+# flow now uses FatalAuthException instead of polling these globals.
 SHOULD_SHUTDOWN: bool = False
 SHUTDOWN_REASON: str = ""
 
@@ -384,6 +384,11 @@ class BitkubAPIError(Exception):
 
 class CircuitBreakerOpen(BitkubAPIError):
     """Raised when the circuit breaker is open and blocking requests."""
+    pass
+
+
+class FatalAuthException(BitkubAPIError):
+    """Raised when Bitkub rejects private API auth and the bot must stop."""
     pass
 
 
@@ -752,45 +757,23 @@ class BitkubClient:
                     )
                     raise
 
-                global SHOULD_SHUTDOWN, SHUTDOWN_REASON
                 current_ip = get_public_ip() or "unknown"
                 logger.critical(
                     "🚨 FATAL: Bitkub Auth Error 5 — IP not allowed. "
                     "Current IP: %s | Message: %s | Raw: %s",
                     current_ip, e.message, e.raw,
                 )
-                # Send immediate Telegram alert
-                try:
-                    import os as _os
-                    _bot_token = _os.environ.get("TELEGRAM_BOT_TOKEN", "")
-                    _chat_id = _os.environ.get("TELEGRAM_CHAT_ID", "")
-                    if _bot_token and _chat_id:
-                        from alerts import send_error_token
-                        send_error_token(
-                            _bot_token, _chat_id,
-                            title="FATAL: Bitkub Auth Error 5",
-                            details=(
-                                f"Bitkub rejected the request — IP not allowed.\n"
-                                f"🌐 Current IP: {current_ip}\n"
-                                f"Add this IP to the Bitkub API allowlist:\n"
-                                f"https://www.bitkub.com/publicapi\n"
-                                f"Then restart the bot."
-                            ),
-                            status="SHUTDOWN",
-                        )
-                        logger.info("Telegram shutdown alert sent successfully")
-                except Exception as tg_err:
-                    logger.error(f"Failed to send Telegram shutdown alert: {tg_err}")
 
                 # Record failure in circuit breaker (prevents further API spam)
                 self._cb.record_failure(f"FATAL Auth Error 5 on {endpoint}")
-
-                # Set global shutdown flag
-                SHOULD_SHUTDOWN = True
-                SHUTDOWN_REASON = (
-                    f"🚨 FATAL: Bitkub Auth Error 5. "
-                    f"IP not allowed (current IP: {current_ip}). "
-                    f"Add this IP to the Bitkub API allowlist and restart."
+                raise FatalAuthException(
+                    e.code,
+                    (
+                        f"🚨 FATAL: Bitkub Auth Error 5. "
+                        f"IP not allowed (current IP: {current_ip}). "
+                        f"Add this IP to the Bitkub API allowlist and restart."
+                    ),
+                    raw=e.raw,
                 )
 
             # Errors 11, 15, 21, 24 = stale/missing order or bad request — NOT infra
@@ -978,7 +961,8 @@ class BitkubClient:
 
     def get_symbols(self) -> List[Dict[str, Any]]:
         """GET /api/v3/market/symbols — list all available trading pairs."""
-        return self._request("GET", "/api/v3/market/symbols")
+        result = self._request("GET", "/api/v3/market/symbols")
+        return result if isinstance(result, list) else []
 
     def get_depth(
         self,
@@ -1082,12 +1066,13 @@ class BitkubClient:
                 self._balances_cache = fresh
                 self._balances_cache_time = time.time()
             return fresh
-        except Exception:
+        except Exception as exc:
             # On error, return stale cache if available (better than nothing)
             with self._state_lock:
                 if allow_stale and self._balances_cache is not None:
-                    logger.warning("[Balance] Using stale cache due to API error")
+                    logger.warning("[Balance] Using stale cache due to API error: %s", exc)
                     return self._balances_cache
+            logger.error("[Balance] Failed to fetch balances and no stale cache is available", exc_info=True)
             raise
 
     def get_balances_fresh(self) -> Dict[str, Dict[str, float]]:
@@ -1396,11 +1381,7 @@ class BitkubClient:
 
     def fmt_ticker(self, symbol: Optional[str] = None) -> str:
         """Return a human-readable ticker string."""
-        tickers = self.get_ticker(symbol)
-        if isinstance(tickers, list) and tickers:
-            t = tickers[0]
-        else:
-            t = tickers
+        t = self.get_ticker(symbol)
         sym = t.get("symbol", symbol or self.symbol)
         return (
             f"{sym} | last={t['last']} | "
