@@ -155,11 +155,8 @@ class BitkubWebSocket:
         streams = []
         for s in self.symbols:
             s_lower = s.lower()
-            # Convert internal THB_BTC to Bitkub's WS format (btc_thb)
-            if '_' in s_lower:
-                parts = s_lower.split('_')
-                if len(parts) == 2 and parts[0] == 'thb':
-                    s_lower = f"{parts[1]}_{parts[0]}"
+            # Bitkub WS uses thb-first format: market.ticker.thb_btc
+            # Our internal symbols are already THB_BTC, so just lowercase.
             streams.append(f"market.ticker.{s_lower}")
         stream_path = ",".join(streams)
         return f"wss://api.bitkub.com/websocket-api/{stream_path}"
