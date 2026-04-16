@@ -1,6 +1,6 @@
 import json
 import logging
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from rich.console import Console
@@ -430,9 +430,12 @@ def test_cli_snapshot_uses_lightweight_status_during_live_dashboard(tmp_path):
     app.bot.get_status.assert_called_once_with(lightweight=True)
 
 
-def test_cli_snapshot_live_dashboard_falls_back_to_rest_for_position_prices(tmp_path):
+def test_cli_snapshot_live_dashboard_uses_cache_fallback_for_position_prices(tmp_path):
+    """In live mode, REST fallback is disabled. Instead, stale cache is used."""
     app = _build_app(tmp_path)
     app._live_dashboard_active = True
+    # Seed price cache so the stale-cache fallback kicks in
+    app._cli_price_cache["THB_BTC"] = (105.0, 0.0)
     app.executor = Mock()
     app.executor.get_open_orders.return_value = [
         {
@@ -454,16 +457,13 @@ def test_cli_snapshot_live_dashboard_falls_back_to_rest_for_position_prices(tmp_
     }
     app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
     app._sample_api_latency = Mock(return_value=None)
-    app._get_cli_price = Mock(side_effect=[None, 105.0])
-    app._get_cli_position_price_hint = Mock(return_value=None)
+    app._get_cli_price = Mock(return_value=None)
 
     snapshot = app.get_cli_snapshot()
 
     position = snapshot["positions"][0]
     assert position["current_price"] == 105.0
     assert position["pnl_pct"] == pytest.approx(5.0)
-    assert app._get_cli_price.call_args_list[0].args == ("THB_BTC", False)
-    assert app._get_cli_price.call_args_list[1].args == ("THB_BTC", True)
 
 
 def test_get_cli_price_rejects_stale_ws_tick_in_live_mode(tmp_path):

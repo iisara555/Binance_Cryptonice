@@ -357,6 +357,11 @@ class CLICommandCenter:
     def _normalize_snapshot_for_signature(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         normalized = json.loads(json.dumps(snapshot or {}, sort_keys=True, default=str, ensure_ascii=False))
         normalized.pop("updated_at", None)
+        # Exclude chat input from signature so typing doesn't trigger full re-renders
+        chat = normalized.get("chat")
+        if isinstance(chat, dict):
+            chat.pop("input", None)
+            chat.pop("suggestions", None)
         system = normalized.get("system")
         if isinstance(system, dict):
             system.pop("market_age_seconds", None)

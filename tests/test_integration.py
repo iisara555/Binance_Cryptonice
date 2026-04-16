@@ -1942,7 +1942,7 @@ class TestCliSnapshot:
             "BTC": {"available": 0.01, "reserved": 0.0},
             "ETH": {"available": 0.5, "reserved": 0.0},
         }
-        app._get_cli_price = Mock(side_effect=lambda symbol: {
+        app._get_cli_price = Mock(side_effect=lambda symbol, _fallback=True: {
             "THB_BTC": 2_000_000.0,
             "THB_ETH": 100_000.0,
         }.get(symbol))
@@ -2066,6 +2066,7 @@ class TestCliSnapshot:
     def test_cli_balance_summary_falls_back_to_tracked_position_price_when_live_price_missing(self):
         app = TradingBotApp.__new__(TradingBotApp)
         app.config = {"auth_degraded": False}
+        app._cli_price_cache = {}
         app.api_client = Mock()
         app.api_client.get_balances.return_value = {
             "THB": {"available": 500.0, "reserved": 0.0},
@@ -2121,6 +2122,7 @@ class TestCliSnapshot:
             "auth_degraded": False,
             "data": {"pairs": ["THB_BTC"]},
         }
+        app._cli_price_cache = {}
         app._cli_bot_name = "Test Bot"
         app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
         app._sample_api_latency = Mock(return_value=25.0)
@@ -2167,6 +2169,7 @@ class TestCliSnapshot:
             "auth_degraded": False,
             "data": {"pairs": ["THB_BTC"]},
         }
+        app._cli_price_cache = {}
         app._cli_bot_name = "Test Bot"
         app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
         app._sample_api_latency = Mock(return_value=25.0)

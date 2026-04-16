@@ -1928,6 +1928,22 @@ class TradingBotApp:
         if not self.api_client or not symbol or self.config.get("auth_degraded", False):
             self._api_latency_ms = None
             return None
+        # In live dashboard mode, never block the render loop with a REST call.
+        # Fire a background thread to measure latency and return the cached value.
+        if getattr(self, "_live_dashboard_active", False):
+            if not getattr(self, "_api_latency_bg_running", False):
+                self._api_latency_bg_running = True
+                def _bg_probe(sym: str) -> None:
+                    try:
+                        started = time.perf_counter()
+                        self.api_client.get_ticker(sym)
+                        self._api_latency_ms = (time.perf_counter() - started) * 1000.0
+                    except Exception:
+                        self._api_latency_ms = None
+                    finally:
+                        self._api_latency_bg_running = False
+                threading.Thread(target=_bg_probe, args=(symbol,), daemon=True).start()
+            return self._api_latency_ms
         started = time.perf_counter()
         try:
             self.api_client.get_ticker(symbol)
@@ -2063,11 +2079,17 @@ class TradingBotApp:
 
         if balance_state:
             balances = balance_state.get("balances") or {}
-        else:
+        elif not live_dashboard_active:
             try:
                 balances = self.api_client.get_balances()
             except Exception:
                 balances = {}
+        else:
+            # Live dashboard: never block with REST. Use stale cache instead.
+            cached_summary = _get_fresh_cached_summary()
+            if cached_summary:
+                return cached_summary
+            balances = {}
 
         if not isinstance(balances, dict):
             balances = {}
@@ -2104,11 +2126,13 @@ class TradingBotApp:
                 breakdown.append({"asset": symbol, "amount": amount, "value_thb": amount})
                 continue
 
-            current_price = (
-                self._get_cli_price(f"THB_{symbol}")
-                if allow_rest_fallback
-                else self._get_cli_price(f"THB_{symbol}", False)
-            )
+            current_price = self._get_cli_price(f"THB_{symbol}", False)
+            if (not current_price or current_price <= 0) and not live_dashboard_active:
+                current_price = self._get_cli_price(f"THB_{symbol}", True)
+            if (not current_price or current_price <= 0):
+                cached = self._cli_price_cache.get(f"THB_{symbol}")
+                if cached:
+                    current_price = cached[0]
             if not current_price or current_price <= 0:
                 current_price = self._get_cli_position_price_hint(f"THB_{symbol}")
             if current_price and current_price > 0:
@@ -2308,7 +2332,7 @@ class TradingBotApp:
         risk_level, risk_style = self._derive_risk_level()
         positions: List[Dict[str, Any]] = []
         open_orders = self.executor.get_open_orders() if self.executor else []
-        allow_rest_fallback = not bool(getattr(self, "_live_dashboard_active", False))
+        allow_rest_fallback = False  # NEVER block render loop with REST calls for prices
 
         # Pre-fetch state machine snapshots for SL/TP fallback
         _state_manager = getattr(self.bot, "_state_manager", None) if self.bot else None
@@ -2319,13 +2343,12 @@ class TradingBotApp:
             side = str(getattr(side_value, "value", side_value) or "")
             entry_price = float(position.get("entry_price") or 0.0)
             bootstrap_src = position.get("bootstrap_source") or ""
-            current_price = (
-                self._get_cli_price(symbol)
-                if symbol and allow_rest_fallback
-                else self._get_cli_price(symbol, False) if symbol else None
-            )
-            if (not current_price or current_price <= 0) and symbol and not allow_rest_fallback:
-                current_price = self._get_cli_price(symbol, True)
+            current_price = self._get_cli_price(symbol, False) if symbol else None
+            # If WS-only returned nothing, use stale cache rather than blocking REST
+            if (not current_price or current_price <= 0) and symbol:
+                cached = self._cli_price_cache.get(symbol)
+                if cached:
+                    current_price = cached[0]
             # Never use entry_price as a current-price fallback in the positions panel.
             # That masks the preserved cost basis after restart and makes PnL read 0.00%.
             if (not current_price or current_price <= 0) and symbol:
@@ -3198,11 +3221,14 @@ class TradingBotApp:
                     next_refresh_at = 0.0
                     last_render_signature: Optional[str] = None
                     _render_failure_count = 0
+                    _last_chat_input = ""
+                    _last_snapshot: Optional[Dict[str, Any]] = None
                     while self.bot and self.bot.running:
                         now = time.time()
                         if now >= next_refresh_at:
                             try:
                                 snapshot, render_signature = command_center.capture_render_state()
+                                _last_snapshot = snapshot
                                 if render_signature != last_render_signature:
                                     render_started = time.perf_counter()
                                     live.update(command_center.render(snapshot), refresh=True)
@@ -3210,6 +3236,7 @@ class TradingBotApp:
                                     if render_elapsed_ms >= 1000.0:
                                         logger.warning("[CLI PERF] live.update took %.1fms", render_elapsed_ms)
                                     last_render_signature = render_signature
+                                    _last_chat_input = self._cli_chat_input
                                 _render_failure_count = 0
                             except Exception as render_exc:
                                 _render_failure_count += 1
@@ -3219,13 +3246,23 @@ class TradingBotApp:
                                     logger.error("CLI render failed %d times — disabling Live dashboard", _render_failure_count)
                                     break
                             next_refresh_at = now + command_center.refresh_interval_seconds
+                        else:
+                            # Fast-path: between full refreshes, re-render only if chat input changed
+                            current_input = self._cli_chat_input
+                            if current_input != _last_chat_input and _last_snapshot is not None:
+                                try:
+                                    _last_snapshot["chat"] = self._get_cli_chat_snapshot()
+                                    live.update(command_center.render(_last_snapshot), refresh=True)
+                                    _last_chat_input = current_input
+                                except Exception:
+                                    pass
                         # Auto-restart CLI listener if thread died
                         if self._cli_command_thread and not self._cli_command_thread.is_alive():
                             self._cli_command_thread = None
                             self._start_cli_command_listener()
                         # Check for auto mode switch
                         self._check_adaptive_mode_switch()
-                        time.sleep(1)
+                        time.sleep(0.15)
                 # Fallback: if Live dashboard broke, continue running without it
                 if self.bot and self.bot.running and _render_failure_count >= 10:
                     self._live_dashboard_active = False
