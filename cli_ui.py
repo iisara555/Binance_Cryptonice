@@ -220,7 +220,7 @@ class CLICommandCenter:
             console=self.console,
             auto_refresh=False,
             transient=False,
-            screen=False,
+            screen=True,
             vertical_overflow="crop",
         )
 
