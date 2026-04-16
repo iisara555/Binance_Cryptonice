@@ -67,7 +67,7 @@ strategy_mode:
 
 # Adaptive Strategy Router - Auto Mode Switching
 auto_mode_switch:
-  enabled: false                      # Set to true to enable auto mode switching
+  enabled: true                       # Set to true to enable auto mode switching
   check_interval_seconds: 300         # Check market every 5 minutes
   min_switch_interval_seconds: 1800   # Min 30 minutes between mode switches (hysteresis)
   persistence_threshold: 3            # Mode recommendation must persist 3 checks before switching
