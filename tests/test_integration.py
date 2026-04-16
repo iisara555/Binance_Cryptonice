@@ -1997,6 +1997,56 @@ class TestCliSnapshot:
         ]
         assert snapshot["system"]["trade_count"] == "3"
 
+    def test_cli_snapshot_exposes_service_health_indicators(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {
+            "mode": "full_auto",
+            "simulate_only": False,
+            "read_only": False,
+            "auth_degraded": False,
+            "data": {"pairs": ["THB_BTC"]},
+        }
+        app._cli_bot_name = "Test Bot"
+        app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
+        app._sample_api_latency = Mock(return_value=25.0)
+        app._format_cli_timestamp = Mock(return_value="12:34:56")
+        app._get_cli_price = Mock(return_value=2_000_000.0)
+        app.api_client = Mock()
+        app.api_client.get_balances.return_value = {
+            "THB": {"available": 500.0, "reserved": 0.0},
+        }
+        app.executor = Mock()
+        app.executor.get_open_orders.return_value = []
+        app.bot = Mock()
+        app.bot.get_status.return_value = {
+            "mode": "full_auto",
+            "trading_pairs": ["THB_BTC"],
+            "strategy_engine": {"strategies": ["trend_following"]},
+            "risk_summary": {"trades_today": 3},
+            "last_loop": None,
+            "multi_timeframe": {},
+            "balance_monitor": {
+                "enabled": True,
+                "running": True,
+                "updated_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(),
+            },
+            "websocket": {
+                "enabled": True,
+                "state": "connected",
+                "live_price": 2_000_000.0,
+            },
+        }
+        app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+        app.bot._balance_monitor = Mock()
+        app.bot._balance_monitor.poll_interval_seconds = 30
+        app.bot._ws_client = Mock()
+        app.bot._ws_client.get_stats.return_value = {"last_activity_ago": 45.0}
+
+        snapshot = TradingBotApp.get_cli_snapshot(app)
+
+        assert snapshot["system"]["websocket_health"] == "STALE 45s"
+        assert snapshot["system"]["balance_health"] == "STALE 300s"
+
     def test_sample_api_latency_still_probes_in_live_dashboard_mode(self):
         app = TradingBotApp.__new__(TradingBotApp)
         app.config = {"auth_degraded": False}

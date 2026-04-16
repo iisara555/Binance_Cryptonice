@@ -2412,6 +2412,58 @@ class TradingBotApp:
                 market_age_seconds = max(0, int((now_dt - last_market_dt).total_seconds()))
             except Exception:
                 market_age_seconds = None
+
+        balance_monitor_status = dict(bot_status.get("balance_monitor") or {})
+        balance_updated_at = parse_as_bitkub_time(balance_monitor_status.get("updated_at"))
+        balance_age_seconds: Optional[int] = None
+        if balance_updated_at is not None:
+            try:
+                balance_age_seconds = max(0, int((now_dt - balance_updated_at).total_seconds()))
+            except Exception:
+                balance_age_seconds = None
+
+        balance_monitor = getattr(self.bot, "_balance_monitor", None) if self.bot else None
+        raw_balance_poll_interval = getattr(balance_monitor, "poll_interval_seconds", 30.0)
+        try:
+            balance_poll_interval_seconds = float(raw_balance_poll_interval or 30.0)
+        except (TypeError, ValueError):
+            balance_poll_interval_seconds = 30.0
+        balance_stale_after_seconds = max(balance_poll_interval_seconds * 2.0, 60.0)
+
+        if not balance_monitor_status.get("enabled", False):
+            balance_health = "OFF"
+        elif not balance_monitor_status.get("running", False):
+            balance_health = "STOPPED"
+        elif balance_age_seconds is None:
+            balance_health = "NO DATA"
+        elif balance_age_seconds > balance_stale_after_seconds:
+            balance_health = f"STALE {balance_age_seconds}s"
+        else:
+            balance_health = f"OK {balance_age_seconds}s"
+
+        websocket_status = dict(bot_status.get("websocket") or {})
+        ws_client = getattr(self.bot, "_ws_client", None) if self.bot else None
+        ws_last_activity_seconds: Optional[int] = None
+        if ws_client is not None:
+            try:
+                ws_stats = ws_client.get_stats() or {}
+                raw_last_activity = ws_stats.get("last_activity_ago")
+                if raw_last_activity is not None:
+                    ws_last_activity_seconds = max(0, int(float(raw_last_activity)))
+            except Exception:
+                ws_last_activity_seconds = None
+
+        ws_state = str(websocket_status.get("state") or "not_started").lower()
+        if not websocket_status.get("enabled", False):
+            websocket_health = "OFF"
+        elif ws_state != "connected":
+            websocket_health = ws_state.upper()
+        elif ws_last_activity_seconds is None:
+            websocket_health = "NO DATA"
+        elif ws_last_activity_seconds > 30:
+            websocket_health = f"STALE {ws_last_activity_seconds}s"
+        else:
+            websocket_health = f"OK {ws_last_activity_seconds}s"
         _warn_snapshot_step("portfolio_state", step_started)
 
         step_started = time.perf_counter()
@@ -2484,6 +2536,8 @@ class TradingBotApp:
                 "market_age_seconds": market_age_seconds,
                 "freshness": freshness,
                 "api_latency": f"{api_latency_ms:.0f} ms" if api_latency_ms is not None else "-",
+                "websocket_health": websocket_health,
+                "balance_health": balance_health,
                 "candle_readiness": candle_readiness,
                 "candle_waiting": candle_waiting,
                 "available_balance": f"{float(portfolio_state.get('balance', 0.0) or 0.0):,.2f} THB",

@@ -718,6 +718,8 @@ class CLICommandCenter:
             Text.assemble(("Last Market Update ", "bold white"), (str(system.get("last_market_update", "-")), self._WHITE)),
             Text.assemble(("Data Freshness ", "bold white"), self._freshness_text(system.get("freshness"), system.get("market_age_seconds"))),
             Text.assemble(("API Latency ", "bold white"), self._api_latency_text(system.get("api_latency"))),
+            Text.assemble(("WebSocket ", "bold white"), self._service_health_text(system.get("websocket_health"))),
+            Text.assemble(("Balances ", "bold white"), self._service_health_text(system.get("balance_health"))),
             Text.assemble(("Candle Readiness ", "bold white"), (str(system.get("candle_readiness", "-")), self._WHITE)),
             Text.assemble(("Candle Waiting ", "bold white"), (str(system.get("candle_waiting", "-")), self._DIM)),
         ]
@@ -1369,3 +1371,15 @@ class CLICommandCenter:
         if ms >= 800:
             return Text(f"{ms} ms", style=f"bold {CLICommandCenter._EMBER}")
         return Text(f"{ms} ms", style=f"bold {CLICommandCenter._GREEN}")
+
+    @staticmethod
+    def _service_health_text(value: Any) -> Text:
+        raw = str(value or "-")
+        normalized = raw.upper()
+        if normalized.startswith("OK") or normalized in {"CONNECTED", "FRESH"}:
+            return Text(raw, style=f"bold {CLICommandCenter._GREEN}")
+        if normalized.startswith("STALE") or normalized in {"STOPPED", "DISCONNECTED", "FAILED"}:
+            return Text(raw, style=f"bold {CLICommandCenter._RED}")
+        if normalized in {"OFF", "NO DATA", "CONNECTING", "RECONNECTING", "NOT_STARTED"}:
+            return Text(raw, style=f"bold {CLICommandCenter._EMBER}")
+        return Text(raw, style=CLICommandCenter._WHITE)
