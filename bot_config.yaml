@@ -55,7 +55,7 @@ strategy_mode:
     pending_buy_timeout_seconds: 60
     pending_sell_timeout_seconds: 60
     stop_loss_pct: 1.0              # ← ค่าที่ใช้จริง (scalping mode signal SL)
-    take_profit_pct: 2.5             # ← ค่าที่ใช้จริง (scalping mode signal TP)
+    take_profit_pct: 3.0             # ← ค่าที่ใช้จริง (scalping mode signal TP)  net R:R≈1.67
     position_timeout_minutes: 30
     max_trades_per_day: 50
     min_time_between_trades_minutes: 2
@@ -108,7 +108,7 @@ multi_timeframe:
   # Risk parameters based on ATR
   atr_multiplier: 1.0               # ADJUSTED v2.1 - loosened for signal generation
   stop_loss_pct: 2.0                 # Fallback SL if no ATR (%)
-  take_profit_pct: 3.0               # Fallback TP if no ATR (%)
+  take_profit_pct: 4.0               # Fallback TP if no ATR (%)  net R:R≈1.75
   # Timeframe weights for signal aggregation
   tf_weights:
     "1m": 0.10
@@ -152,7 +152,7 @@ strategies:
     bollinger_std: 2.0
     min_entry_confidence: 0.30
     stop_loss_pct: 1.0              # ค่านี้ sync จาก strategy_mode.scalping
-    take_profit_pct: 2.5             # ค่านี้ sync จาก strategy_mode.scalping
+    take_profit_pct: 3.0             # ค่านี้ sync จาก strategy_mode.scalping
     position_timeout_minutes: 30
 
 # Auto Trader Settings (Full Auto Mode)

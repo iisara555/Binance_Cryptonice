@@ -97,7 +97,7 @@ MIN_ORDER_BUFFER = 1.10   # 10% safety buffer
 # SL: negative (loss), TP: positive (profit)
 DEFAULT_SL_TP = {
     "low": {"stop_loss_pct": -2.0, "take_profit_pct": 4.0},    # BTC: tighter pair-specific default profile
-    "high": {"stop_loss_pct": -3.0, "take_profit_pct": 5.0},   # ALT: fallback only (dynamic ATR×ADX preferred)
+    "high": {"stop_loss_pct": -4.0, "take_profit_pct": 7.0},   # ALT: wider for volatile altcoins  net R:R≈1.63
 }
 
 
