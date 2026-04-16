@@ -30,8 +30,8 @@ strategy_mode:
     min_strategies_agree: 1
     confirmations_required: 1
     confirmation_window_seconds: 180
-    stop_loss_pct: 4.5
-    take_profit_pct: 10.0
+    stop_loss_pct: 4.5              # ← ค่าที่ใช้จริง (trend_only mode signal SL)
+    take_profit_pct: 10.0            # ← ค่าที่ใช้จริง (trend_only mode signal TP)
     max_hold_hours: 48
     min_time_between_trades_minutes: 5
     mtf_enabled: true
@@ -54,8 +54,8 @@ strategy_mode:
     confirmation_window_seconds: 90
     pending_buy_timeout_seconds: 60
     pending_sell_timeout_seconds: 60
-    stop_loss_pct: 1.0
-    take_profit_pct: 2.5
+    stop_loss_pct: 1.0              # ← ค่าที่ใช้จริง (scalping mode signal SL)
+    take_profit_pct: 2.5             # ← ค่าที่ใช้จริง (scalping mode signal TP)
     position_timeout_minutes: 30
     max_trades_per_day: 50
     min_time_between_trades_minutes: 2
@@ -125,10 +125,9 @@ risk:
   max_risk_per_trade_pct: 1.0        # 1% risk per trade
   max_daily_loss_pct: 5.0            # 5% max daily loss
   max_position_per_trade_pct: 10.0   # Max 10% of portfolio per trade
-  max_open_positions: 4              # Maximum open positions (adjust based on active pairs)
+  max_open_positions: 6              # Maximum open positions (adjust based on active pairs)
   max_daily_trades: 50               # Maximum trades per day
-  stop_loss_pct: 5.0                 # 5% stop loss for crypto volatility
-  take_profit_pct: 12.0              # 12% take profit (R:R ~= 2.4)
+  # NOTE: SL/TP ถูกกำหนดใน strategy_mode.scalping / trend_only (ไม่ใช่ที่นี่)
   cool_down_minutes: 5               # Cooldown between trades
   use_dynamic_sl_tp: true            # Enable pair-specific SL/TP percentages
   atr_multiplier: 2.5                # 2.5x ATR for dynamic SL/TP
@@ -152,37 +151,9 @@ strategies:
     bollinger_period: 20
     bollinger_std: 2.0
     min_entry_confidence: 0.30
-    stop_loss_pct: 1.0
-    take_profit_pct: 2.5
+    stop_loss_pct: 1.0              # ค่านี้ sync จาก strategy_mode.scalping
+    take_profit_pct: 2.5             # ค่านี้ sync จาก strategy_mode.scalping
     position_timeout_minutes: 30
-
-# Trading Strategy Parameters (NEW - Easy to edit)
-# All trading decisions use these parameters
-trading_strategy:
-  # Signal Generation
-  MIN_SIGNAL_CONFIDENCE: 0.35       # Technical confidence threshold (35%)
-  MIN_INDICATORS_SCORE: 0.35        # Min technical indicators score (0-1) - lowered
-  
-  # Risk Management  
-  STOP_LOSS_PCT: 0.03               # 3% stop loss - wider for BTC volatility
-  TAKE_PROFIT_PCT: 0.05             # 5% take profit - wider R:R
-  MAX_POSITION_PCT: 0.10            # Max 10% of portfolio per trade
-  MAX_RISK_PER_TRADE: 0.015        # Max 1.5% risk per trade
-  
-  # Scoring Weights (for weighted signal system)
-  SCORING_WEIGHTS:
-    RSI: 0.20
-    MACD: 0.20
-    SMA: 0.20
-    STOCHASTIC: 0.15
-    REGIME: 0.25                    # Market regime/context contribution
-  
-  # Indicator Thresholds
-  INDICATOR_THRESHOLDS:
-    RSI_OVERSOLD: 35                # RSI < 35 = oversold (BUY) - adjusted
-    RSI_OVERBOUGHT: 65              # RSI > 65 = overbought (SELL) - adjusted
-    STOCHASTIC_OVERSOLD: 25        # Stochastic < 25 = oversold - adjusted
-    STOCHASTIC_OVERBOUGHT: 75      # Stochastic > 75 = overbought - adjusted
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:
