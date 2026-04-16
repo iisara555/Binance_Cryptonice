@@ -1964,7 +1964,12 @@ class TradingBotApp:
             ws_client=ws_client,
         )
         if source == "ws_stale" and not allow_rest_fallback:
-            return None
+            # Accept stale WS price for dashboard display — still better than nothing.
+            # Cache it so subsequent calls don't re-query within TTL.
+            if price is not None:
+                self._cli_price_cache[symbol] = (price, now)
+                return price
+            return cached[0] if cached else None
         if price is None and cached:
             return cached[0]
         if price is not None and source != "ws_stale":

@@ -466,7 +466,8 @@ def test_cli_snapshot_live_dashboard_uses_cache_fallback_for_position_prices(tmp
     assert position["pnl_pct"] == pytest.approx(5.0)
 
 
-def test_get_cli_price_rejects_stale_ws_tick_in_live_mode(tmp_path):
+def test_get_cli_price_accepts_stale_ws_tick_in_live_mode(tmp_path):
+    """Stale WS prices are accepted for dashboard display when REST fallback is off."""
     app = _build_app(tmp_path)
     app.bot = Mock()
     app.bot._ws_client = Mock()
@@ -475,7 +476,8 @@ def test_get_cli_price_rejects_stale_ws_tick_in_live_mode(tmp_path):
     with patch("main.get_current_price", return_value=(105.0, "ws_stale")):
         price = app._get_cli_price("THB_BTC", allow_rest_fallback=False)
 
-    assert price is None
+    assert price == 105.0
+    assert app._cli_price_cache["THB_BTC"][0] == 105.0
 
 
 def test_cli_snapshot_uses_blank_pnl_when_position_price_unavailable(tmp_path):
