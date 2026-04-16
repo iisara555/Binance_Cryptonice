@@ -2315,10 +2315,10 @@ class TestCliUi:
         xrp_bar = CLICommandCenter._allocation_bar_text(1.22, asset="XRP")
         thb_bar = CLICommandCenter._allocation_bar_text(2.44, asset="THB")
 
-        assert btc_bar.plain == "[####################] 97.56%"
-        assert eth_bar.plain == "[#####---------------] 24.39%"
-        assert xrp_bar.plain == "[#-------------------]  1.22%"
-        assert thb_bar.plain == "[#-------------------]  2.44%"
+        assert btc_bar.plain == "[\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501]  97.6%"
+        assert eth_bar.plain == "[\u2501\u2501\u2501\u2501\u2501\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500]  24.4%"
+        assert xrp_bar.plain == "[\u2501\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500]   1.2%"
+        assert thb_bar.plain == "[\u2501\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500]   2.4%"
         assert btc_bar.spans[1].style == f"bold {CLICommandCenter._GREEN}"
         assert eth_bar.spans[1].style == f"bold {CLICommandCenter._MINT}"
         assert xrp_bar.spans[2].style == CLICommandCenter._DIM
@@ -2354,9 +2354,9 @@ class TestCliUi:
 
         assert "Breakdown" not in rendered
         assert "Portfolio Breakdown" not in rendered
-        assert "Total Balance" in rendered
-        assert "Today's Trades" in rendered
-        assert "Candle Readiness" in rendered
+        assert "Total" in rendered
+        assert "Trades" in rendered
+        assert "Candle" in rendered
         assert "BTC 0.01000000 = 20,000.00 THB (97.56%)" not in rendered
 
     def test_cli_candle_readiness_summary_reports_ready_and_lagging_pairs(self):
@@ -2433,11 +2433,11 @@ class TestCliUi:
         console.print(panel)
         rendered = console.export_text()
 
-        assert "Portfolio Breakdown" in rendered
+        assert "Portfolio" in rendered
         assert "BTC 0.01000000 = 20,000.00 THB (97.56%)" in rendered
         assert "THB 500.00 = 500.00 THB (2.44%)" in rendered
-        assert "[####################] 97.56%" in rendered
-        assert "[#-------------------]  2.44%" in rendered
+        assert "[\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501]  97.6%" in rendered
+        assert "[\u2501\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500]   2.4%" in rendered
 
     def test_footer_renders_command_chat_panel(self):
         app = Mock()
@@ -2480,7 +2480,7 @@ class TestCliUi:
         console.print(panel)
         rendered = console.export_text()
 
-        assert "Command Chat" in rendered
+        assert "Command" in rendered
         assert "Pending: Confirm market BUY THB_BTC with 500.00 THB" in rendered
         assert "You: risk show" in rendered
         assert "Bot: Runtime risk: 2.00% per trade (MEDIUM)" in rendered

@@ -259,7 +259,7 @@ def test_cli_snapshot_and_header_expose_active_strategy_mode(tmp_path):
     header_text = console.export_text()
 
     assert snapshot["strategy_mode"] == "trend_only"
-    assert "trend_only" in header_text
+    assert "TREND_ONLY" in header_text
 
 
 def test_render_exposes_btop_style_dashboard_panels(tmp_path):
@@ -327,9 +327,8 @@ def test_positions_panel_shows_book_summary_and_pnl_trend(tmp_path):
     rendered = console.export_text()
 
     assert "Position Book" in rendered
-    assert "BOOK PNL" in rendered
-    assert "PNL TREND" in rendered
-    assert "OPEN TREND" in rendered
+    assert "PnL" in rendered
+    assert "W/L" in rendered
     assert list(command_center._trend_history["avg_pnl_pct"])[-2:] == [5.0, 1.0]
 
 
@@ -369,10 +368,10 @@ def test_signal_and_portfolio_panels_show_history_based_quality_and_mix(tmp_path
     portfolio_console.print(command_center._build_balance_breakdown_panel(snapshot_2))
     portfolio_rendered = portfolio_console.export_text()
 
-    assert "QUALITY" in signal_rendered
-    assert "SIGNAL TREND" in signal_rendered
-    assert "CASH MIX" in portfolio_rendered
-    assert "CONCENTRATION" in portfolio_rendered
+    assert "Quality" in signal_rendered
+    assert "Trend" in signal_rendered
+    assert "Cash" in portfolio_rendered
+    assert "Conc" in portfolio_rendered
     assert list(command_center._trend_history["signal_score"])[-2:] == [2.0, -4.0]
     assert list(command_center._trend_history["top_allocation_pct"])[-2:] == [80.0, 64.0]
     assert list(command_center._trend_history["cash_allocation_pct"])[-2:] == [20.0, 36.0]
