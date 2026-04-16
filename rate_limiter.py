@@ -59,7 +59,7 @@ class TokenBucketRateLimiter:
     def _refill(self) -> None:
         """Refill tokens based on elapsed time."""
         now = time.time()
-        elapsed = now - self._last_update
+        elapsed = max(now - self._last_update, 0)  # guard against NTP clock drift
         
         # Add tokens based on rate and elapsed time
         tokens_to_add = elapsed * self.rate

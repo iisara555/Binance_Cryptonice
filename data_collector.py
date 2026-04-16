@@ -518,6 +518,7 @@ class BitkubCollector:
     def _collector_loop(self):
         """Main collection loop (runs in background thread)"""
         logger.info(f"Collector started - interval: {self.interval}s, pairs: {self.get_pairs()}")
+        consecutive_errors = 0
         
         while self.running:
             try:
@@ -536,8 +537,15 @@ class BitkubCollector:
                         len(mtf_results),
                         self.multi_timeframes,
                     )
+                consecutive_errors = 0
             except Exception as e:
-                logger.error(f"Collection error: {e}")
+                consecutive_errors += 1
+                logger.error(f"Collection error ({consecutive_errors}x consecutive): {e}")
+                if consecutive_errors >= 5:
+                    logger.critical(
+                        "Data collection failed %d times in a row — price data may be STALE",
+                        consecutive_errors,
+                    )
             
             # Sleep in small increments for faster shutdown
             for _ in range(self.interval):
