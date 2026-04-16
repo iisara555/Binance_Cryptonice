@@ -598,6 +598,39 @@ def test_scalping_mode_forces_time_exit_after_timeout():
     assert bot._submit_managed_exit.call_args.kwargs["triggered"] == "TIME"
 
 
+def test_bootstrap_position_is_exempt_from_scalping_timeout():
+    """Bootstrap positions should NOT be TIME-exited after position_timeout_minutes."""
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [{
+        "order_id": "bootstrap_THB_BTC_1776306580",
+        "symbol": "THB_BTC",
+        "side": "buy",
+        "amount": 0.001,
+        "entry_price": 1000000.0,
+        "stop_loss": 0,
+        "take_profit": 0,
+        "timestamp": datetime.now() - timedelta(minutes=60),
+        "total_entry_cost": 1000.0,
+    }]
+    bot.api_client = Mock()
+    # Price is neutral; SL/TP disabled (0) so only TIME could trigger
+    bot.api_client.get_ticker.return_value = {"last": 1005000.0}
+    bot._ws_client = None
+    bot.trading_pair = "THB_BTC"
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = Mock(state=TradeLifecycleState.IN_POSITION)
+    bot._submit_managed_exit = Mock()
+    bot._scalping_mode_enabled = True
+    bot._scalping_position_timeout_minutes = 30
+
+    bot._check_positions_for_sl_tp()
+
+    # Should NOT have been TIME-exited despite being 60min old
+    bot._submit_managed_exit.assert_not_called()
+
+
 def test_scalping_time_exit_is_suppressed_when_net_profit_is_below_fee_gate():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.executor = Mock()

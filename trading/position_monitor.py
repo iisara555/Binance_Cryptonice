@@ -323,11 +323,15 @@ class PositionMonitorHelper:
 
             triggered = None
             if self.bot._scalping_mode_enabled:
-                opened_at = _coerce_trade_datetime(pos.get("timestamp"))
-                if opened_at is not None:
-                    hold_seconds = (datetime.now() - opened_at).total_seconds()
-                    if hold_seconds >= (self.bot._scalping_position_timeout_minutes * 60):
-                        triggered = "TIME"
+                # Bootstrap positions are exempt from position_timeout —
+                # they represent coins already held, not fresh scalp entries.
+                is_bootstrap = str(position_id).startswith("bootstrap_")
+                if not is_bootstrap:
+                    opened_at = _coerce_trade_datetime(pos.get("timestamp"))
+                    if opened_at is not None:
+                        hold_seconds = (datetime.now() - opened_at).total_seconds()
+                        if hold_seconds >= (self.bot._scalping_position_timeout_minutes * 60):
+                            triggered = "TIME"
 
             # Grace period: skip SL/TP check for first 60 seconds after entry
             if not triggered:
