@@ -305,7 +305,12 @@ class PositionMonitorHelper:
             entry_price = _coerce_trade_float(pos.get("entry_price"), 0.0)
             stop_loss = _coerce_trade_float(pos.get("stop_loss"), 0.0)
             take_profit = _coerce_trade_float(pos.get("take_profit"), 0.0)
-            side = pos.get("side", OrderSide.BUY)
+            raw_side = pos.get("side", OrderSide.BUY)
+            # Normalise to enum so "buy"/"sell" strings compare correctly.
+            if isinstance(raw_side, str):
+                side = OrderSide.SELL if raw_side.lower() == "sell" else OrderSide.BUY
+            else:
+                side = raw_side
             amount = _coerce_trade_float(pos.get("amount"), 0.0)
             pos_symbol = pos.get("symbol", self.bot.trading_pair)
 
