@@ -757,6 +757,37 @@ class TestFullIntegrationFlow:
         assert portfolio['positions'] == [{'symbol': 'THB_BTC'}]
         bot.api_client.get_ticker.assert_called_once_with('THB_BTC')
 
+    def test_get_portfolio_state_lightweight_refreshes_expired_cache(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._auth_degraded = False
+        bot._portfolio_cache = {
+            'data': {'balance': 111.0, 'total_balance': 111.0, 'positions': [], 'timestamp': None},
+            'timestamp': time.time() - 30.0,
+        }
+        bot._portfolio_cache_lock = threading.Lock()
+        bot._cache_ttl = {'portfolio': 10}
+        bot._ws_client = None
+        bot.api_client = Mock()
+        bot.executor = Mock()
+        bot.executor.get_open_orders.return_value = [{'symbol': 'THB_BTC'}]
+        bot._balance_monitor = Mock()
+        bot._balance_monitor.poll_interval_seconds = 30
+        bot._balance_monitor.get_state.return_value = {
+            'updated_at': datetime.now().isoformat(),
+            'balances': {
+                'THB': {'available': 500.0, 'reserved': 0.0, 'total': 500.0},
+                'BTC': {'available': 0.001, 'reserved': 0.0, 'total': 0.001},
+            }
+        }
+        bot.api_client.get_ticker.return_value = {'last': 2_300_000.0}
+
+        portfolio = TradingBotOrchestrator._get_portfolio_state(bot, allow_refresh=False)
+
+        assert portfolio['balance'] == pytest.approx(500.0)
+        assert portfolio['total_balance'] == pytest.approx(2800.0)
+        assert portfolio['positions'] == [{'symbol': 'THB_BTC'}]
+        assert bot._portfolio_cache['data']['balance'] == pytest.approx(500.0)
+
     def test_filter_pairs_by_candle_readiness_keeps_only_ready_pairs(self):
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.mtf_enabled = True
@@ -2001,6 +2032,33 @@ class TestCliSnapshot:
         assert summary["total_balance"] == pytest.approx(21_500.0)
         assert summary["breakdown"] == [
             {"asset": "BTC", "amount": 0.01, "value_thb": 21_000.0},
+            {"asset": "THB", "amount": 500.0, "value_thb": 500.0},
+        ]
+
+    def test_cli_balance_summary_ignores_expired_cache_when_live_snapshot_is_stale(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {"auth_degraded": False}
+        app._live_dashboard_active = True
+        app._cli_balance_summary_cache = {
+            "total_balance": 9_999.0,
+            "breakdown": [{"asset": "THB", "amount": 9_999.0, "value_thb": 9_999.0}],
+        }
+        app._cli_balance_summary_cached_at = time.time() - 30.0
+        app._cli_balance_summary_cache_seconds = 10.0
+        app.api_client = Mock()
+        app.api_client.get_balances.side_effect = RuntimeError("boom")
+        app.bot = Mock()
+        app.bot._balance_monitor = Mock()
+        app.bot._balance_monitor.poll_interval_seconds = 30
+        app.bot.get_balance_state.return_value = {
+            "updated_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
+            "balances": {},
+        }
+
+        summary = TradingBotApp._get_cli_balance_summary(app, {"balance": 500.0})
+
+        assert summary["total_balance"] == pytest.approx(500.0)
+        assert summary["breakdown"] == [
             {"asset": "THB", "amount": 500.0, "value_thb": 500.0},
         ]
 

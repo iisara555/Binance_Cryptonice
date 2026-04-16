@@ -1942,14 +1942,16 @@ class TradingBotApp:
         if cached and (now - cached[1]) < self._cli_price_cache_ttl:
             return cached[0]
         ws_client = getattr(self.bot, "_ws_client", None) if self.bot else None
-        price, _ = get_current_price(
+        price, source = get_current_price(
             symbol=symbol,
             api_client=self.api_client if allow_rest_fallback else None,
             ws_client=ws_client,
         )
+        if source == "ws_stale" and not allow_rest_fallback:
+            return None
         if price is None and cached:
             return cached[0]
-        if price is not None:
+        if price is not None and source != "ws_stale":
             self._cli_price_cache[symbol] = (price, now)
         return price
 
@@ -2020,6 +2022,15 @@ class TradingBotApp:
     def _get_cli_balance_summary(self, portfolio_state: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate total portfolio value in THB and per-asset valuation details."""
         fallback_balance = float(portfolio_state.get("balance", 0.0) or 0.0)
+
+        def _get_fresh_cached_summary() -> Optional[Dict[str, Any]]:
+            cached_summary = getattr(self, "_cli_balance_summary_cache", None)
+            cached_at = float(getattr(self, "_cli_balance_summary_cached_at", 0.0) or 0.0)
+            cache_ttl = float(getattr(self, "_cli_balance_summary_cache_seconds", 10.0) or 10.0)
+            if cached_summary and (time.time() - cached_at) < cache_ttl:
+                return cached_summary
+            return None
+
         if not self.api_client or self.config.get("auth_degraded", False):
             return {
                 "total_balance": fallback_balance,
@@ -2036,6 +2047,20 @@ class TradingBotApp:
             except Exception:
                 balance_state = {}
 
+            updated_at = parse_as_bitkub_time((balance_state or {}).get("updated_at"))
+            raw_poll_interval = getattr(getattr(self.bot, "_balance_monitor", None), "poll_interval_seconds", 30.0)
+            try:
+                poll_interval_seconds = float(raw_poll_interval or 30.0)
+            except (TypeError, ValueError):
+                poll_interval_seconds = 30.0
+            stale_after_seconds = max(poll_interval_seconds * 2.0, 60.0)
+            if updated_at is not None:
+                try:
+                    if (now_bitkub() - updated_at).total_seconds() > stale_after_seconds:
+                        balance_state = {}
+                except Exception:
+                    balance_state = {}
+
         if balance_state:
             balances = balance_state.get("balances") or {}
         else:
@@ -2048,7 +2073,7 @@ class TradingBotApp:
             balances = {}
 
         if not balances:
-            cached_summary = getattr(self, "_cli_balance_summary_cache", None)
+            cached_summary = _get_fresh_cached_summary()
             if live_dashboard_active and cached_summary:
                 return cached_summary
             return {
@@ -2092,7 +2117,7 @@ class TradingBotApp:
                 breakdown.append({"asset": symbol, "amount": amount, "value_thb": value_thb})
 
         if total_value <= 0:
-            cached_summary = getattr(self, "_cli_balance_summary_cache", None)
+            cached_summary = _get_fresh_cached_summary()
             if live_dashboard_active and cached_summary:
                 return cached_summary
             return {

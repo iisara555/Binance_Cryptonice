@@ -466,6 +466,18 @@ def test_cli_snapshot_live_dashboard_falls_back_to_rest_for_position_prices(tmp_
     assert app._get_cli_price.call_args_list[1].args == ("THB_BTC", True)
 
 
+def test_get_cli_price_rejects_stale_ws_tick_in_live_mode(tmp_path):
+    app = _build_app(tmp_path)
+    app.bot = Mock()
+    app.bot._ws_client = Mock()
+    app.api_client = Mock()
+
+    with patch("main.get_current_price", return_value=(105.0, "ws_stale")):
+        price = app._get_cli_price("THB_BTC", allow_rest_fallback=False)
+
+    assert price is None
+
+
 def test_cli_snapshot_uses_blank_pnl_when_position_price_unavailable(tmp_path):
     app = _build_app(tmp_path)
     app._live_dashboard_active = True

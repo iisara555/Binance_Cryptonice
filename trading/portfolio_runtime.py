@@ -96,9 +96,23 @@ class PortfolioRuntimeHelper:
     def get_portfolio_state(self, allow_refresh: bool = True) -> Dict[str, Any]:
         now = time.time()
         _cache_lock = getattr(self.bot, "_portfolio_cache_lock", None)
-        portfolio_cache = getattr(self.bot, "_portfolio_cache", {"data": None, "timestamp": 0.0})
+        if _cache_lock:
+            with _cache_lock:
+                portfolio_cache = dict(getattr(self.bot, "_portfolio_cache", {"data": None, "timestamp": 0.0}))
+        else:
+            portfolio_cache = getattr(self.bot, "_portfolio_cache", {"data": None, "timestamp": 0.0})
         cache_ttl = float(((getattr(self.bot, "_cache_ttl", {}) or {}).get("portfolio", 10) or 10))
-        if portfolio_cache["data"] is not None and ((now - portfolio_cache["timestamp"]) < cache_ttl or not allow_refresh):
+
+        def _store_portfolio_cache(result: Dict[str, Any]) -> Dict[str, Any]:
+            payload = {"data": result, "timestamp": now}
+            if _cache_lock:
+                with _cache_lock:
+                    self.bot._portfolio_cache = payload
+            else:
+                self.bot._portfolio_cache = payload
+            return result
+
+        if portfolio_cache["data"] is not None and (now - float(portfolio_cache.get("timestamp", 0.0) or 0.0)) < cache_ttl:
             return portfolio_cache["data"]
 
         if getattr(self.bot, "_auth_degraded", False):
@@ -107,9 +121,9 @@ class PortfolioRuntimeHelper:
                 "positions": self.bot.executor.get_open_orders(),
                 "timestamp": datetime.now(),
             }
-            self.bot._portfolio_cache = {"data": result, "timestamp": now}
-            return result
+            return _store_portfolio_cache(result)
 
+        stale_balance_result: Optional[Dict[str, Any]] = None
         if not allow_refresh:
             balance_monitor = getattr(self.bot, "_balance_monitor", None)
             balance_state = balance_monitor.get_state() if balance_monitor else {}
@@ -117,14 +131,33 @@ class PortfolioRuntimeHelper:
             thb_payload = balances.get("THB") or {}
             thb_balance = float(thb_payload.get("total", thb_payload.get("available", 0.0)) or 0.0)
             total_balance = self.estimate_total_portfolio_balance(balances) or thb_balance
-            result = {
+            stale_balance_result = {
                 "balance": thb_balance,
                 "total_balance": total_balance,
                 "positions": self.bot.executor.get_open_orders(),
                 "timestamp": datetime.now(),
             }
-            self.bot._portfolio_cache = {"data": result, "timestamp": now}
-            return result
+
+            updated_at_raw = balance_state.get("updated_at")
+            updated_at = None
+            if updated_at_raw:
+                try:
+                    updated_at = datetime.fromisoformat(str(updated_at_raw))
+                except ValueError:
+                    updated_at = None
+
+            raw_poll_interval_seconds = getattr(balance_monitor, "poll_interval_seconds", 30.0)
+            try:
+                poll_interval_seconds = float(raw_poll_interval_seconds or 30.0)
+            except (TypeError, ValueError):
+                poll_interval_seconds = 30.0
+            stale_after_seconds = max(poll_interval_seconds * 2.0, 60.0)
+            is_stale = False
+            if updated_at is not None:
+                is_stale = (datetime.now() - updated_at).total_seconds() > stale_after_seconds
+
+            if balance_state and not is_stale:
+                return _store_portfolio_cache(stale_balance_result)
 
         try:
             response = self.bot.api_client.get_balances()
@@ -151,10 +184,11 @@ class PortfolioRuntimeHelper:
                 "positions": self.bot.executor.get_open_orders(),
                 "timestamp": datetime.now(),
             }
-            self.bot._portfolio_cache = {"data": result, "timestamp": now}
-            return result
+            return _store_portfolio_cache(result)
         except Exception as exc:
             logger.error("Error getting portfolio state from Bitkub: %s", exc, exc_info=True)
+            if stale_balance_result is not None:
+                return _store_portfolio_cache(stale_balance_result)
             return {
                 "balance": 0.0,
                 "total_balance": 0.0,
