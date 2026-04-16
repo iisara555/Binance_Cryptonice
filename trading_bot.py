@@ -466,6 +466,8 @@ class TradingBotOrchestrator:
     def _get_risk_portfolio_value(portfolio_state: Optional[Dict[str, Any]]) -> float:
         return PortfolioRuntimeHelper.get_risk_portfolio_value(portfolio_state)
 
+    _BALANCE_RECONCILE_GRACE_SECONDS: float = 180.0  # 3 minutes
+
     def _reconcile_tracked_positions_with_balance_state(
         self,
         balance_state: Optional[Dict[str, Any]] = None,
@@ -479,6 +481,7 @@ class TradingBotOrchestrator:
         if not balances:
             return []
 
+        now = datetime.now()
         removed_symbols: List[str] = []
         for position in self.executor.get_open_orders() or []:
             symbol = str(position.get("symbol") or "").upper()
@@ -509,6 +512,20 @@ class TradingBotOrchestrator:
 
             if not represents_live_coin:
                 continue
+
+            # Grace period: do not remove positions that were just created.
+            # Bitkub balance API / cache may lag behind a fresh fill.
+            pos_ts = position.get("timestamp")
+            if pos_ts is not None:
+                if isinstance(pos_ts, str):
+                    try:
+                        pos_ts = datetime.fromisoformat(pos_ts)
+                    except (ValueError, TypeError):
+                        pos_ts = None
+                if isinstance(pos_ts, datetime):
+                    age_seconds = (now - pos_ts).total_seconds()
+                    if age_seconds < self._BALANCE_RECONCILE_GRACE_SECONDS:
+                        continue
 
             base_asset = symbol.split("_", 1)[1].upper()
             balance_total = self._extract_total_balance(snapshot, base_asset)

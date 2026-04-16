@@ -40,6 +40,7 @@ def test_main_loop_stops_gracefully_on_fatal_auth_exception():
     bot._last_loop_time = None
     bot._loop_count = 0
     bot._maybe_run_candle_retention_cleanup = Mock()
+    bot._maybe_run_db_maintenance = Mock()
     bot._run_iteration = Mock(side_effect=FatalAuthException(5, 'fatal auth failure'))
 
     with patch('trading_bot.time.sleep'):
@@ -55,6 +56,7 @@ def test_main_loop_routes_fatal_auth_alert_through_alert_system_not_api_layer():
     bot._last_loop_time = None
     bot._loop_count = 0
     bot._maybe_run_candle_retention_cleanup = Mock()
+    bot._maybe_run_db_maintenance = Mock()
     bot._run_iteration = Mock(side_effect=FatalAuthException(5, 'fatal auth failure <bad>'))
     bot.alert_system = Mock()
 

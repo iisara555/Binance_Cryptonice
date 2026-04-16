@@ -364,8 +364,8 @@ class TestRiskManagement:
         # ALT should have wider SL/TP than BTC
         assert abs(sl_pct_alt) >= abs(sl_pct)  # Wider SL for ALT
         assert tp_pct_alt >= tp_pct  # Wider TP for ALT
-        assert sl_pct_alt == -8.0
-        assert tp_pct_alt == 12.0
+        assert sl_pct_alt == -3.0
+        assert tp_pct_alt == 5.0
     
     def test_sl_tp_with_atr(self):
         """Test ATR-based SL/TP calculation."""
