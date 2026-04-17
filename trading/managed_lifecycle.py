@@ -175,6 +175,22 @@ class ManagedLifecycleHelper:
             trigger=snapshot.trigger,
             notes=f"price_source={price_source};net_pnl_pct={net_pnl_pct:+.2f}%",
         )
+        risk_manager = getattr(self.bot, "risk_manager", None)
+        if risk_manager is not None:
+            record_trade_activity = getattr(risk_manager, "record_trade_activity", None)
+            if callable(record_trade_activity):
+                record_trade_activity()
+
+        if str(snapshot.trigger or "").upper() == "TIME":
+            state_manager = getattr(self.bot, "_state_manager", None)
+            cooldown_minutes = float(getattr(getattr(risk_manager, "config", None), "cool_down_minutes", 0) or 0)
+            if state_manager is not None and cooldown_minutes > 0:
+                state_manager.block_new_entries_after_exit(
+                    snapshot.symbol,
+                    duration_seconds=cooldown_minutes * 60.0,
+                    trigger="TIME",
+                    blocked_at=now,
+                )
 
     def submit_managed_entry(self, decision: TradeDecision, portfolio: Dict[str, Any]) -> None:
         result = self.bot.executor.execute_entry(

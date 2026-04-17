@@ -325,6 +325,18 @@ class TestM4RiskStateLocking:
         assert rm2._cooling_down is True
         assert rm2._peak_portfolio_value == 1234.5
 
+    def test_record_trade_activity_refreshes_cooldown_without_incrementing_count(self, tmp_path):
+        rm = _make_rm(tmp_path)
+        rm._trade_count_today = 7
+        rm._daily_loss_date = datetime.now().date()
+        before = datetime.now()
+
+        rm.record_trade_activity()
+
+        assert rm._trade_count_today == 7
+        assert rm._last_trade_time is not None
+        assert rm._last_trade_time >= before
+
     def test_drawdown_multiplier_reduces_position_size_before_hard_block(self, tmp_path):
         rm = _make_rm(tmp_path)
         rm.config.max_risk_per_trade_pct = 1.0

@@ -134,6 +134,7 @@ class TradeStateManager:
         self._cache_lock = threading.RLock()
         self._state_cache: Dict[str, TradeStateSnapshot] = {}
         self._confirmations: Dict[str, Dict[str, Any]] = {}
+        self._recent_exit_blocks: Dict[str, Dict[str, Any]] = {}
         self._load_cache()
 
     def _load_cache(self) -> None:
@@ -334,6 +335,51 @@ class TradeStateManager:
         self._confirmations.pop(self._confirmation_key(symbol_key, "buy"), None)
         self._confirmations.pop(self._confirmation_key(symbol_key, "sell"), None)
 
+    def block_new_entries_after_exit(
+        self,
+        symbol: str,
+        duration_seconds: float,
+        trigger: str,
+        blocked_at: Optional[datetime] = None,
+    ) -> None:
+        symbol_key = str(symbol or "").upper()
+        duration = float(duration_seconds or 0.0)
+        if not symbol_key or duration <= 0:
+            return
+
+        block_started_at = blocked_at or datetime.utcnow()
+        expires_at = block_started_at + timedelta(seconds=duration)
+        with self._cache_lock:
+            self._recent_exit_blocks[symbol_key] = {
+                "trigger": str(trigger or "").upper(),
+                "expires_at": expires_at,
+            }
+        self.clear_confirmation(symbol_key, action="buy")
+
+    def get_recent_exit_block_reason(
+        self,
+        symbol: str,
+        now: Optional[datetime] = None,
+    ) -> str:
+        symbol_key = str(symbol or "").upper()
+        if not symbol_key:
+            return ""
+
+        current_time = now or datetime.utcnow()
+        with self._cache_lock:
+            block = self._recent_exit_blocks.get(symbol_key)
+            if not block:
+                return ""
+            expires_at = block.get("expires_at")
+            if not isinstance(expires_at, datetime) or expires_at <= current_time:
+                self._recent_exit_blocks.pop(symbol_key, None)
+                return ""
+            trigger = str(block.get("trigger") or "EXIT")
+
+        remaining_seconds = max(int((expires_at - current_time).total_seconds()), 0)
+        remaining_minutes = max(1, int((remaining_seconds + 59) // 60)) if remaining_seconds > 0 else 0
+        return f"recent {trigger} exit cooldown active ({remaining_minutes}m remaining)"
+
     def _confirm_directional_entry(
         self,
         symbol: str,
@@ -394,6 +440,10 @@ class TradeStateManager:
         if action != "buy":
             self.clear_confirmation(symbol)
             return False, "state machine only opens BUY entries from IDLE"
+        block_reason = self.get_recent_exit_block_reason(symbol, signal_time)
+        if block_reason:
+            self.clear_confirmation(symbol, action="buy")
+            return False, block_reason
         return self._confirm_directional_entry(
             symbol=symbol,
             action="buy",

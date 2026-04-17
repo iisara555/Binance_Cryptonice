@@ -682,6 +682,17 @@ class RiskManager:
         self._last_trade_time = datetime.now()
         self.save_state()
 
+    def record_trade_activity(self):
+        """Refresh cooldown timestamp without incrementing the daily trade counter."""
+        today = date.today()
+        if self._daily_loss_date != today:
+            self._daily_loss_date = today
+            self._daily_loss_start = None
+            self._trade_count_today = 0
+            self._cooling_down = False
+        self._last_trade_time = datetime.now()
+        self.save_state()
+
     # ── Cooldown ───────────────────────────────────────────────────────
 
     def check_cooldown(self) -> bool:

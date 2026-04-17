@@ -1169,6 +1169,33 @@ class TestFullIntegrationFlow:
         assert approved is True
         assert '2/2' in reason
 
+    def test_trade_state_manager_blocks_symbol_reentry_after_recent_time_exit(self):
+        db = Mock()
+        db.list_trade_states.return_value = []
+        db.get_trade_state.return_value = None
+
+        manager = TradeStateManager(db, {
+            'enabled': True,
+            'entry_confidence_threshold': 0.35,
+            'confirmations_required': 2,
+            'confirmation_window_seconds': 180,
+        })
+
+        ts = datetime.utcnow()
+        manager.block_new_entries_after_exit('THB_BTC', duration_seconds=300, trigger='TIME', blocked_at=ts)
+
+        approved, reason = manager.confirm_entry_signal('THB_BTC', 'buy', 0.6, True, ts + timedelta(seconds=30))
+        assert approved is False
+        assert 'recent TIME exit cooldown active' in reason
+
+        approved, reason = manager.confirm_entry_signal('THB_BTC', 'buy', 0.6, True, ts + timedelta(seconds=301))
+        assert approved is False
+        assert '1/2' in reason
+
+        approved, reason = manager.confirm_entry_signal('THB_BTC', 'buy', 0.62, True, ts + timedelta(seconds=331))
+        assert approved is True
+        assert '2/2' in reason
+
     def test_execute_entry_defers_position_tracking_until_fill(self, mock_api_client):
         """State-managed entries must remain pending until Bitkub confirms a fill."""
         executor = TradeExecutor(mock_api_client, config={})
@@ -1292,6 +1319,8 @@ class TestFullIntegrationFlow:
         db = Mock()
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.db = db
+        bot.risk_manager = Mock()
+        bot._state_manager = Mock()
         bot._log_filled_order = Mock()
         bot._format_exit_alert = Mock(return_value="alert")
         bot._send_alert = Mock()
@@ -1342,10 +1371,53 @@ class TestFullIntegrationFlow:
         bot._log_filled_order.assert_called_once()
         assert bot._log_filled_order.call_args.kwargs['fee'] == pytest.approx(float(expected_exit_fee))
         bot._send_alert.assert_called_once_with('alert', to_telegram=True)
+        bot.risk_manager.record_trade_activity.assert_called_once_with()
+        bot._state_manager.block_new_entries_after_exit.assert_not_called()
         format_args = bot._format_exit_alert.call_args.args
         assert format_args[2] == pytest.approx(float(amount))
         assert format_args[5] == pytest.approx(float(entry_cost))
         assert format_args[6] == pytest.approx(float(expected_gross_exit))
+
+    def test_report_completed_time_exit_registers_symbol_reentry_block(self):
+        db = Mock()
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.db = db
+        bot._state_manager = Mock()
+        bot.risk_manager = Mock()
+        bot.risk_manager.config = Mock(cool_down_minutes=5)
+        bot._log_filled_order = Mock()
+        bot._format_exit_alert = Mock(return_value="alert")
+        bot._send_alert = Mock()
+        bot._log_position_trace = Mock()
+
+        snapshot = TradeStateSnapshot(
+            symbol='THB_ADA',
+            state=TradeLifecycleState.PENDING_SELL,
+            side='buy',
+            entry_order_id='buy-time-1',
+            exit_order_id='sell-time-1',
+            active_order_id='sell-time-1',
+            requested_amount=10.0,
+            filled_amount=10.0,
+            entry_price=8.0,
+            exit_price=0.0,
+            stop_loss=7.5,
+            take_profit=9.0,
+            total_entry_cost=80.0,
+            signal_confidence=0.0,
+            signal_source='strategy',
+            trigger='TIME',
+            notes='price_source=order',
+            opened_at=datetime.utcnow() - timedelta(hours=25),
+        )
+
+        bot._report_completed_exit(snapshot, exit_price=8.1, price_source='order')
+
+        bot.risk_manager.record_trade_activity.assert_called_once_with()
+        bot._state_manager.block_new_entries_after_exit.assert_called_once()
+        _, kwargs = bot._state_manager.block_new_entries_after_exit.call_args
+        assert kwargs['duration_seconds'] == pytest.approx(300.0)
+        assert kwargs['trigger'] == 'TIME'
 
     def test_log_filled_order_persists_both_order_and_trade_rows(self):
         db = Mock()
