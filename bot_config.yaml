@@ -57,6 +57,7 @@ strategy_mode:
     stop_loss_pct: 1.0              # ← ค่าที่ใช้จริง (scalping mode signal SL)
     take_profit_pct: 3.0             # ← ค่าที่ใช้จริง (scalping mode signal TP)  net R:R≈1.67
     position_timeout_minutes: 30
+    bootstrap_position_timeout_hours: 24  # bootstrap/held coins use best-effort real acquisition time
     max_trades_per_day: 50
     min_time_between_trades_minutes: 2
     monitor_check_interval_seconds: 5
@@ -154,6 +155,7 @@ strategies:
     stop_loss_pct: 1.0              # ค่านี้ sync จาก strategy_mode.scalping
     take_profit_pct: 3.0             # ค่านี้ sync จาก strategy_mode.scalping
     position_timeout_minutes: 30
+    bootstrap_position_timeout_hours: 24
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:

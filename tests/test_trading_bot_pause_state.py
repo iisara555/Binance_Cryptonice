@@ -230,6 +230,7 @@ def test_bootstrap_held_positions_prefers_persisted_position_entry_price_over_cu
     assert pos_data["stop_loss"] == 1_146_000.0
     assert pos_data["take_profit"] == 1_320_000.0
     assert pos_data["total_entry_cost"] == 1200.0
+    assert pos_data["timestamp"] == datetime(2026, 4, 13, 12, 0, 0)
 
 
 def test_bootstrap_held_positions_prefers_trade_state_entry_price_over_current_price():
@@ -599,7 +600,7 @@ def test_scalping_mode_forces_time_exit_after_timeout():
 
 
 def test_bootstrap_position_is_exempt_from_scalping_timeout():
-    """Bootstrap positions should NOT be TIME-exited after position_timeout_minutes."""
+    """Bootstrap positions remain exempt when bootstrap timeout is explicitly disabled."""
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.executor = Mock()
     bot.executor.get_open_orders.return_value = [{
@@ -624,11 +625,43 @@ def test_bootstrap_position_is_exempt_from_scalping_timeout():
     bot._submit_managed_exit = Mock()
     bot._scalping_mode_enabled = True
     bot._scalping_position_timeout_minutes = 30
+    bot._bootstrap_position_timeout_minutes = None
 
     bot._check_positions_for_sl_tp()
 
     # Should NOT have been TIME-exited despite being 60min old
     bot._submit_managed_exit.assert_not_called()
+
+
+def test_bootstrap_position_forces_time_exit_after_bootstrap_timeout():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [{
+        "order_id": "bootstrap_THB_BTC_1776306580",
+        "symbol": "THB_BTC",
+        "side": "buy",
+        "amount": 0.001,
+        "entry_price": 1000000.0,
+        "stop_loss": 0,
+        "take_profit": 0,
+        "timestamp": datetime.now() - timedelta(hours=25),
+        "total_entry_cost": 1000.0,
+    }]
+    bot.api_client = Mock()
+    bot.api_client.get_ticker.return_value = {"last": 1005000.0}
+    bot._ws_client = None
+    bot.trading_pair = "THB_BTC"
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = Mock(state=TradeLifecycleState.IN_POSITION)
+    bot._submit_managed_exit = Mock()
+    bot._scalping_mode_enabled = True
+    bot._scalping_position_timeout_minutes = 30
+    bot._bootstrap_position_timeout_minutes = 24 * 60
+
+    bot._check_positions_for_sl_tp()
+
+    assert bot._submit_managed_exit.call_args.kwargs["triggered"] == "TIME"
 
 
 def test_scalping_time_exit_is_suppressed_when_net_profit_is_below_fee_gate():
@@ -846,3 +879,40 @@ def test_preserve_bootstrap_position_upgrades_entry_from_exchange_history_contex
     assert saved_payload["entry_price"] == pytest.approx(2_393_000.01)
     assert saved_payload["filled_price"] == pytest.approx(2_393_000.01)
     assert saved_payload["total_entry_cost"] == pytest.approx(145.15)
+
+
+def test_preserve_bootstrap_position_propagates_recovered_acquired_at_timestamp():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
+    bot.executor = Mock()
+    bot.executor._orders_lock = threading.Lock()
+    bot.executor._open_orders = {}
+    bot.db = Mock()
+    recovered_at = datetime(2026, 4, 15, 8, 45, 15)
+    bot._resolve_bootstrap_position_context = Mock(return_value={
+        "entry_price": 2_393_000.01,
+        "total_entry_cost": 145.15,
+        "acquired_at": recovered_at,
+        "source": "exchange_history",
+    })
+
+    preserved = bot._preserve_bootstrap_position_from_balances(
+        "bootstrap_THB_BTC_1",
+        {
+            "order_id": "bootstrap_THB_BTC_1",
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "amount": 0.0000279,
+            "filled_amount": 0.0000279,
+            "entry_price": 2_390_515.0,
+            "stop_loss": 2_372_586.14,
+            "take_profit": 2_432_349.01,
+            "total_entry_cost": 144.6261575,
+            "timestamp": datetime(2026, 4, 16, 16, 33, 36),
+        },
+        {"BTC": {"available": 0.0000605, "reserved": 0.0, "total": 0.0000605}},
+    )
+
+    assert preserved is True
+    saved_payload = bot.db.save_position.call_args.args[0]
+    assert saved_payload["timestamp"] == recovered_at

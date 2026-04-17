@@ -181,6 +181,11 @@ class TradingBotOrchestrator:
         scalping_cfg = dict(self.strategies_config.get("scalping", {}) or {})
         self._scalping_mode_enabled = self._active_strategy_mode == "scalping"
         self._scalping_position_timeout_minutes = int(scalping_cfg.get("position_timeout_minutes", 30) or 30)
+        try:
+            bootstrap_timeout_hours = float(scalping_cfg.get("bootstrap_position_timeout_hours", 24) or 24)
+        except (TypeError, ValueError):
+            bootstrap_timeout_hours = 24.0
+        self._bootstrap_position_timeout_minutes = max(int(bootstrap_timeout_hours * 60), 0)
         execution_cfg = dict(config.get("execution", {}) or {})
         self._enforce_min_profit_gate_for_voluntary_exit = bool(
             execution_cfg.get("enforce_min_profit_gate_for_voluntary_exit", True)
@@ -595,6 +600,7 @@ class TradingBotOrchestrator:
         restored_context = self._resolve_bootstrap_position_context(symbol, float(balance_total))
         restored_source = str(restored_context.get("source") or "")
         restored_entry = _coerce_trade_float(restored_context.get("entry_price"), 0.0)
+        preserved_timestamp = restored_context.get("acquired_at") or local_pos.get("timestamp")
         if restored_source and restored_source != "bootstrap_position" and restored_entry > 0:
             preserved_amount = float(balance_total)
             external_excess = 0.0
@@ -615,6 +621,7 @@ class TradingBotOrchestrator:
             "filled_price": preserved_entry,
             "stop_loss": preserved_sl,
             "take_profit": preserved_tp,
+            "timestamp": preserved_timestamp,
         })
         if preserved_entry > 0:
             restored_cost = _coerce_trade_float(restored_context.get("total_entry_cost"), 0.0)
@@ -754,12 +761,14 @@ class TradingBotOrchestrator:
                 row = matching_rows[0]
                 entry_price = _coerce_trade_float(row.get("entry_price"), 0.0)
                 total_entry_cost = _coerce_trade_float(row.get("total_entry_cost"), 0.0)
+                acquired_at = row.get("timestamp")
                 if entry_price > 0:
                     best = {
                         "entry_price": entry_price,
                         "stop_loss": row.get("stop_loss"),
                         "take_profit": row.get("take_profit"),
                         "total_entry_cost": total_entry_cost if total_entry_cost > 0 else (quantity * entry_price),
+                        "acquired_at": acquired_at,
                         "source": "persisted_position",
                     }
             elif bootstrap_rows:
@@ -767,12 +776,14 @@ class TradingBotOrchestrator:
                 row = bootstrap_rows[0]
                 entry_price = _coerce_trade_float(row.get("entry_price"), 0.0)
                 total_entry_cost = _coerce_trade_float(row.get("total_entry_cost"), 0.0)
+                acquired_at = row.get("timestamp")
                 if entry_price > 0:
                     bootstrap_best = {
                         "entry_price": entry_price,
                         "stop_loss": row.get("stop_loss"),
                         "take_profit": row.get("take_profit"),
                         "total_entry_cost": total_entry_cost if total_entry_cost > 0 else (quantity * entry_price),
+                        "acquired_at": acquired_at,
                         "source": "bootstrap_position",
                     }
 
@@ -834,6 +845,7 @@ class TradingBotOrchestrator:
                     "stop_loss": (state_row or {}).get("stop_loss"),
                     "take_profit": (state_row or {}).get("take_profit"),
                     "total_entry_cost": _coerce_trade_float((state_row or {}).get("total_entry_cost"), 0.0) or (quantity * state_entry),
+                    "acquired_at": (state_row or {}).get("opened_at"),
                     "source": "trade_state",
                 }
 
@@ -853,10 +865,8 @@ class TradingBotOrchestrator:
         if not events:
             return {}
 
-        inventory_qty = 0.0
-        inventory_notional = 0.0
-        inventory_cost = 0.0
         sorted_events = sorted(events, key=lambda event: event.get("timestamp") or datetime.min)
+        lots: List[Dict[str, Any]] = []
 
         for event in sorted_events:
             side = str(event.get("side") or "").lower()
@@ -867,24 +877,41 @@ class TradingBotOrchestrator:
                 continue
 
             if side in ("buy", "bid"):
-                inventory_qty += event_qty
-                inventory_notional += event_qty * event_price
-                inventory_cost += event_cost if event_cost > 0 else (event_qty * event_price)
+                lots.append({
+                    "quantity": event_qty,
+                    "price": event_price,
+                    "cost": event_cost if event_cost > 0 else (event_qty * event_price),
+                    "timestamp": event.get("timestamp"),
+                })
                 continue
 
-            if side not in ("sell", "ask") or inventory_qty <= 0:
+            if side not in ("sell", "ask"):
                 continue
 
-            matched_qty = min(event_qty, inventory_qty)
-            avg_price = inventory_notional / inventory_qty if inventory_qty > 0 else 0.0
-            avg_cost = inventory_cost / inventory_qty if inventory_qty > 0 else 0.0
-            inventory_qty = max(inventory_qty - matched_qty, 0.0)
-            inventory_notional = max(inventory_notional - (avg_price * matched_qty), 0.0)
-            inventory_cost = max(inventory_cost - (avg_cost * matched_qty), 0.0)
-            if inventory_qty <= 1e-12:
-                inventory_qty = 0.0
-                inventory_notional = 0.0
-                inventory_cost = 0.0
+            remaining_to_match = event_qty
+            while remaining_to_match > 1e-12 and lots:
+                head = lots[0]
+                head_qty = _coerce_trade_float(head.get("quantity"), 0.0)
+                if head_qty <= 1e-12:
+                    lots.pop(0)
+                    continue
+                matched_qty = min(remaining_to_match, head_qty)
+                head_cost = _coerce_trade_float(head.get("cost"), 0.0)
+                residual_qty = max(head_qty - matched_qty, 0.0)
+                if residual_qty <= 1e-12:
+                    lots.pop(0)
+                else:
+                    head["quantity"] = residual_qty
+                    if head_cost > 0:
+                        head["cost"] = head_cost * (residual_qty / head_qty)
+                remaining_to_match -= matched_qty
+
+        inventory_qty = sum(_coerce_trade_float(lot.get("quantity"), 0.0) for lot in lots)
+        inventory_notional = sum(
+            _coerce_trade_float(lot.get("quantity"), 0.0) * _coerce_trade_float(lot.get("price"), 0.0)
+            for lot in lots
+        )
+        inventory_cost = sum(_coerce_trade_float(lot.get("cost"), 0.0) for lot in lots)
 
         if inventory_qty <= 0 or inventory_notional <= 0 or inventory_cost <= 0:
             return {}
@@ -897,11 +924,19 @@ class TradingBotOrchestrator:
         if entry_price <= 0:
             return {}
 
+        acquired_candidates = [
+            timestamp
+            for timestamp in (lot.get("timestamp") for lot in lots)
+            if isinstance(timestamp, datetime)
+        ]
+        acquired_at = min(acquired_candidates) if acquired_candidates else None
+
         return {
             "entry_price": entry_price,
             "stop_loss": None,
             "take_profit": None,
             "total_entry_cost": inventory_cost,
+            "acquired_at": acquired_at,
             "source": source,
         }
 
@@ -953,6 +988,7 @@ class TradingBotOrchestrator:
                 "stop_loss": None,
                 "take_profit": None,
                 "total_entry_cost": raw_cost if raw_cost > 0 else (filled_amount * filled_price),
+                "acquired_at": self._history_timestamp_value(row),
                 "source": "exchange_history",
             }
 

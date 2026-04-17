@@ -67,6 +67,17 @@ risk:
 ## Strategies Configuration
 
 ```yaml
+strategy_mode:
+  active: scalping
+  scalping:
+    primary_timeframe: "15m"
+    confirm_timeframe: "15m"
+    trend_timeframe: "1h"
+    stop_loss_pct: 1.0
+    take_profit_pct: 3.0
+    position_timeout_minutes: 30
+    bootstrap_position_timeout_hours: 24
+
 strategies:
   enabled:
     - trend_following
@@ -76,6 +87,10 @@ strategies:
   min_confidence: 0.35
   min_strategies_agree: 2
 ```
+
+`strategy_mode.scalping.position_timeout_minutes` ใช้กับ scalp entries ที่บอทเปิดเอง ส่วน `strategy_mode.scalping.bootstrap_position_timeout_hours` ใช้กับ bootstrap-held positions ที่ถูก import ตอน startup โดยจะพยายามใช้อายุถือจริงจาก persisted position, trade state, หรือ exchange history ก่อน fallback ไปที่เวลาที่เริ่ม manage ในรันนี้
+
+TIME exits ยังผ่าน voluntary-exit profit gate เดิม (`execution.enforce_min_profit_gate_for_voluntary_exit` และ `execution.min_voluntary_exit_net_profit_pct`) ดังนั้น position ที่อายุเกินกำหนดแต่กำไรสุทธิต่ำกว่า threshold จะยังไม่ถูกบังคับปิด
 
 ---
 

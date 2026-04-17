@@ -247,6 +247,7 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
     confirm_tf = str(scalping_mode.get("confirm_timeframe") or "15m")
     trend_tf = str(scalping_mode.get("trend_timeframe") or "1h")
     max_hold_minutes = int(scalping_mode.get("position_timeout_minutes", 30) or 30)
+    bootstrap_timeout_hours = float(scalping_mode.get("bootstrap_position_timeout_hours", 24) or 24)
 
     trading_cfg["timeframe"] = primary_tf
     strategies_cfg["enabled"] = ["scalping"]
@@ -291,6 +292,7 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
             "stop_loss_pct": float(scalping_mode.get("stop_loss_pct", 0.75)),
             "take_profit_pct": float(scalping_mode.get("take_profit_pct", 1.75)),
             "position_timeout_minutes": max_hold_minutes,
+            "bootstrap_position_timeout_hours": bootstrap_timeout_hours,
         }
     )
     strategies_cfg["scalping"] = scalping_strategy_cfg

@@ -233,6 +233,26 @@ class TestFullIntegrationFlow:
         assert applied["trading"]["timeframe"] == "15m"
         assert applied["strategies"]["scalping"]["primary_timeframe"] == "15m"
 
+    def test_strategy_mode_profile_scalping_forwards_bootstrap_timeout(self):
+        config = {
+            "trading": {"timeframe": "15m"},
+            "strategies": {"enabled": ["scalping"]},
+            "strategy_mode": {
+                "active": "scalping",
+                "scalping": {
+                    "primary_timeframe": "15m",
+                    "confirm_timeframe": "15m",
+                    "trend_timeframe": "1h",
+                    "position_timeout_minutes": 30,
+                    "bootstrap_position_timeout_hours": 24,
+                },
+            },
+        }
+
+        applied = _apply_strategy_mode_profile(config)
+
+        assert applied["strategies"]["scalping"]["bootstrap_position_timeout_hours"] == 24
+
     def test_strategy_mode_profile_scalping_applies_larger_position_cap(self):
         config = {
             "trading": {"timeframe": "15m"},

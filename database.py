@@ -939,6 +939,16 @@ class Database:
     def save_position(self, pos_data: Dict[str, Any]) -> Optional[Position]:
         """Save or update an open position (thread-safe with retry)."""
 
+        def _coerce_timestamp(raw_value: Any) -> Optional[datetime]:
+            if isinstance(raw_value, datetime):
+                return raw_value
+            if not raw_value:
+                return None
+            try:
+                return datetime.fromisoformat(str(raw_value))
+            except (TypeError, ValueError):
+                return None
+
         def _do_upsert() -> Optional[Position]:
             session = self.get_session()
             try:
@@ -950,6 +960,7 @@ class Database:
                 side_val = pos_data.get("side", "buy")
                 if hasattr(side_val, 'value'):
                     side_val = side_val.value
+                opened_at = _coerce_timestamp(pos_data.get("timestamp"))
 
                 def _apply_updates(row: Position) -> Position:
                     row.symbol = pos_data.get("symbol", row.symbol)
@@ -962,6 +973,8 @@ class Database:
                     row.is_partial_fill = pos_data.get("is_partial_fill", False)
                     row.remaining_amount = pos_data.get("remaining_amount", 0)
                     row.trailing_peak = pos_data.get("trailing_peak")
+                    if opened_at is not None:
+                        row.opened_at = opened_at
                     session.commit()
                     session.refresh(row)
                     return row
@@ -989,6 +1002,7 @@ class Database:
                     is_partial_fill=pos_data.get("is_partial_fill", False),
                     remaining_amount=pos_data.get("remaining_amount", 0),
                     trailing_peak=pos_data.get("trailing_peak"),
+                    opened_at=opened_at,
                 )
                 session.add(position)
                 try:

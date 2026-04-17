@@ -129,6 +129,9 @@ class StartupRuntimeHelper:
             total_entry_cost = _coerce_trade_float(restored_context.get("total_entry_cost"), 0.0)
             if total_entry_cost <= 0:
                 total_entry_cost = total_qty * entry_price
+            acquired_at = restored_context.get("acquired_at")
+            if not isinstance(acquired_at, datetime):
+                acquired_at = datetime.now()
 
             bootstrap_source = restored_context.get("source") or "estimated_from_ticker"
             synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
@@ -140,7 +143,7 @@ class StartupRuntimeHelper:
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
                 "order_id": synthetic_id,
-                "timestamp": datetime.now(),
+                "timestamp": acquired_at,
                 "is_partial_fill": False,
                 "remaining_amount": total_qty,
                 "total_entry_cost": total_entry_cost,
