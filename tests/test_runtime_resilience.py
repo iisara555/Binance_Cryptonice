@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from datetime import datetime
 from unittest.mock import Mock
 
@@ -214,6 +215,27 @@ def test_get_current_price_uses_ws_stale_last_resort_when_rest_unavailable(monke
 
     assert source == 'ws_stale'
     assert price == pytest.approx(2_300_000.0)
+
+
+def test_get_current_price_prefers_ws_client_native_getter():
+    class _Tick:
+        last = 2_456_789.0
+        timestamp = time.time()
+
+    class _WsClient:
+        @staticmethod
+        def get_latest_ticker(_symbol):
+            return _Tick()
+
+    class _Api:
+        @staticmethod
+        def get_ticker(_symbol):
+            return {'last': 2_300_000.0}
+
+    price, source = get_current_price('BTCUSDT', api_client=_Api(), ws_client=_WsClient())
+
+    assert source == 'ws'
+    assert price == pytest.approx(2_456_789.0)
 
 
 def test_entry_cost_guard_uses_implied_cost_when_reported_cost_drift_is_large():

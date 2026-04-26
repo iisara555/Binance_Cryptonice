@@ -1,5 +1,5 @@
 """
-Configuration for Bitkub Crypto Trading Bot.
+Configuration for Binance Thailand Crypto Trading Bot.
 Loads settings from environment variables (.env file).
 
 SECURITY: All sensitive credentials must be loaded from environment variables.
@@ -28,8 +28,8 @@ try:
             break
     else:
         # No .env file found - check if this is expected (for testing)
-        if not os.environ.get("BITKUB_API_KEY"):
-            print("[WARNING] No .env file found and BITKUB_API_KEY not set")
+        if not os.environ.get("BINANCE_API_KEY"):
+            print("[WARNING] No .env file found and BINANCE_API_KEY not set")
 except ImportError:
     pass  # python-dotenv not installed, rely on system env vars
 
@@ -111,7 +111,7 @@ def _get_bool(key: str, default: bool) -> bool:
 
 
 @dataclass
-class BitkubConfig:
+class BinanceConfig:
     api_key: str
     api_secret: str
     base_url: str
@@ -133,35 +133,35 @@ class BotConfig:
 # ── Config Instances ──────────────────────────────────────────────────────────
 
 
-def _load_bitkub_config() -> BitkubConfig:
-    """Load Bitkub config with strict validation."""
+def _load_binance_config() -> BinanceConfig:
+    """Load Binance Thailand config with strict validation."""
     try:
-        api_key = _get_env_strict("BITKUB_API_KEY")
-        api_secret = _get_env_strict("BITKUB_API_SECRET")
+        api_key = _get_env_strict("BINANCE_API_KEY")
+        api_secret = _get_env_strict("BINANCE_API_SECRET")
     except EnvironmentError:
         # Re-raise with more context
         print("\n" + "=" * 60)
-        print("FATAL: Bitkub API credentials not configured!")
+        print("FATAL: Binance API credentials not configured!")
         print("=" * 60)
         print("\nTo fix this:")
         print("1. Create a .env file in the project root")
         print("2. Add the following lines:")
-        print("   BITKUB_API_KEY=your_actual_api_key")
-        print("   BITKUB_API_SECRET=your_actual_api_secret")
-        print("\nGet your API keys from: https://www.bitkub.com -> Settings -> API")
+        print("   BINANCE_API_KEY=your_actual_api_key")
+        print("   BINANCE_API_SECRET=your_actual_api_secret")
+        print("\nGet your API keys from: https://www.binance.th")
         print("=" * 60 + "\n")
         raise
     
-    return BitkubConfig(
+    return BinanceConfig(
         api_key=api_key,
         api_secret=api_secret,
-        base_url=os.environ.get("BITKUB_BASE_URL", "https://api.bitkub.com"),
-        default_symbol=os.environ.get("DEFAULT_SYMBOL", "btc_thb"),
+        base_url=os.environ.get("BINANCE_BASE_URL", "https://api.binance.th"),
+        default_symbol=os.environ.get("DEFAULT_SYMBOL", "BTCUSDT"),
     )
 
 
 # Load config at module import - will CRITICAL FAIL if keys are missing
-BITKUB = _load_bitkub_config()
+BINANCE = _load_binance_config()
 
 TRADING = TradingConfig(
     min_order_amount=_get_float("MIN_ORDER_AMOUNT", 100.0),
@@ -187,10 +187,10 @@ def validate_config() -> tuple[list[str], list[str]]:
     warnings = []
     
     # These are already validated at import time, but we check anyway
-    if not BITKUB.api_key:
-        critical.append("BITKUB_API_KEY is empty (should not happen)")
-    if not BITKUB.api_secret:
-        critical.append("BITKUB_API_SECRET is empty (should not happen)")
+    if not BINANCE.api_key:
+        critical.append("BINANCE_API_KEY is empty (should not happen)")
+    if not BINANCE.api_secret:
+        critical.append("BINANCE_API_SECRET is empty (should not happen)")
     
     # Trading mode warnings
     if TRADING.live_trading:
@@ -239,11 +239,11 @@ def enforce_critical_config():
 
 # Auto-check on import if running as main script
 if __name__ == "__main__":
-    print("Bitkub Trading Bot Configuration")
+    print("Binance Thailand Trading Bot Configuration")
     print("=" * 40)
     print(f"Project Root: {PROJECT_ROOT}")
     print(f"Env File: {ENV_FILE} (exists: {ENV_FILE.exists()})")
     print(f"Live Trading: {TRADING.live_trading}")
-    print(f"API Key Set: {'Yes' if BITKUB.api_key else 'NO'}")
-    print(f"API Secret Set: {'Yes' if BITKUB.api_secret else 'NO'}")
+    print(f"API Key Set: {'Yes' if BINANCE.api_key else 'NO'}")
+    print(f"API Secret Set: {'Yes' if BINANCE.api_secret else 'NO'}")
     print("=" * 40)

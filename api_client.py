@@ -1,49 +1,56 @@
 """
-Bitkub API v3 Client.
+Binance Thailand REST API Client (api.binance.th).
 
-Base URL: https://api.bitkub.com
-Docs:     https://github.com/bitkub/bitkub-official-api-docs
+Base URL: https://api.binance.th
+Docs:     https://www.binance.com/en/binance-api  (Binance.th mirrors the
+          Spot API surface used here: /api/v1/*.)
 
-Authentication (secure endpoints)
-----------------------------------
-All secure endpoints require three custom headers:
-  X-BTK-APIKEY     – your API key
-  X-BTK-TIMESTAMP  – current server time in milliseconds (from /api/v3/servertime)
-  X-BTK-SIGN       – HMAC-SHA256 signature (hex) of:
-                      {timestamp}{method}{path}{query}{json_body}
+Authentication (signed endpoints)
+---------------------------------
+Signed (TRADE / USER_DATA) requests need:
+  * Header  X-MBX-APIKEY  – your API key
+  * Query parameter  timestamp   – current time in milliseconds
+  * Query parameter  recvWindow  – 5000 ms (default)
+  * Query parameter  signature   – HMAC-SHA256(secret, urlencode(params))
 
-Signature string examples:
-  GET  → "1699381086593GET/api/v3/market/my-open-orders?sym=BTC_THB"
-  POST → "1699376552354POST/api/v3/market/place-bid{\"sym\":\"thb_btc\",\"amt\":1000,\"rat\":10,\"typ\":\"limit\"}"
+The signature is computed over the *full* querystring (including timestamp
+and recvWindow) and appended last. Binance accepts signed POST/DELETE bodies
+on the query string — we follow that convention here.
+
+# --- NEW: SPEC_01 --- Binance Thailand REST client implementation.
 """
 
+from __future__ import annotations
+
 import hmac
-import json
+import math
 import time
 import hashlib
 import logging
 import threading
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from decimal import Decimal, ROUND_DOWN
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 import requests
 
-from config import BITKUB, TRADING
+from config import BINANCE, TRADING
 
 logger = logging.getLogger(__name__)
 
-# ── Public IP Detection ──────────────────────────────────────────────────────
+
+# ── Public IP Detection (diagnostic only) ────────────────────────────────────
 _IP_SERVICES = [
     "https://api.ipify.org",
     "https://checkip.amazonaws.com",
     "https://ifconfig.me/ip",
 ]
-_LAST_KNOWN_IP_FILE = Path(__file__).resolve().parent / ".last_known_ip"
 
 
 def get_public_ip(timeout: float = 5) -> Optional[str]:
-    """Fetch this machine's current public IP (best-effort)."""
+    """Best-effort public IP lookup — used only for diagnostics now that
+    Binance.th does not require IP allowlisting on a per-key basis."""
     for url in _IP_SERVICES:
         try:
             resp = requests.get(url, timeout=timeout)
@@ -57,176 +64,93 @@ def get_public_ip(timeout: float = 5) -> Optional[str]:
     return None
 
 
-def check_ip_change_on_startup() -> Optional[str]:
-    """Compare current IP with last-known. Returns current IP or None on failure.
-
-    Logs a WARNING if the IP changed — the user likely needs to update
-    the Bitkub API allowlist.
-    """
-    current_ip = get_public_ip()
-    if not current_ip:
-        logger.warning("Could not determine public IP — Bitkub allowlist cannot be verified")
-        return None
-
-    previous_ip: Optional[str] = None
-    try:
-        if _LAST_KNOWN_IP_FILE.exists():
-            previous_ip = _LAST_KNOWN_IP_FILE.read_text(encoding="utf-8").strip()
-    except Exception as exc:
-        logger.debug("Failed reading last known IP file %s: %s", _LAST_KNOWN_IP_FILE, exc)
-
-    if previous_ip and previous_ip != current_ip:
-        logger.warning(
-            "⚠️ Public IP changed: %s → %s — update Bitkub API allowlist!",
-            previous_ip,
-            current_ip,
-        )
-    else:
-        logger.info("Public IP: %s", current_ip)
-
-    try:
-        _LAST_KNOWN_IP_FILE.write_text(current_ip, encoding="utf-8")
-    except Exception as exc:
-        logger.debug("Failed writing last known IP file %s: %s", _LAST_KNOWN_IP_FILE, exc)
-
-    return current_ip
-
-BITKUB_ERROR_MESSAGES = {
-    1: "Invalid JSON payload",
-    2: "Missing X-BTK-APIKEY",
-    3: "Invalid API key",
-    4: "API pending for activation",
-    5: "IP not allowed",
-    6: "Missing or invalid signature",
-    7: "Missing timestamp",
-    8: "Invalid timestamp",
-    9: "Invalid user",
-    10: "Invalid parameter",
-    11: "Invalid symbol",
-    12: "Invalid amount",
-    15: "Amount too low",
-    16: "Failed to get balance",
-    17: "Wallet is empty",
-    18: "Insufficient balance",
-    21: "Invalid order for cancellation",
-    24: "Invalid order for lookup",
-    25: "KYC level 1 is required to proceed",
-    52: "Invalid permission",
-    90: "Server error",
+# --- NEW: SPEC_01 --- Binance error code map. These are the error codes the
+# bot actually classifies on; full table in the Binance API docs.
+BINANCE_ERROR_MESSAGES: Dict[int, str] = {
+    -1000: "Unknown error",
+    -1001: "Internal error / disconnect",
+    -1003: "Too many requests",
+    -1013: "Filter failure (LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL)",
+    -1021: "Timestamp outside recvWindow",
+    -1022: "Invalid signature",
+    -1100: "Illegal characters in a parameter",
+    -1102: "Mandatory parameter missing",
+    -1121: "Invalid symbol",
+    -2010: "New order rejected",
+    -2011: "Cancel rejected (order already gone)",
+    -2013: "Order does not exist",
+    -2014: "API-key format invalid",
+    -2015: "Invalid API-key, IP, or permissions",
+    -2026: "Order is in a bad status",
 }
 
 
-def _bitkub_error_message(code: Any, fallback: Optional[str] = None) -> str:
+def _binance_error_message(code: Any, fallback: Optional[str] = None) -> str:
     try:
         normalized = int(code)
     except (TypeError, ValueError):
         normalized = code
-
-    mapped = BITKUB_ERROR_MESSAGES.get(normalized)
+    mapped = BINANCE_ERROR_MESSAGES.get(normalized) if isinstance(normalized, int) else None
     if mapped:
         return mapped
-
     fallback_text = str(fallback or "").strip()
     return fallback_text or "Unknown error"
 
-# ── Legacy Fatal Auth Flags ──────────────────────────────────────────────────
-# Retained only for backward-compatible startup helpers/tests. Runtime control
-# flow now uses FatalAuthException instead of polling these globals.
+
+# --- NEW: SPEC_01 --- Symbol mapping from internal THB_* form to Binance.th.
+SYMBOL_MAP: Dict[str, str] = {
+    "THB_BTC":  "BTCUSDT",
+    "THB_ETH":  "ETHUSDT",
+    "THB_BNB":  "BNBUSDT",
+    "THB_DOGE": "DOGEUSDT",
+    "THB_XRP":  "XRPUSDT",
+    "THB_SOL":  "SOLUSDT",
+    "THB_ADA":  "ADAUSDT",
+    "THB_DOT":  "DOTUSDT",
+    "THB_LINK": "LINKUSDT",
+    "THB_MATIC": "POLUSDT",  # Binance.th migration: legacy MATIC mapped to POL
+    "THB_POL":  "POLUSDT",
+}
+
+# --- NEW: SPEC_01 --- Internal "1m"/"15m" already matches Binance interval
+# format; this map only normalises the legacy TradingView-style numeric
+# resolutions that some older callers still pass in.
+INTERVAL_MAP: Dict[str, str] = {
+    "1": "1m", "1m": "1m",
+    "5": "5m", "5m": "5m",
+    "15": "15m", "15m": "15m",
+    "30": "30m", "30m": "30m",
+    "60": "1h", "1h": "1h",
+    "240": "4h", "4h": "4h",
+    "1D": "1d", "1d": "1d", "1440": "1d",
+    "1W": "1w", "1w": "1w",
+}
+
+
+# Legacy fatal-auth flags retained for backward compatibility with startup
+# helpers that still poll them.
 SHOULD_SHUTDOWN: bool = False
 SHUTDOWN_REASON: str = ""
 
 
-def _normalize_market_symbol(symbol: str) -> str:
-    """Normalize internal symbols like THB_BTC to Bitkub's btc_thb format."""
-    sym_raw = (symbol or "").upper()
-    if '_' in sym_raw:
-        parts = sym_raw.split('_')
-        if len(parts) == 2:
-            return f"{parts[1].lower()}_{parts[0].lower()}"
-    return sym_raw.lower()
-
-
-def _normalize_tradingview_symbol(symbol: str) -> str:
-    """Normalize internal symbols like THB_BTC to TradingView's BTC_THB format."""
-    sym_raw = (symbol or "").upper().strip()
-    if '_' not in sym_raw:
-        return sym_raw
-
-    parts = sym_raw.split('_')
-    if len(parts) != 2:
-        return sym_raw
-
-    quote_assets = {"THB", "USDT", "USD"}
-    left, right = parts
-    if left in quote_assets and right not in quote_assets:
-        return f"{right}_{left}"
-    return sym_raw
-
-
-def _resolution_to_seconds(resolution: str) -> int:
-    normalized = str(resolution or "60").strip().upper()
-    mapping = {
-        "1": 60,
-        "1M": 60,
-        "5": 300,
-        "5M": 300,
-        "15": 900,
-        "15M": 900,
-        "30": 1800,
-        "30M": 1800,
-        "60": 3600,
-        "1H": 3600,
-        "240": 14400,
-        "4H": 14400,
-        "1D": 86400,
-        "D": 86400,
-        "1W": 604800,
-        "W": 604800,
-    }
-    return mapping.get(normalized, 3600)
-
-
-def _normalize_tradingview_candles(payload: Any) -> List[List[float]]:
-    """Convert TradingView history payload into list rows [t, o, h, l, c, v]."""
-    if not payload or not isinstance(payload, dict):
-        return []
-
-    timestamps = payload.get("t") or []
-    opens = payload.get("o") or []
-    highs = payload.get("h") or []
-    lows = payload.get("l") or []
-    closes = payload.get("c") or []
-    volumes = payload.get("v") or []
-
-    return [
-        [timestamp, open_price, high_price, low_price, close_price, volume]
-        for timestamp, open_price, high_price, low_price, close_price, volume in zip(
-            timestamps,
-            opens,
-            highs,
-            lows,
-            closes,
-            volumes,
-        )
-    ]
-
-
 # ── Circuit Breaker ──────────────────────────────────────────────────────────
+# Logic identical to the previous exchange implementation — kept verbatim per
+# SPEC_01.  Only doc strings reference the new exchange.
 
 class CircuitBreaker:
     """
     Circuit breaker to stop trading after consecutive API errors.
-    
+
     States:
       CLOSED   → Normal operation, requests pass through
       OPEN     → Circuit is tripped, requests are blocked
       HALF     → Testing if the API has recovered
     """
-    
+
     CLOSED = "closed"
     OPEN   = "open"
     HALF   = "half"
-    
+
     def __init__(
         self,
         failure_threshold: int = 3,
@@ -234,43 +158,41 @@ class CircuitBreaker:
         half_max_calls: int = 2,
     ):
         self.failure_threshold = failure_threshold
-        self.recovery_timeout  = recovery_timeout  # seconds before trying again
+        self.recovery_timeout  = recovery_timeout
         self.half_max_calls    = half_max_calls
-        
+
         self._state         = self.CLOSED
-        self._failure_count  = 0
-        self._success_count  = 0
-        self._last_failure   = 0.0
-        self._half_calls     = 0
-        self._lock           = threading.RLock()
-    
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure  = 0.0
+        self._half_calls    = 0
+        self._lock          = threading.RLock()
+
     @property
     def state(self) -> str:
         with self._lock:
             return self._state
-    
+
     def is_available(self) -> bool:
-        """Return True if requests are allowed to pass."""
         with self._lock:
             now = time.time()
-            
+
             if self._state == self.CLOSED:
                 return True
-            
+
             if self._state == self.OPEN:
                 if now - self._last_failure >= self.recovery_timeout:
-                    self._state    = self.HALF
+                    self._state = self.HALF
                     self._half_calls = 0
                     logger.warning("CircuitBreaker: OPEN → HALF (testing recovery)")
                     return True
                 return False
-            
-            # HALF: allow up to half_max_calls through
+
             if self._half_calls < self.half_max_calls:
                 self._half_calls += 1
                 return True
             return False
-    
+
     def record_success(self):
         with self._lock:
             self._failure_count = 0
@@ -279,72 +201,75 @@ class CircuitBreaker:
                 self._state = self.CLOSED
                 self._half_calls = 0
                 logger.info("CircuitBreaker: HALF → CLOSED (recovered)")
-    
+
     def record_failure(self, error_msg: str = ""):
         with self._lock:
             self._failure_count += 1
             self._last_failure  = time.time()
-            
+
             if self._state == self.HALF:
                 self._state = self.OPEN
-                logger.warning(f"CircuitBreaker: HALF → OPEN (still failing)")
+                logger.warning("CircuitBreaker: HALF → OPEN (still failing)")
             elif self._failure_count >= self.failure_threshold:
                 self._state = self.OPEN
                 logger.warning(
                     f"CircuitBreaker: CLOSED → OPEN "
                     f"({self.failure_threshold} consecutive failures)"
                 )
-            
+
             if error_msg:
                 logger.error(f"CircuitBreaker failure #{self._failure_count}: {error_msg}")
-    
+
     def reset(self):
         with self._lock:
-            self._state        = self.CLOSED
+            self._state         = self.CLOSED
             self._failure_count = 0
             self._success_count = 0
-            self._half_calls   = 0
+            self._half_calls    = 0
 
 
 # ── Clock Sync ────────────────────────────────────────────────────────────────
 
 class ClockSync:
-    """
-    Tracks offset between local clock and Bitkub server clock.
-    Raises a warning if the offset exceeds a threshold.
-    """
-    
+    """Tracks offset between local clock and Binance.th server clock."""
+
     def __init__(self, max_offset: float = 30.0):
-        self.max_offset    = max_offset  # seconds
-        self._offset        = 0.0
-        self._last_sync     = 0.0
-        self._sync_interval = 300.0       # re-sync every 5 minutes
+        self.max_offset    = max_offset
+        self._offset       = 0.0
+        self._last_sync    = 0.0
+        self._sync_interval = 300.0
         self._locked       = threading.Lock()
-        self._alerted       = False       # only alert once per session
-    
+        self._alerted      = False
+
     @property
     def offset(self) -> float:
         with self._locked:
             return self._offset
-    
+
     def sync(self, base_url: str) -> float:
         """
-        Fetch server time and compute offset.
-        Returns the offset in seconds.
+        Fetch server time and compute offset.  Returns offset in seconds.
+
+        # --- NEW: SPEC_01 --- endpoint moved from /api/v3/servertime →
+        # /api/v1/time and the response shape changed from a bare integer to
+        # {"serverTime": <ms>}.
         """
         try:
-            r = requests.get(f"{base_url}/api/v3/servertime", timeout=10)
+            r = requests.get(f"{base_url}/api/v1/time", timeout=10)
             r.raise_for_status()
-            server_ts_ms = int(r.json())
-            server_ts    = server_ts_ms / 1000.0
-            local_ts     = time.time()
-            
+            payload = r.json()
+            if isinstance(payload, dict):
+                server_ts_ms = int(payload.get("serverTime", 0))
+            else:
+                server_ts_ms = int(payload)
+            server_ts = server_ts_ms / 1000.0
+            local_ts  = time.time()
+
             offset = server_ts - local_ts
-            
             with self._locked:
                 self._offset    = offset
                 self._last_sync = local_ts
-            
+
             if abs(offset) > self.max_offset and not self._alerted:
                 logger.warning(
                     f"ClockSync: LARGE OFFSET detected "
@@ -353,27 +278,24 @@ class ClockSync:
                 self._alerted = True
             elif abs(offset) <= self.max_offset:
                 self._alerted = False
-            
+
             logger.debug(f"ClockSync: offset={offset:+.3f}s")
             return offset
-            
         except Exception as e:
             logger.error(f"ClockSync: sync failed: {e}")
             return 0.0
-    
+
     def is_synced(self) -> bool:
-        """Return True if offset is within tolerance."""
         return abs(self._offset) <= self.max_offset
-    
+
     def should_resync(self) -> bool:
-        """Return True if it's time to re-sync."""
         return (time.time() - self._last_sync) >= self._sync_interval
 
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
-class BitkubAPIError(Exception):
-    """Raised when the Bitkub API returns an error code != 0."""
+class BinanceAPIError(Exception):
+    """Raised when the Binance.th API returns an error code."""
 
     def __init__(self, code: Any, message: str, raw: Optional[Dict] = None):
         self.code = code
@@ -382,29 +304,58 @@ class BitkubAPIError(Exception):
         super().__init__(f"[{code}] {message}")
 
 
-class CircuitBreakerOpen(BitkubAPIError):
+class CircuitBreakerOpen(BinanceAPIError):
     """Raised when the circuit breaker is open and blocking requests."""
     pass
 
 
-class FatalAuthException(BitkubAPIError):
-    """Raised when Bitkub rejects private API auth and the bot must stop."""
+class BinanceAuthException(BinanceAPIError):
+    """Raised when Binance.th rejects private API auth and the bot must stop."""
     pass
 
 
-# ── BitkubClient ─────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-class BitkubClient:
+def _round_step(value: float, step: float) -> float:
+    """Round ``value`` DOWN to the nearest multiple of ``step``."""
+    if step is None or step <= 0 or value <= 0:
+        return float(value)
+    d_val  = Decimal(str(value))
+    d_step = Decimal(str(step))
+    rounded = (d_val / d_step).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_step
+    return float(rounded)
+
+
+def _format_decimal(value: float, precision: int = 8) -> str:
+    """Render a float without scientific notation, trimmed of trailing zeros."""
+    s = f"{value:.{precision}f}"
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s or "0"
+
+
+def _no_trailing_zeros(value: float) -> float:
+    """Compatibility helper for legacy tests/callers; prefer ``_format_decimal``."""
+    return float(_format_decimal(float(value), precision=8))
+
+
+# ── BinanceThClient ──────────────────────────────────────────────────────────
+
+class BinanceThClient:
     """
-    Thin wrapper around Bitkub REST API v3.
+    Thin wrapper around the Binance Thailand REST API.
 
-    Methods are grouped:
-      - market  (public, no auth)
-      - account (private, requires auth)
+    Public API surface mirrors earlier client semantics so the
+    rest of the codebase can keep calling ``get_ticker`` / ``get_candle`` /
+    ``place_bid`` / ``place_ask`` / ``get_balances`` / ``cancel_order``
+    without modification.  Internal symbol/timeframe normalisation is done
+    by ``_to_binance_symbol`` / ``_to_binance_interval``.
     """
 
-    BASE_URL = BITKUB.base_url
-    TIMEOUT  = 30  # seconds
+    # --- NEW: SPEC_01 --- Hardcoded base URL for Binance.th. We do NOT use
+    # BINANCE.base_url here. Override via BINANCE_BASE_URL env var if needed.
+    BASE_URL: str = "https://api.binance.th"
+    TIMEOUT: float = 30.0
 
     def __init__(
         self,
@@ -413,47 +364,55 @@ class BitkubClient:
         symbol: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
-        self.api_key    = api_key    or BITKUB.api_key
-        self.api_secret = api_secret or BITKUB.api_secret
-        self.symbol     = symbol     or BITKUB.default_symbol
-        self.base_url   = base_url   or self.BASE_URL
-        
+        self.api_key    = api_key    or BINANCE.api_key
+        self.api_secret = api_secret or BINANCE.api_secret
+
+        default_symbol = (symbol or getattr(BINANCE, "default_symbol", "BTCUSDT")) or "BTCUSDT"
+        if default_symbol.lower() in {"btc_thb", "thb_btc"}:
+            default_symbol = "BTCUSDT"
+        self.symbol = default_symbol
+
+        # Resolve base URL — prefer explicit arg, then BINANCE config, then class default.
+        configured = (base_url or getattr(BINANCE, "base_url", "") or "").strip()
+        if configured.startswith("https://api.binance"):
+            self.base_url = configured
+        else:
+            self.base_url = self.BASE_URL
+
         # Rate limiting
         self._last_request_time: float = 0.0
-        self._min_request_interval: float = 0.2  # seconds between requests
-        
+        self._min_request_interval: float = 0.2
+
         # Circuit breaker
-        self._cb = CircuitBreaker(
-            failure_threshold=3,
-            recovery_timeout=60.0,
-        )
-        
+        self._cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+
         # Clock sync
         self._clock = ClockSync(max_offset=30.0)
-        
-        # Track consecutive errors in the main loop
-        self._loop_error_count  = 0
-        self._loop_error_reset  = 3.0   # reset after 3s of no errors
-        self._last_error_time   = 0.0
-        
-        # FIX HIGH-02: Instance-level balance cache with proper TTL
-        # Avoids creating new client instances with separate circuit breakers
+
+        # Loop error tracking (kept for parity with prior client)
+        self._loop_error_count = 0
+        self._loop_error_reset = 3.0
+        self._last_error_time  = 0.0
+
+        # Balance cache
         self._balances_cache: Optional[Dict[str, Dict[str, float]]] = None
         self._balances_cache_time: float = 0.0
-        self._balances_cache_ttl: float = 5.0  # 5 second TTL - shorter for freshness
+        self._balances_cache_ttl: float = 5.0
 
-        # ── H1: Thread-safety lock ──────────────────────────────────────────
-        # Protects _last_request_time (rate limiter) and balance cache
-        # reads/writes.  The lock is held only during state mutation — never
-        # during blocking I/O — so it cannot cause deadlocks.
+        # Thread-safety lock — guards _last_request_time and balance cache state.
         self._state_lock = threading.Lock()
 
-        # Startup-only suppression hook: lets callers absorb auth error 5
-        # without emitting fatal shutdown signals when they intentionally
-        # degrade into a safe public-only mode.
+        # Suppress fatal-auth shutdown side effects during opt-in startup probes.
         self._fatal_auth_suppression_context: str = ""
 
-    # ── Circuit Breaker helpers ─────────────────────────────────────────────
+        # --- NEW: SPEC_01 --- exchangeInfo cache (per Binance symbol).
+        self._exchange_info_cache: Dict[str, Dict[str, Any]] = {}
+        self._exchange_info_lock = threading.Lock()
+
+        # --- NEW: SPEC_01 --- Stub-history WARN tracking (one-shot per kind).
+        self._history_stub_warned: Dict[str, bool] = {}
+
+    # ── Circuit Breaker / clock helpers ────────────────────────────────────
 
     @property
     def circuit_breaker(self) -> CircuitBreaker:
@@ -468,7 +427,7 @@ class BitkubClient:
 
     @contextmanager
     def suppress_fatal_auth_handling(self, context: str = "startup"):
-        """Temporarily downgrade auth error 5 from fatal shutdown to caller-managed warning."""
+        """Temporarily downgrade auth errors from fatal shutdown to caller-managed warnings."""
         previous = self._fatal_auth_suppression_context
         self._fatal_auth_suppression_context = str(context or "startup")
         try:
@@ -476,21 +435,12 @@ class BitkubClient:
         finally:
             self._fatal_auth_suppression_context = previous
 
-    # ── Clock Sync ─────────────────────────────────────────────────────────
-
     def sync_clock(self) -> float:
-        """Force-sync the local clock with the Bitkub server."""
         return self._clock.sync(self.base_url)
 
     def check_clock_sync(self) -> bool:
-        """
-        Ensure clock is synced before auth requests.
-        Returns True if synced; logs warning and returns False if not.
-        """
-        # Re-sync if needed
         if self._clock.should_resync():
             self.sync_clock()
-        
         if not self._clock.is_synced():
             logger.warning(
                 f"Clock offset {self._clock.offset:+.1f}s exceeds "
@@ -499,537 +449,474 @@ class BitkubClient:
             return False
         return True
 
-    # ── Internal helpers ────────────────────────────────────────────────────
+    # ── Symbol / interval / signing ────────────────────────────────────────
 
-    def _sign(self, timestamp: int, method: str, path: str,
-              query: str, body: str) -> str:
-        """
-        Generate HMAC-SHA256 signature.
-        String to sign: {timestamp}{method}{path}{query}{body}
-        """
-        payload = f"{timestamp}{method}{path}{query}{body}"
+    def _to_binance_symbol(self, symbol: str) -> str:
+        """# --- NEW: SPEC_01 --- Map THB_* / btc_thb / BTC_THB → Binance form."""
+        if not symbol:
+            return self.symbol
+        sym = str(symbol).strip()
+        upper = sym.upper()
+        if upper in SYMBOL_MAP:
+            return SYMBOL_MAP[upper]
+
+        # Already a Binance-style symbol
+        if upper.endswith("USDT") and "_" not in upper:
+            return upper
+
+        # btc_thb / BTC_THB → BTCUSDT (legacy lower / base_quote shapes)
+        if "_" in upper:
+            parts = upper.split("_")
+            if len(parts) == 2:
+                left, right = parts
+                base = right if left in {"THB", "USDT", "USD"} else left
+                key = f"THB_{base}"
+                if key in SYMBOL_MAP:
+                    return SYMBOL_MAP[key]
+                return f"{base}USDT"
+        return upper
+
+    @staticmethod
+    def _to_binance_interval(timeframe: str) -> str:
+        """# --- NEW: SPEC_01 --- Normalise timeframe strings to Binance form."""
+        if not timeframe:
+            return "15m"
+        return INTERVAL_MAP.get(str(timeframe), str(timeframe))
+
+    def _sign(self, params: Dict[str, Any]) -> str:
+        """# --- NEW: SPEC_01 --- HMAC-SHA256 of urlencode(params)."""
+        query_string = urlencode(params, doseq=True)
         return hmac.new(
-            self.api_secret.encode(),
-            payload.encode(),
+            self.api_secret.encode("utf-8"),
+            query_string.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
 
-    def _get_server_time(self) -> int:
-        """
-        Get current server timestamp in milliseconds.
-        Uses cached offset if recent; otherwise fetches fresh server time.
-        """
-        now = time.time()
-        if (self._clock.offset != 0.0 
-                and (now - self._clock._last_sync) < 60):
-            return int((now + self._clock.offset) * 1000)
-        
-        self._clock.sync(self.base_url)
+    def _server_now_ms(self) -> int:
+        """Current millisecond timestamp adjusted by the cached clock offset."""
         return int((time.time() + self._clock.offset) * 1000)
 
-    def _unwrap_response_payload(self, data: Any, endpoint: str) -> Any:
-        """Normalize Bitkub V3 and V4 payloads or raise BitkubAPIError."""
-        if not isinstance(data, dict):
-            return data
+    # ── Filter cache (LOT_SIZE / PRICE_FILTER) ─────────────────────────────
 
-        if "error" in data:
-            err_code = data.get("error", 0)
-            if err_code != 0:
-                msg = _bitkub_error_message(err_code, data.get("message"))
-                raise BitkubAPIError(err_code, msg, raw=data)
-            return data.get("result", data)
+    def _get_symbol_filters(self, binance_symbol: str) -> Dict[str, Any]:
+        """# --- NEW: SPEC_01 --- Cached lookup of LOT_SIZE / PRICE_FILTER /
+        MIN_NOTIONAL filters per symbol.  Falls back to 6-decimal precision
+        if exchangeInfo is unavailable."""
+        with self._exchange_info_lock:
+            cached = self._exchange_info_cache.get(binance_symbol)
+            if cached is not None:
+                return cached
 
-        if "code" in data:
-            err_code = str(data.get("code", "0") or "0")
-            if err_code != "0":
-                msg = _bitkub_error_message(err_code, data.get("message"))
-                raise BitkubAPIError(err_code, msg, raw=data)
-            return data.get("data", data)
-
-        return data
-
-    def _request_aux(
-        self,
-        method: str,
-        endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        query_params: Optional[Dict[str, Any]] = None,
-        timeout: Optional[float] = None,
-    ) -> Any:
-        """Authenticated helper for non-trading endpoints.
-
-        This bypasses circuit-breaker/fatal-shutdown side effects so auxiliary
-        history lookups cannot pause trading on their own.
-        """
-        if not self.check_clock_sync():
-            raise BitkubAPIError(
-                -998,
-                f"Clock offset {self._clock.offset:+.1f}s exceeds limit — refusing auxiliary authenticated request",
-            )
-
-        url = f"{self.base_url}{endpoint}"
-        body = ""
-        query = ""
-
-        # ── H1: Thread-safe rate limiting (aux path) ──────────────────────
-        with self._state_lock:
-            now = time.time()
-            elapsed = now - self._last_request_time
-            sleep_for = max(0.0, self._min_request_interval - elapsed)
-            self._last_request_time = now + sleep_for
-        if sleep_for:
-            time.sleep(sleep_for)
-
-        if params:
-            body = json.dumps(params, separators=(",", ":"))
-
-        if query_params:
-            qs = "&".join(f"{k}={v}" for k, v in query_params.items() if v is not None)
-            query = f"?{qs}" if qs else ""
-            if query:
-                url = f"{url}{query}"
-
-        ts = self._get_server_time()
-        sign = self._sign(ts, method, endpoint, query, body)
-        headers: Dict[str, str] = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "X-BTK-APIKEY": self.api_key,
-            "X-BTK-TIMESTAMP": str(ts),
-            "X-BTK-SIGN": sign,
+        filters: Dict[str, Any] = {
+            "stepSize": 0.000001,
+            "tickSize": 0.000001,
+            "minQty":   0.0,
+            "minNotional": 0.0,
+            "_fallback": True,
         }
-
-        response = requests.request(
-            method,
-            url,
-            headers=headers,
-            data=body if body else None,
-            timeout=self.TIMEOUT if timeout is None else timeout,
-        )
-        if response.status_code >= 400:
+        try:
+            r = requests.get(
+                f"{self.base_url}/api/v1/exchangeInfo",
+                params={"symbol": binance_symbol},
+                timeout=self.TIMEOUT,
+            )
+            data = r.json() if r.status_code == 200 else {}
+            symbols = data.get("symbols") if isinstance(data, dict) else None
+            entry = symbols[0] if symbols else None
+            if entry and isinstance(entry.get("filters"), list):
+                for f in entry["filters"]:
+                    ftype = f.get("filterType")
+                    if ftype == "LOT_SIZE":
+                        filters["stepSize"] = float(f.get("stepSize") or filters["stepSize"])
+                        filters["minQty"]   = float(f.get("minQty") or 0.0)
+                    elif ftype == "PRICE_FILTER":
+                        filters["tickSize"] = float(f.get("tickSize") or filters["tickSize"])
+                    elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
+                        filters["minNotional"] = float(
+                            f.get("minNotional") or f.get("notional") or 0.0
+                        )
+                filters["_fallback"] = False
+        except Exception as exc:
             logger.warning(
-                "Auxiliary Bitkub HTTP %s from %s — Raw response: %s",
-                response.status_code,
-                endpoint,
-                response.text[:500],
+                "exchangeInfo lookup failed for %s: %s — using fallback precision",
+                binance_symbol,
+                exc,
             )
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise BitkubAPIError(-1, f"Non-JSON response ({response.status_code}): {response.text[:300]}") from exc
+        with self._exchange_info_lock:
+            self._exchange_info_cache[binance_symbol] = filters
+        return filters
 
-        return self._unwrap_response_payload(payload, endpoint)
+    def _round_quantity(self, binance_symbol: str, qty: float) -> float:
+        f = self._get_symbol_filters(binance_symbol)
+        if f.get("_fallback"):
+            raise BinanceAPIError(-1013, f"Exchange filters unavailable for {binance_symbol}; refusing to submit quantity")
+        step = float(f.get("stepSize") or 0.0)
+        if step <= 0:
+            raise BinanceAPIError(-1013, f"Missing LOT_SIZE stepSize for {binance_symbol}")
+        rounded = _round_step(qty, step)
+        if rounded <= 0 and qty > 0:
+            raise BinanceAPIError(
+                -1013,
+                f"Quantity {qty} rounds to 0 under LOT_SIZE stepSize {step} for {binance_symbol}",
+            )
+        min_qty = float(f.get("minQty") or 0.0)
+        if min_qty > 0 and 0 < rounded < min_qty:
+            raise BinanceAPIError(
+                -1013,
+                f"Quantity {rounded} below minQty {min_qty} for {binance_symbol}",
+            )
+        return rounded
+
+    def _round_price(self, binance_symbol: str, price: float) -> float:
+        f = self._get_symbol_filters(binance_symbol)
+        if f.get("_fallback"):
+            raise BinanceAPIError(-1013, f"Exchange filters unavailable for {binance_symbol}; refusing to submit price")
+        tick = float(f.get("tickSize") or 0.0)
+        if tick <= 0:
+            raise BinanceAPIError(-1013, f"Missing PRICE_FILTER tickSize for {binance_symbol}")
+        rounded = _round_step(price, tick)
+        if rounded <= 0 and price > 0:
+            raise BinanceAPIError(
+                -1013,
+                f"Price {price} rounds to 0 under PRICE_FILTER tickSize {tick} for {binance_symbol}",
+            )
+        return rounded
+
+    # ── Core request ───────────────────────────────────────────────────────
 
     def _request(
         self,
         method: str,
-        endpoint: str,
-        authenticated: bool = False,
+        path: str,
+        *,
+        signed: bool = False,
         params: Optional[Dict[str, Any]] = None,
-        query_params: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """
-        Core request wrapper with circuit breaker and clock sync.
+    ) -> Any:
+        """Shared request wrapper with circuit-breaker, clock sync, and rate limiting.
 
-        Args:
-            method:        HTTP method (GET / POST)
-            endpoint:      API path (e.g. /api/v3/market/ticker)
-            authenticated: Include auth headers
-            params:        POST body (dict, will be JSON-encoded)
-            query_params:  URL query string params
+        Per Binance convention all parameters (including for POST/DELETE) are
+        sent on the query string — that is also what gets signed.
         """
-        # ── Circuit Breaker gate ────────────────────────────────────────────
         if not self._cb.is_available():
             raise CircuitBreakerOpen(
                 -999,
                 "Circuit breaker is OPEN — too many consecutive errors. "
-                "Trading paused. Will retry after cooldown."
+                "Trading paused. Will retry after cooldown.",
             )
-        
-        # ── Clock sync check for authenticated requests ─────────────────────
-        if authenticated:
-            if not self.check_clock_sync():
-                raise BitkubAPIError(
-                    -998,
-                    f"Clock offset {self._clock.offset:+.1f}s exceeds "
-                    f"limit — refusing authenticated request"
-                )
-        
-        url  = f"{self.base_url}{endpoint}"
 
-        # ── H1: Thread-safe rate limiting ──────────────────────────────────
-        # Atomically claim a request slot and compute how long to sleep.
-        # The sleep itself happens *outside* the lock so other threads are
-        # not blocked while this thread waits for its slot.
+        if signed and not self.check_clock_sync():
+            raise BinanceAPIError(
+                -998,
+                f"Clock offset {self._clock.offset:+.1f}s exceeds limit — "
+                "refusing authenticated request",
+            )
+
+        # Thread-safe rate limiter — claim a slot inside the lock; sleep outside.
         with self._state_lock:
             now = time.time()
             elapsed = now - self._last_request_time
             sleep_for = max(0.0, self._min_request_interval - elapsed)
-            # Pre-advance the timestamp to reserve the slot for this thread
             self._last_request_time = now + sleep_for
         if sleep_for:
             time.sleep(sleep_for)
 
-        body  = ""
-        query = ""
-
-        if params:
-            body = json.dumps(params, separators=(",", ":"))
-
-        if query_params:
-            qs = "&".join(f"{k}={v}" for k, v in query_params.items())
-            query = f"?{qs}"
-            url   = f"{url}{query}"
-
+        request_params: Dict[str, Any] = {k: v for k, v in (params or {}).items() if v is not None}
         headers: Dict[str, str] = {"Accept": "application/json"}
-        if authenticated:
-            ts   = self._get_server_time()
-            sign = self._sign(ts, method, endpoint, query, body)
-            headers.update({
-                "Content-Type":    "application/json",
-                "X-BTK-APIKEY":    self.api_key,
-                "X-BTK-TIMESTAMP": str(ts),
-                "X-BTK-SIGN":      sign,
-            })
+
+        if signed:
+            request_params["timestamp"] = self._server_now_ms()
+            request_params.setdefault("recvWindow", 5000)
+            request_params["signature"] = self._sign(request_params)
+            headers["X-MBX-APIKEY"] = self.api_key
+        elif self.api_key and method.upper() != "GET":
+            headers["X-MBX-APIKEY"] = self.api_key
+
+        url = f"{self.base_url}{path}"
 
         try:
             r = requests.request(
-                method,
+                method.upper(),
                 url,
+                params=request_params,
                 headers=headers,
-                data=body if body else None,
                 timeout=self.TIMEOUT if timeout is None else timeout,
             )
-            
-            # Log raw body on non-200 BEFORE parsing, so we see the exact Bitkub error
+
             if r.status_code >= 400:
-                is_suppressed_auth_probe = (
-                    authenticated
-                    and r.status_code == 401
+                is_suppressed_auth = (
+                    signed
+                    and r.status_code in (401, 403)
                     and bool(self._fatal_auth_suppression_context)
                 )
-                log_method = logger.warning if is_suppressed_auth_probe else logger.error
+                log_method = logger.warning if is_suppressed_auth else logger.error
                 suffix = (
                     f" during {self._fatal_auth_suppression_context}"
-                    if is_suppressed_auth_probe else ""
+                    if is_suppressed_auth else ""
                 )
                 log_method(
-                    f"HTTP {r.status_code} from {endpoint}{suffix} — "
-                    f"Raw Bitkub response: {r.text[:500]}"
+                    f"HTTP {r.status_code} from {path}{suffix} — "
+                    f"Raw response: {r.text[:500]}"
                 )
 
-            # Parse response
             try:
                 data = r.json()
             except ValueError:
-                raise BitkubAPIError(-1, f"Non-JSON response ({r.status_code}): {r.text[:300]}")
+                raise BinanceAPIError(
+                    -1,
+                    f"Non-JSON response ({r.status_code}): {r.text[:300]}",
+                )
 
-            # Success
-            result = self._unwrap_response_payload(data, endpoint)
+            if isinstance(data, dict) and "code" in data and "msg" in data:
+                code_val = data.get("code")
+                if code_val is None:
+                    code_int = 0
+                else:
+                    try:
+                        code_int = int(code_val)
+                    except (TypeError, ValueError):
+                        code_int = code_val
+                if isinstance(code_int, int) and code_int < 0:
+                    msg = _binance_error_message(code_int, data.get("msg"))
+                    raise BinanceAPIError(code_int, msg, raw=data)
+
             self._cb.record_success()
-            return result
-            
-        except BitkubAPIError as e:
-            # ── Error Classification ───────────────────────────────────
-            # Some Bitkub errors are NOT infrastructure failures and must
-            # NOT trip the circuit breaker:
-            #
-            #   5  = Unauthorized (invalid API key) → FATAL, shutdown
-            #  11  = Invalid order for history lookup → stale order, harmless
-            #  15  = Invalid amount (e.g. 0 qty)     → bad request, not infra
-            #  21  = Invalid order for cancellation  → already filled/gone
-            #  24  = Order not found (order-info)    → stale order, harmless
-            #
-            # These "order-not-found" errors happen when reconciliation
-            # tries to look up old orders that no longer exist on Bitkub.
-            # Counting them toward the circuit breaker would cause a chain
-            # reaction that blocks ALL trading for 60s on every restart.
+            return data
 
-            # Error 5 = IP not allowed — treated as fatal/private API unavailable
-            if e.code == 5:
+        except BinanceAPIError as e:
+            # Auth errors → fatal (suppression-aware)
+            if e.code in (-2014, -2015) or (signed and isinstance(e.code, int) and e.code in {-1022}):
                 if self._fatal_auth_suppression_context:
                     logger.warning(
-                        "Bitkub auth error 5 on %s during %s — caller will downgrade to degraded mode; fatal shutdown side effects suppressed",
-                        endpoint,
-                        self._fatal_auth_suppression_context,
+                        "Binance auth error %s on %s during %s — caller will downgrade to "
+                        "degraded mode; fatal shutdown side effects suppressed",
+                        e.code, path, self._fatal_auth_suppression_context,
                     )
                     raise
 
                 current_ip = get_public_ip() or "unknown"
                 logger.critical(
-                    "🚨 FATAL: Bitkub Auth Error 5 — IP not allowed. "
+                    "🚨 FATAL: Binance auth error %s on %s. "
                     "Current IP: %s | Message: %s | Raw: %s",
-                    current_ip, e.message, e.raw,
+                    e.code, path, current_ip, e.message, e.raw,
                 )
-
-                # Record failure in circuit breaker (prevents further API spam)
-                self._cb.record_failure(f"FATAL Auth Error 5 on {endpoint}")
-                raise FatalAuthException(
+                self._cb.record_failure(f"FATAL Auth Error {e.code} on {path}")
+                raise BinanceAuthException(
                     e.code,
-                    (
-                        f"🚨 FATAL: Bitkub Auth Error 5. "
-                        f"IP not allowed (current IP: {current_ip}). "
-                        f"Add this IP to the Bitkub API allowlist and restart."
-                    ),
+                    f"🚨 FATAL: Binance.th auth error {e.code} ({e.message}). "
+                    f"Verify API key/secret and permissions, then restart.",
                     raw=e.raw,
                 )
 
-            # Errors 11, 15, 21, 24 = stale/missing order or bad request — NOT infra
-            elif e.code in (11, 15, 21, 24):
-                if e.code == 21 and "cancel-order" in str(endpoint):
+            # Bad/stale order family — do NOT trip the global circuit breaker.
+            if isinstance(e.code, int) and e.code in (-1013, -2010, -2011, -2013, -2026):
+                if e.code == -2011 and "/api/v1/order" in path and method.upper() == "DELETE":
                     logger.info(
-                        f"Expected stale cancel {e.code} on {endpoint}: {e.message} "
+                        f"Expected stale cancel {e.code} on {path}: {e.message} "
                         f"(order already filled or gone)"
                     )
                 else:
                     logger.warning(
-                        f"⚠️ Stale order error {e.code} on {endpoint}: {e.message} "
-                        f"(order no longer exists on Bitkub — circuit breaker NOT affected)"
+                        f"⚠️ Order error {e.code} on {path}: {e.message} "
+                        f"(treated as bad request — circuit breaker NOT affected)"
                     )
-            else:
-                self._cb.record_failure(str(endpoint))
+                raise
+
+            self._cb.record_failure(str(path))
             raise
         except Exception as e:
             self._cb.record_failure(str(e))
-            raise BitkubAPIError(-1, f"Request failed: {e}")
+            raise BinanceAPIError(-1, f"Request failed: {e}")
 
     # ── Market data (public) ────────────────────────────────────────────────
 
     def get_ticker(self, symbol: Optional[str] = None) -> Dict[str, Any]:
-        """
-        GET /api/v3/market/ticker?sym={symbol}
-
-        Returns ticker info for the given symbol.
-        Response: list of dicts (one per symbol) or a single dict.
-
-        Note: Bitkub API v3 expects 'sym' in BASE_QUOTE format (e.g. 'btc_thb').
-        Ticker is a PUBLIC endpoint - no authentication needed.
-        """
-        sym = _normalize_market_symbol(symbol or self.symbol)
-        
-        url = f"{self.base_url}/api/v3/market/ticker"
-        params = {"sym": sym}
-        
+        """GET /api/v1/ticker/24hr?symbol=BTCUSDT — returns normalized ticker dict."""
+        original = symbol or self.symbol
+        binance_symbol = self._to_binance_symbol(original)
         try:
-            r = requests.get(url, params=params, timeout=self.TIMEOUT)
-            result = r.json()
+            r = requests.get(
+                f"{self.base_url}/api/v1/ticker/24hr",
+                params={"symbol": binance_symbol},
+                timeout=self.TIMEOUT,
+            )
+            data = r.json()
         except Exception as e:
-            raise BitkubAPIError(-1, f"Ticker request failed: {e}")
-        
-        if isinstance(result, list):
-            result = [t for t in result if t.get("symbol", "").upper() == sym.upper()]
-            if not result:
-                raise BitkubAPIError(-1, f"Symbol '{sym}' not found in ticker response")
-            return result[0]
-        return result
+            raise BinanceAPIError(-1, f"Ticker request failed: {e}")
+
+        if isinstance(data, dict) and "code" in data and isinstance(data.get("code"), int) and data["code"] < 0:
+            raise BinanceAPIError(
+                data["code"],
+                _binance_error_message(data["code"], data.get("msg")),
+                raw=data,
+            )
+
+        return _normalize_ticker(data, requested_symbol=original)
 
     def get_tickers_batch(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Get multiple tickers in a single API call (more efficient than individual calls).
-
-        Args:
-            symbols: List of trading pairs in THB_BASE format (e.g., ['THB_BTC', 'THB_ETH'])
-
-        Returns:
-            Dict mapping pair name -> ticker dict
-        """
-        url = f"{self.base_url}/api/v3/market/ticker"
+        """Batch-fetch tickers via /api/v1/ticker/24hr (no symbol → returns all)."""
         try:
-            r = requests.get(url, timeout=self.TIMEOUT)
-            all_tickers = r.json()
+            r = requests.get(f"{self.base_url}/api/v1/ticker/24hr", timeout=self.TIMEOUT)
+            payload = r.json()
         except Exception as e:
-            raise BitkubAPIError(-1, f"Batch ticker request failed: {e}")
+            raise BinanceAPIError(-1, f"Batch ticker request failed: {e}")
 
-        if not isinstance(all_tickers, list):
+        if not isinstance(payload, list):
             return {}
 
-        results = {}
-        for sym_raw in symbols:
-            sym_upper = sym_raw.upper()
-            parts = sym_raw.split('_')
-            if len(parts) == 2:
-                api_sym = f"{parts[1].upper()}_{parts[0].upper()}"  # BASE_QUOTE
-            else:
-                api_sym = sym_upper
+        index: Dict[str, Dict[str, Any]] = {}
+        for entry in payload:
+            if isinstance(entry, dict) and entry.get("symbol"):
+                index[str(entry["symbol"]).upper()] = entry
 
-            for ticker in all_tickers:
-                if ticker.get('symbol', '') == api_sym:
-                    results[sym_raw] = ticker
-                    break
-
+        results: Dict[str, Dict[str, Any]] = {}
+        for sym in symbols:
+            binance_symbol = self._to_binance_symbol(sym)
+            entry = index.get(binance_symbol)
+            if entry is not None:
+                results[sym] = _normalize_ticker(entry, requested_symbol=sym)
         return results
 
-    def get_candle(self, symbol: str, timeframe: str = "1h", limit: int = 250) -> Dict[str, Any]:
+    def get_candle(
+        self,
+        symbol: str,
+        timeframe: str = "15m",
+        limit: int = 250,
+    ) -> Dict[str, Any]:
         """
-        GET /tradingview/history
-        Returns TradingView-style candlestick data.
+        GET /api/v1/klines — Binance.th klines.
 
-        Args:
-            symbol: Trading pair (e.g. 'BTC_THB')
-            timeframe: '1', '5', '15', '60', '240', '1D' or friendly values like '1h'
-            limit: Number of candles (max 300)
-
-        Returns:
-            Dict with error=0 and result=[[t, o, h, l, c, v], ...]
-        Cached: 60 second TTL.
+        # --- NEW: SPEC_01 --- Binance returns timestamps in milliseconds; we
+        # convert to seconds so callers (which were written against the old
+        # legacy caller format) keep working without changes.
         """
-        # TradingView resolution: 1, 5, 15, 60, 240, 1D, etc.
-        tf_map = {"1m": "1", "5m": "5", "15m": "15", "30m": "30",
-                  "1h": "60", "4h": "240", "1d": "1D", "1w": "1W",
-                  "1": "1", "5": "5", "15": "15", "30": "30",
-                  "60": "60", "240": "240", "1440": "1D", "1D": "1D", "1W": "1W"}
-        resolution = tf_map.get(str(timeframe), str(timeframe or "60"))
-        sym = _normalize_tradingview_symbol(symbol)
-        url = f"{self.base_url}/tradingview/history"
-        window_seconds = max(limit, 1) * _resolution_to_seconds(resolution)
-        to_time = int(time.time())
-        from_time = max(to_time - window_seconds, 0)
-        payload = self._get_candle_cached(sym, resolution, from_time, to_time, url)
-        if isinstance(payload, dict) and "error" in payload and payload.get("error") not in (0, None):
-            return payload
+        binance_symbol = self._to_binance_symbol(symbol)
+        interval = self._to_binance_interval(timeframe)
+        cache_key = f"{binance_symbol}:{interval}:{int(limit)}"
 
-        candles = _normalize_tradingview_candles(payload if isinstance(payload, dict) else {})
-        return {
-            "error": 0,
-            "result": candles,
-            "status": payload.get("s") if isinstance(payload, dict) else None,
-        }
+        cached = _candle_cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    # TTL cache for candles - replaces lru_cache with proper time-based expiration
-    _candle_cache: Dict[str, tuple] = {}  # key -> (timestamp, result)
-    _candle_cache_ttl: float = 60.0  # 60 seconds TTL
-    _candle_cache_max_size: int = 200  # Max entries before cleanup
-    _candle_cache_lock = threading.Lock()
-
-    @staticmethod
-    def _prune_candle_cache(now: int) -> None:
-        expired_keys = [
-            key
-            for key, (cached_at, _) in BitkubClient._candle_cache.items()
-            if now - cached_at >= BitkubClient._candle_cache_ttl
-        ]
-        for key in expired_keys:
-            BitkubClient._candle_cache.pop(key, None)
-
-        overflow = len(BitkubClient._candle_cache) - BitkubClient._candle_cache_max_size
-        if overflow > 0:
-            oldest_keys = [
-                key
-                for key, _ in sorted(
-                    BitkubClient._candle_cache.items(),
-                    key=lambda item: item[1][0],
-                )[:overflow]
-            ]
-            for key in oldest_keys:
-                BitkubClient._candle_cache.pop(key, None)
-
-    @staticmethod
-    def _get_candle_cached(symbol: str, resolution: str, from_time: int, to_time: int, url: str) -> Dict[str, Any]:
-        """Cached candle lookup - TTL 60 seconds via custom cache.
-        
-        FIX: Include from/to in cache key to prevent stale data.
-        """
-        now = int(time.time())
-        
-        # Create cache key from stable parameters INCLUDING from/to
-        cache_key = f"{symbol}:{resolution}:{from_time}:{to_time}"
-        
-        # Check cache (thread-safe)
-        with BitkubClient._candle_cache_lock:
-            BitkubClient._prune_candle_cache(now)
-            if cache_key in BitkubClient._candle_cache:
-                cached_time, cached_result = BitkubClient._candle_cache[cache_key]
-                if now - cached_time < BitkubClient._candle_cache_ttl:
-                    return cached_result
-        
-        # Fetch fresh data
         try:
-            r = requests.get(url, params={"symbol": symbol, "resolution": resolution,
-                                           "from": from_time,
-                                           "to": to_time},
-                              timeout=30)
-            result = r.json()
-            # Cache the result (thread-safe) + prune stale/overflow entries
-            with BitkubClient._candle_cache_lock:
-                BitkubClient._candle_cache[cache_key] = (now, result)
-                BitkubClient._prune_candle_cache(now)
-            return result
-        except Exception as e:
-            return {"error": 1, "message": str(e)}
+            r = requests.get(
+                f"{self.base_url}/api/v1/klines",
+                params={
+                    "symbol": binance_symbol,
+                    "interval": interval,
+                    "limit": int(limit),
+                },
+                timeout=self.TIMEOUT,
+            )
+            rows = r.json()
+        except Exception as exc:
+            return {"error": 1, "message": f"klines request failed: {exc}", "result": []}
+
+        if isinstance(rows, dict) and "code" in rows and isinstance(rows.get("code"), int) and rows["code"] < 0:
+            return {
+                "error": rows["code"],
+                "message": _binance_error_message(rows["code"], rows.get("msg")),
+                "result": [],
+            }
+
+        if not isinstance(rows, list):
+            return {"error": 1, "message": "Unexpected klines payload", "result": []}
+
+        candles: List[List[float]] = []
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 6:
+                continue
+            try:
+                candles.append([
+                    int(int(row[0]) / 1000),
+                    float(row[1]),
+                    float(row[2]),
+                    float(row[3]),
+                    float(row[4]),
+                    float(row[5]),
+                ])
+            except (TypeError, ValueError):
+                continue
+
+        result = {"error": 0, "result": candles, "status": "ok"}
+        _candle_cache_put(cache_key, result)
+        return result
 
     def get_symbols(self) -> List[Dict[str, Any]]:
-        """GET /api/v3/market/symbols — list all available trading pairs."""
-        result = self._request("GET", "/api/v3/market/symbols")
-        return result if isinstance(result, list) else []
+        """GET /api/v1/exchangeInfo — list trading pairs."""
+        try:
+            r = requests.get(f"{self.base_url}/api/v1/exchangeInfo", timeout=self.TIMEOUT)
+            data = r.json()
+        except Exception as exc:
+            raise BinanceAPIError(-1, f"exchangeInfo request failed: {exc}")
+        if isinstance(data, dict):
+            return list(data.get("symbols") or [])
+        return []
 
     def get_depth(
         self,
         symbol: Optional[str] = None,
         limit: int = 25,
     ) -> Dict[str, List]:
-        """
-        GET /api/v3/market/depth?sym={symbol}&lmt={limit}
-
-        Returns order book with 'asks' and 'bids'.
-        """
-        sym = (symbol or self.symbol).lower()
-        return self._request(
+        """GET /api/v1/depth — order book for the given symbol."""
+        binance_symbol = self._to_binance_symbol(symbol or self.symbol)
+        data = self._request(
             "GET",
-            "/api/v3/market/depth",
-            query_params={"sym": sym, "lmt": limit},
+            "/api/v1/depth",
+            params={"symbol": binance_symbol, "limit": int(limit)},
         )
+        if not isinstance(data, dict):
+            return {"asks": [], "bids": []}
+        return {
+            "asks": [[float(p), float(q)] for p, q, *_ in data.get("asks", [])],
+            "bids": [[float(p), float(q)] for p, q, *_ in data.get("bids", [])],
+        }
 
     def get_bids(
         self,
         symbol: Optional[str] = None,
         limit: int = 25,
-    ) -> List[Dict[str, Any]]:
-        """GET /api/v3/market/bids — open buy orders."""
-        sym = (symbol or self.symbol).lower()
-        data = self._request(
-            "GET", "/api/v3/market/bids",
-            query_params={"sym": sym, "lmt": limit},
-        )
-        return data.get("result", [])
+    ) -> List[List[float]]:
+        return self.get_depth(symbol=symbol, limit=limit).get("bids", [])
 
     def get_asks(
         self,
         symbol: Optional[str] = None,
         limit: int = 25,
-    ) -> List[Dict[str, Any]]:
-        """GET /api/v3/market/asks — open sell orders."""
-        sym = (symbol or self.symbol).lower()
-        data = self._request(
-            "GET", "/api/v3/market/asks",
-            query_params={"sym": sym, "lmt": limit},
-        )
-        return data.get("result", [])
+    ) -> List[List[float]]:
+        return self.get_depth(symbol=symbol, limit=limit).get("asks", [])
 
     def get_trades(
         self,
         symbol: Optional[str] = None,
         limit: int = 25,
-    ) -> List[List[Any]]:
-        """GET /api/v3/market/trades — recent trades."""
-        sym = (symbol or self.symbol).lower()
+    ) -> List[Dict[str, Any]]:
+        """GET /api/v1/trades — recent trades."""
+        binance_symbol = self._to_binance_symbol(symbol or self.symbol)
         data = self._request(
-            "GET", "/api/v3/market/trades",
-            query_params={"sym": sym, "lmt": limit},
+            "GET",
+            "/api/v1/trades",
+            params={"symbol": binance_symbol, "limit": int(limit)},
         )
-        return data.get("result", [])
+        if not isinstance(data, list):
+            return []
+        return data
 
-    # ── Account (authenticated) ─────────────────────────────────────────────
+    # ── Account (signed) ────────────────────────────────────────────────────
+
+    def _account_snapshot(self, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Internal: GET /api/v1/account."""
+        return self._request("GET", "/api/v1/account", signed=True, timeout=timeout)
 
     def get_wallet(self) -> Dict[str, float]:
-        """
-        POST /api/v3/market/wallet
-        Returns available balances (not reserved).
+        """Return a flat dict of available balances."""
+        balances = self.get_balances()
+        return {asset: float(info.get("available", 0.0)) for asset, info in balances.items()}
 
-        Response: { "THB": 188379.27, "BTC": 8.90397323, ... }
-        """
-        return self._request("POST", "/api/v3/market/wallet", authenticated=True)
+    def get_balance(self) -> Dict[str, float]:
+        """Alias of get_wallet — kept for backward compatibility."""
+        return self.get_wallet()
 
     def get_balances(
         self,
@@ -1038,36 +925,34 @@ class BitkubClient:
         allow_stale: bool = True,
         timeout: Optional[float] = None,
     ) -> Dict[str, Dict[str, float]]:
-        """
-        POST /api/v3/market/balances
-        Returns available + reserved balances.
-
-        Response:
-          { "THB": { "available": ..., "reserved": ... }, ... }
-
-        FIX HIGH-02: Instance-level cache with short TTL to avoid stale balances
-        and prevent creating new client instances with separate circuit breakers.
-        """
-        # ── H1: Thread-safe cache read ─────────────────────────────────────
-        # Check inside the lock so two threads cannot both see a stale cache
-        # and both fire redundant API calls.
+        """GET /api/v1/account → {"BTC": {"available": x, "reserved": y}, ...}."""
         with self._state_lock:
             if (not force_refresh
                     and self._balances_cache is not None
                     and time.time() - self._balances_cache_time < self._balances_cache_ttl):
                 return self._balances_cache
 
-        # Fetch *outside* the lock — blocking I/O must not hold _state_lock.
         try:
-            fresh = self._request(
-                "POST", "/api/v3/market/balances", authenticated=True, timeout=timeout
-            )
+            data = self._account_snapshot(timeout=timeout)
+            result: Dict[str, Dict[str, float]] = {}
+            for entry in (data.get("balances") if isinstance(data, dict) else None) or []:
+                asset = str(entry.get("asset") or "").upper()
+                if not asset:
+                    continue
+                try:
+                    available = float(entry.get("free", 0.0) or 0.0)
+                    reserved  = float(entry.get("locked", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    available, reserved = 0.0, 0.0
+                if available <= 0 and reserved <= 0:
+                    continue
+                result[asset] = {"available": available, "reserved": reserved}
+
             with self._state_lock:
-                self._balances_cache = fresh
+                self._balances_cache = result
                 self._balances_cache_time = time.time()
-            return fresh
+            return result
         except Exception as exc:
-            # On error, return stale cache if available (better than nothing)
             with self._state_lock:
                 if allow_stale and self._balances_cache is not None:
                     logger.warning("[Balance] Using stale cache due to API error: %s", exc)
@@ -1076,47 +961,103 @@ class BitkubClient:
             raise
 
     def get_balances_fresh(self) -> Dict[str, Dict[str, float]]:
-        """Fetch balances without cache reuse or stale-cache fallback."""
+        """Fetch balances bypassing the cache and disabling stale fallback."""
         return self.get_balances(force_refresh=True, allow_stale=False)
-
-    def get_balance(self) -> Dict[str, float]:
-        """
-        POST /api/v3/market/wallet
-        Returns available balances (not reserved).
-        Simplified version for trading bot compatibility.
-
-        Returns:
-            { "THB": 1000.0, "BTC": 0.5, ... }
-        """
-        return self._request("POST", "/api/v3/market/wallet", authenticated=True)
 
     def get_open_orders(
         self,
         symbol: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        GET /api/v3/market/my-open-orders?sym={symbol}
-        List all open orders for the given symbol.
-        """
-        requested_symbol = str(symbol or self.symbol).upper()
-        sym = _normalize_market_symbol(symbol or self.symbol)
-        
-        data = self._request(
-            "GET",
-            "/api/v3/market/my-open-orders",
-            authenticated=True,
-            query_params={"sym": sym},
-        )
-        rows = data if isinstance(data, list) else (data.get("result", []))
-        normalized_rows = []
+        """GET /api/v1/openOrders — list open orders for ``symbol`` (or all)."""
+        params: Dict[str, Any] = {}
+        requested_symbol = ""
+        if symbol:
+            requested_symbol = str(symbol).upper()
+            params["symbol"] = self._to_binance_symbol(symbol)
+
+        data = self._request("GET", "/api/v1/openOrders", signed=True, params=params)
+        rows = data if isinstance(data, list) else []
+
+        normalized: List[Dict[str, Any]] = []
         for row in rows:
-            if isinstance(row, dict):
-                row_copy = dict(row)
-                row_copy.setdefault("_checked_symbol", requested_symbol)
-                normalized_rows.append(row_copy)
+            if not isinstance(row, dict):
+                continue
+            entry = _normalize_order_response(row, fallback_symbol=requested_symbol or symbol or "")
+            if requested_symbol:
+                entry.setdefault("_checked_symbol", requested_symbol)
+            normalized.append(entry)
+        return normalized
+
+    # ── Trading (signed) ───────────────────────────────────────────────────
+
+    def _build_order_params(
+        self,
+        *,
+        binance_symbol: str,
+        side: str,
+        order_type: str,
+        amount: float,
+        rate: float,
+        post_only: bool,
+        client_id: Optional[str],
+        is_buy: bool,
+    ) -> Dict[str, Any]:
+        """Translate legacy (amount, rate) inputs into Binance order parameters."""
+        side = side.upper()
+        ot   = (order_type or "limit").lower()
+
+        params: Dict[str, Any] = {"symbol": binance_symbol, "side": side}
+
+        if ot == "market":
+            if is_buy:
+                # BUY semantic: amount = quote-currency to spend at market.
+                quote_qty = round(float(amount), 8)
+                if quote_qty <= 0:
+                    raise BinanceAPIError(-1100, "MARKET BUY requires amount > 0")
+                f = self._get_symbol_filters(binance_symbol)
+                min_notional = float(f.get("minNotional") or 0.0)
+                if min_notional > 0 and quote_qty < min_notional:
+                    raise BinanceAPIError(
+                        -1013,
+                        f"MARKET BUY notional {quote_qty} below minNotional {min_notional}",
+                    )
+                params["type"] = "MARKET"
+                params["quoteOrderQty"] = _format_decimal(quote_qty, precision=8)
             else:
-                normalized_rows.append(row)
-        return normalized_rows
+                qty = self._round_quantity(binance_symbol, float(amount))
+                if qty <= 0:
+                    raise BinanceAPIError(-1100, "MARKET SELL requires amount > 0")
+                params["type"] = "MARKET"
+                params["quantity"] = _format_decimal(qty, precision=8)
+        else:
+            if rate is None or float(rate) <= 0:
+                raise BinanceAPIError(-1100, "LIMIT order requires a positive rate")
+            price = self._round_price(binance_symbol, float(rate))
+            qty_raw = (float(amount) / price) if is_buy else float(amount)
+            qty = self._round_quantity(binance_symbol, qty_raw)
+            if qty <= 0:
+                raise BinanceAPIError(
+                    -1013,
+                    f"LIMIT {side} quantity {qty_raw} rounds to 0 under LOT_SIZE filter",
+                )
+            f = self._get_symbol_filters(binance_symbol)
+            min_notional = float(f.get("minNotional") or 0.0)
+            notional = qty * price
+            if min_notional > 0 and notional < min_notional:
+                raise BinanceAPIError(
+                    -1013,
+                    f"LIMIT {side} notional {notional} below minNotional {min_notional}",
+                )
+            params["type"]     = "LIMIT_MAKER" if post_only else "LIMIT"
+            params["quantity"] = _format_decimal(qty, precision=8)
+            params["price"]    = _format_decimal(price, precision=8)
+            if not post_only:
+                params["timeInForce"] = "GTC"
+
+        if client_id:
+            cid = str(client_id)[:36]
+            params["newClientOrderId"] = cid
+        return params
 
     def place_bid(
         self,
@@ -1127,48 +1068,22 @@ class BitkubClient:
         client_id: Optional[str] = None,
         post_only: bool = False,
     ) -> Dict[str, Any]:
-        """
-        POST /api/v3/market/place-bid — place a BUY (bid) order.
-
-        Args:
-            symbol:     Trading pair, lowercase with underscore (e.g. "btc_thb")
-            amount:     Amount to spend (THB side for bid)
-            rate:       Price per unit; use 0 for market orders
-            order_type: "limit" or "market"
-            client_id:  Optional client reference string
-            post_only:  If True, order only matches as maker
-
-        Returns:
-            { "id", "typ", "amt", "rat", "fee", "cre", "rec", "ts", "ci" }
-        """
-        # Amount and rate must have NO trailing zeros
-        # Convert THB_BTC -> btc_thb format for Bitkub API
-        sym_lower = symbol.lower()
-        if '_' in sym_lower:
-            parts = sym_lower.split('_')
-            if len(parts) == 2:
-                sym_formatted = f"{parts[1]}_{parts[0]}"  # BASE_QUOTE
-            else:
-                sym_formatted = sym_lower
-        else:
-            sym_formatted = sym_lower
-        
-        body: Dict[str, Any] = {
-            "sym": sym_formatted,
-            "amt": _no_trailing_zeros(amount),
-            "rat": _no_trailing_zeros(rate),
-            "typ": order_type,
-        }
-        if client_id:
-            body["client_id"] = client_id
-        if post_only:
-            body["post_only"] = True
-
-        return self._request(
-            "POST",
-            "/api/v3/market/place-bid",
-            authenticated=True,
-            params=body,
+        """POST /api/v1/order side=BUY — place a buy order."""
+        binance_symbol = self._to_binance_symbol(symbol)
+        params = self._build_order_params(
+            binance_symbol=binance_symbol,
+            side="BUY",
+            order_type=order_type,
+            amount=amount,
+            rate=rate,
+            post_only=post_only,
+            client_id=client_id,
+            is_buy=True,
+        )
+        data = self._request("POST", "/api/v1/order", signed=True, params=params)
+        return _normalize_order_response(
+            data if isinstance(data, dict) else {},
+            fallback_symbol=symbol,
         )
 
     def place_ask(
@@ -1180,47 +1095,22 @@ class BitkubClient:
         client_id: Optional[str] = None,
         post_only: bool = False,
     ) -> Dict[str, Any]:
-        """
-        POST /api/v3/market/place-ask — place a SELL (ask) order.
-
-        Args:
-            symbol:     Trading pair, lowercase with underscore (e.g. "btc_thb")
-            amount:     Quantity of base asset to sell (e.g. BTC amount)
-            rate:       Price per unit; use 0 for market orders
-            order_type: "limit" or "market"
-            client_id:  Optional client reference string
-            post_only:  If True, order only matches as maker
-
-        Returns:
-            { "id", "typ", "amt", "rat", "fee", "cre", "rec", "ts", "ci" }
-        """
-        # Convert THB_BTC -> btc_thb format for Bitkub API
-        sym_lower = symbol.lower()
-        if '_' in sym_lower:
-            parts = sym_lower.split('_')
-            if len(parts) == 2:
-                sym_formatted = f"{parts[1]}_{parts[0]}"  # BASE_QUOTE
-            else:
-                sym_formatted = sym_lower
-        else:
-            sym_formatted = sym_lower
-        
-        body: Dict[str, Any] = {
-            "sym": sym_formatted,
-            "amt": _no_trailing_zeros(amount),
-            "rat": _no_trailing_zeros(rate),
-            "typ": order_type,
-        }
-        if client_id:
-            body["client_id"] = client_id
-        if post_only:
-            body["post_only"] = True
-
-        return self._request(
-            "POST",
-            "/api/v3/market/place-ask",
-            authenticated=True,
-            params=body,
+        """POST /api/v1/order side=SELL — place a sell order."""
+        binance_symbol = self._to_binance_symbol(symbol)
+        params = self._build_order_params(
+            binance_symbol=binance_symbol,
+            side="SELL",
+            order_type=order_type,
+            amount=amount,
+            rate=rate,
+            post_only=post_only,
+            client_id=client_id,
+            is_buy=False,
+        )
+        data = self._request("POST", "/api/v1/order", signed=True, params=params)
+        return _normalize_order_response(
+            data if isinstance(data, dict) else {},
+            fallback_symbol=symbol,
         )
 
     def cancel_order(
@@ -1229,23 +1119,17 @@ class BitkubClient:
         order_id: str,
         side: str,
     ) -> Dict[str, Any]:
-        """
-        POST /api/v3/market/cancel-order — cancel an open order.
-
-        Args:
-            symbol:   Trading pair (e.g. "THB_BTC" or "btc_thb")
-            order_id: Order ID to cancel
-            side:     "buy" or "sell"
-        """
-        return self._request(
-            "POST",
-            "/api/v3/market/cancel-order",
-            authenticated=True,
-            params={
-                "sym": _normalize_market_symbol(symbol),
-                "id":  str(order_id),
-                "sd":  side.lower(),
-            },
+        """DELETE /api/v1/order — cancel an open order."""
+        binance_symbol = self._to_binance_symbol(symbol)
+        data = self._request(
+            "DELETE",
+            "/api/v1/order",
+            signed=True,
+            params={"symbol": binance_symbol, "orderId": str(order_id)},
+        )
+        return _normalize_order_response(
+            data if isinstance(data, dict) else {},
+            fallback_symbol=symbol,
         )
 
     def get_order_info(
@@ -1254,23 +1138,17 @@ class BitkubClient:
         order_id: str,
         side: str = "",
     ) -> Dict[str, Any]:
-        """
-        GET /api/v3/market/order-info?sym={symbol}&id={order_id}&sd={side}
-
-        Bitkub v3 requires all three params: sym, id, AND sd (buy/sell).
-        Missing 'sd' causes a 400 error and trips the circuit breaker.
-        """
-        sym = _normalize_market_symbol(symbol)
-
-        qp: Dict[str, Any] = {"sym": sym, "id": str(order_id)}
-        if side:
-            qp["sd"] = side.lower()
-
-        return self._request(
+        """GET /api/v1/order — fetch a single order's status."""
+        binance_symbol = self._to_binance_symbol(symbol)
+        data = self._request(
             "GET",
-            "/api/v3/market/order-info",
-            authenticated=True,
-            query_params=qp,
+            "/api/v1/order",
+            signed=True,
+            params={"symbol": binance_symbol, "orderId": str(order_id)},
+        )
+        return _normalize_order_response(
+            data if isinstance(data, dict) else {},
+            fallback_symbol=symbol,
         )
 
     def get_order_history(
@@ -1278,109 +1156,67 @@ class BitkubClient:
         symbol: str,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
-        """GET /api/v3/market/my-order-history?sym={symbol}&lmt={limit}"""
-        sym = _normalize_market_symbol(symbol)
+        """GET /api/v1/allOrders — historical orders for ``symbol``."""
+        binance_symbol = self._to_binance_symbol(symbol)
         data = self._request(
             "GET",
-            "/api/v3/market/my-order-history",
-            authenticated=True,
-            query_params={"sym": sym, "lmt": limit},
+            "/api/v1/allOrders",
+            signed=True,
+            params={"symbol": binance_symbol, "limit": int(limit)},
         )
-        return data if isinstance(data, list) else (data.get("result", []))
+        rows = data if isinstance(data, list) else []
+        return [
+            _normalize_order_response(row, fallback_symbol=symbol)
+            for row in rows
+            if isinstance(row, dict)
+        ]
 
-    def get_fiat_deposit_history(
-        self,
-        page: int = 1,
-        limit: int = 50,
-        timeout: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
-        """POST /api/v3/fiat/deposit-history — fiat deposit history."""
-        data = self._request_aux(
-            "POST",
-            "/api/v3/fiat/deposit-history",
-            query_params={"p": page, "lmt": limit},
-            timeout=timeout,
-        )
-        return data if isinstance(data, list) else []
+    # ── Wallet / fiat history (stubbed in SPEC_01) ─────────────────────────
+    # Binance.th does not expose direct equivalents of the legacy
+    # /api/v3/fiat/* and /api/v4/crypto/* history feeds.  monitoring.py still
+    # calls these helpers; per the SPEC_01 decision we return empty payloads
+    # and log a one-shot WARN per kind so the balance monitor keeps running.
 
-    def get_fiat_withdraw_history(
-        self,
-        page: int = 1,
-        limit: int = 50,
-        timeout: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
-        """POST /api/v3/fiat/withdraw-history — fiat withdrawal history."""
-        data = self._request_aux(
-            "POST",
-            "/api/v3/fiat/withdraw-history",
-            query_params={"p": page, "lmt": limit},
-            timeout=timeout,
-        )
-        return data if isinstance(data, list) else []
+    def _stub_history(self, kind: str, *, as_dict: bool = False) -> Any:
+        if not self._history_stub_warned.get(kind):
+            logger.warning(
+                "[history] %s history unavailable on Binance.th — returning empty result "
+                "(SPEC_01 stub; revisit in a dedicated history SPEC).",
+                kind,
+            )
+            self._history_stub_warned[kind] = True
+        return {"items": []} if as_dict else []
 
-    def get_crypto_deposit_history(
-        self,
-        *,
-        page: int = 1,
-        limit: int = 100,
-        symbol: Optional[str] = None,
-        status: Optional[str] = None,
-        timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """GET /api/v4/crypto/deposits — crypto deposit history."""
-        query_params: Dict[str, Any] = {"page": page, "limit": limit}
-        if symbol:
-            query_params["symbol"] = str(symbol).upper()
-        if status:
-            query_params["status"] = status
-        data = self._request_aux(
-            "GET",
-            "/api/v4/crypto/deposits",
-            query_params=query_params,
-            timeout=timeout,
-        )
-        return data if isinstance(data, dict) else {"items": []}
+    def get_fiat_deposit_history(self, *args, **kwargs) -> List[Dict[str, Any]]:
+        return self._stub_history("fiat_deposit")
 
-    def get_crypto_withdraw_history(
-        self,
-        *,
-        page: int = 1,
-        limit: int = 100,
-        symbol: Optional[str] = None,
-        status: Optional[str] = None,
-        timeout: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """GET /api/v4/crypto/withdraws — crypto withdrawal history."""
-        query_params: Dict[str, Any] = {"page": page, "limit": limit}
-        if symbol:
-            query_params["symbol"] = str(symbol).upper()
-        if status:
-            query_params["status"] = status
-        data = self._request_aux(
-            "GET",
-            "/api/v4/crypto/withdraws",
-            query_params=query_params,
-            timeout=timeout,
-        )
-        return data if isinstance(data, dict) else {"items": []}
+    def get_fiat_withdraw_history(self, *args, **kwargs) -> List[Dict[str, Any]]:
+        return self._stub_history("fiat_withdraw")
+
+    def get_crypto_deposit_history(self, *args, **kwargs) -> Dict[str, Any]:
+        return self._stub_history("crypto_deposit", as_dict=True)
+
+    def get_crypto_withdraw_history(self, *args, **kwargs) -> Dict[str, Any]:
+        return self._stub_history("crypto_withdraw", as_dict=True)
 
     # ── Convenience helpers ─────────────────────────────────────────────────
 
     def is_authenticated(self) -> bool:
-        """Check whether API credentials are configured."""
-        return bool(self.api_key and self.api_secret
-                    and self.api_key != "your_bitkub_api_key_here")
+        """Check whether plausible API credentials are configured."""
+        if not self.api_key or not self.api_secret:
+            return False
+        placeholder_markers = ("your_binance", "placeholder", "changeme")
+        key_lower = self.api_key.lower()
+        return not any(m in key_lower for m in placeholder_markers)
 
-    def fmt_balance(self, asset: str = "THB") -> str:
-        """Return a formatted balance string for an asset."""
+    def fmt_balance(self, asset: str = "USDT") -> str:
         balances = self.get_balances()
         info = balances.get(asset.upper(), {"available": 0.0, "reserved": 0.0})
-        av   = info.get("available", 0.0)
-        rv   = info.get("reserved",  0.0)
+        av = info.get("available", 0.0)
+        rv = info.get("reserved",  0.0)
         return f"{asset}: available={av:.8f}  reserved={rv:.8f}"
 
     def fmt_ticker(self, symbol: Optional[str] = None) -> str:
-        """Return a human-readable ticker string."""
         t = self.get_ticker(symbol)
         sym = t.get("symbol", symbol or self.symbol)
         return (
@@ -1390,25 +1226,182 @@ class BitkubClient:
         )
 
 
-# ── Utilities ────────────────────────────────────────────────────────────────
+# ── Module-level helpers ─────────────────────────────────────────────────────
 
-def _no_trailing_zeros(value: float) -> float:
+def _normalize_ticker(data: Dict[str, Any], *, requested_symbol: str) -> Dict[str, Any]:
+    """Normalize a Binance 24hr ticker payload into the expected internal shape."""
+    if not isinstance(data, dict):
+        return {}
+
+    def _f(key: str, default: float = 0.0) -> float:
+        try:
+            return float(data.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "last":           _f("lastPrice"),
+        "high":           _f("highPrice"),
+        "low":            _f("lowPrice"),
+        "highest_bid":    _f("bidPrice"),
+        "lowest_ask":     _f("askPrice"),
+        "volume":         _f("volume"),
+        "quote_volume":   _f("quoteVolume"),
+        "percent_change": _f("priceChangePercent"),
+        "high_24_hr":     _f("highPrice"),
+        "low_24_hr":      _f("lowPrice"),
+        "symbol":         requested_symbol or data.get("symbol", ""),
+        "_raw":           data,
+    }
+
+
+_BINANCE_ORDER_STATUS_MAP = {
+    "NEW":              "unfilled",
+    "PARTIALLY_FILLED": "partial",
+    "FILLED":           "filled",
+    "CANCELED":         "cancelled",
+    "PENDING_CANCEL":   "cancelling",
+    "REJECTED":         "rejected",
+    "EXPIRED":          "expired",
+}
+
+
+def _normalize_order_response(data: Dict[str, Any], *, fallback_symbol: str) -> Dict[str, Any]:
     """
-    Convert float to a number with no trailing zeros.
-    Bitkub rejects trailing zeros (e.g. 1000.00 is invalid, 1000 is ok).
+    Normalize a Binance order JSON into the internal order dict that
+    trade_executor.py and friends still parse: id / amt / rat / rec / fee /
+    cre / ts / typ / ci / status / side.
+
+    The original Binance payload is preserved under ``_raw``.
     """
-    s = f"{value:.10f}".rstrip("0").rstrip(".")
-    return float(s)
+    def _f(key: str, default: float = 0.0) -> float:
+        try:
+            return float(data.get(key, default) or default)
+        except (TypeError, ValueError):
+            return default
+
+    raw_symbol = str(data.get("symbol") or fallback_symbol or "").upper()
+    side       = str(data.get("side") or "").upper()
+    order_type = str(data.get("type") or "").lower()
+    status     = str(data.get("status") or "").upper()
+
+    orig_qty       = _f("origQty")
+    executed_qty   = _f("executedQty")
+    cum_quote_qty  = _f("cummulativeQuoteQty")
+    price          = _f("price")
+    transact_ts_ms = data.get("transactTime") or data.get("updateTime") or data.get("time") or 0
+    try:
+        transact_ts = int(int(transact_ts_ms) / 1000)
+    except (TypeError, ValueError):
+        transact_ts = int(time.time())
+
+    if side == "BUY":
+        amt = cum_quote_qty if cum_quote_qty > 0 else (orig_qty * price if price > 0 else orig_qty)
+        rec = executed_qty
+    else:
+        amt = orig_qty
+        rec = cum_quote_qty if cum_quote_qty > 0 else executed_qty
+
+    fee = 0.0
+    fills = data.get("fills") if isinstance(data, dict) else None
+    if isinstance(fills, list):
+        for f in fills:
+            try:
+                fee += float(f.get("commission") or 0.0)
+            except (TypeError, ValueError):
+                continue
+
+    avg_price = 0.0
+    if executed_qty > 0 and cum_quote_qty > 0:
+        avg_price = cum_quote_qty / executed_qty
+
+    return {
+        "id":         str(data.get("orderId") or data.get("id") or ""),
+        "ci":         str(data.get("clientOrderId") or ""),
+        "typ":        order_type or ("limit" if price > 0 else "market"),
+        "side":       side.lower() or "",
+        "amt":        amt,
+        "rat":        price if price > 0 else avg_price,
+        "rec":        rec,
+        "fee":        fee,
+        "cre":        transact_ts,
+        "ts":         transact_ts,
+        "status":     _BINANCE_ORDER_STATUS_MAP.get(status, status.lower()),
+        "avg_price":  avg_price,
+        "symbol":     raw_symbol or fallback_symbol,
+        "_raw":       data,
+    }
+
+
+# ── Candle cache (TTL 60s, max 200 entries) ─────────────────────────────────
+
+_candle_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_candle_cache_lock = threading.Lock()
+_CANDLE_CACHE_TTL = 60.0
+_CANDLE_CACHE_MAX = 200
+
+
+def _candle_cache_get(key: str) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    with _candle_cache_lock:
+        entry = _candle_cache.get(key)
+        if entry is None:
+            return None
+        cached_at, payload = entry
+        if now - cached_at < _CANDLE_CACHE_TTL:
+            return payload
+        _candle_cache.pop(key, None)
+    return None
+
+
+def _candle_cache_put(key: str, payload: Dict[str, Any]) -> None:
+    now = time.time()
+    with _candle_cache_lock:
+        _candle_cache[key] = (now, payload)
+        if len(_candle_cache) > _CANDLE_CACHE_MAX:
+            expired = [
+                k for k, (cached_at, _) in _candle_cache.items()
+                if now - cached_at >= _CANDLE_CACHE_TTL
+            ]
+            for k in expired:
+                _candle_cache.pop(k, None)
+            overflow = len(_candle_cache) - _CANDLE_CACHE_MAX
+            if overflow > 0:
+                oldest = sorted(_candle_cache.items(), key=lambda item: item[1][0])[:overflow]
+                for k, _ in oldest:
+                    _candle_cache.pop(k, None)
 
 
 # ── Module-level singleton (lazy) ─────────────────────────────────────────────
 
-_client: Optional[BitkubClient] = None
+_client: Optional[BinanceThClient] = None
 
 
-def get_client() -> BitkubClient:
-    """Return a shared BitkubClient instance."""
+def get_client() -> BinanceThClient:
+    """Return a shared BinanceThClient instance."""
     global _client
     if _client is None:
-        _client = BitkubClient()
+        _client = BinanceThClient()
     return _client
+
+
+def check_ip_change_on_startup() -> Optional[str]:
+    """Startup public IP diagnostic helper.
+
+    Binance.th does not lock API keys to source IPs by default, so we just
+    log the current public IP for operator visibility and return it.
+    """
+    current_ip = get_public_ip()
+    if current_ip:
+        logger.info("Public IP: %s (Binance.th does not enforce IP allowlist by default)", current_ip)
+    else:
+        logger.debug("Public IP lookup unavailable — skipping startup IP log")
+    return current_ip
+
+
+# Legacy compatibility aliases while active tests/modules finish the Binance TH
+# migration. New code should import the Binance* names above.
+BitkubClient = BinanceThClient
+BitkubAPIError = BinanceAPIError
+FatalAuthException = BinanceAuthException
+BITKUB = BINANCE

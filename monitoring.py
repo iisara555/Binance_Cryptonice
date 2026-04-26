@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Optional, Dict, Any, List
 
 if TYPE_CHECKING:
     from trading_bot import TradingBotOrchestrator
-    from api_client import BitkubClient
+    from api_client import BinanceThClient
     from trade_executor import TradeExecutor
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class MonitoringService:
     def __init__(
         self,
         bot_ref: "TradingBotOrchestrator",
-        api_client: "BitkubClient",
+        api_client: "BinanceThClient",
         executor: "TradeExecutor",
         config: Dict[str, Any],
         alert_sender=None,
@@ -47,7 +47,7 @@ class MonitoringService:
         
         Args:
             bot_ref: Reference to the TradingBotOrchestrator
-            api_client: Bitkub API client
+            api_client: exchange API client
             executor: TradeExecutor instance
             config: Bot configuration dict
             alert_sender: Function to send alerts
@@ -143,7 +143,7 @@ class MonitoringService:
         """Check if API is responsive."""
         try:
             # Simple API ping check
-            ticker = self.api_client.get_ticker("THB_BTC")
+            ticker = self.api_client.get_ticker("BTCUSDT")
             return ticker is not None
         except Exception as exc:
             logger.warning("API health check failed: %s", exc)

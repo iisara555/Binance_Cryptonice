@@ -34,6 +34,9 @@ class SignalRuntimeDeps:
     create_execution_plan_for_symbol: Callable[[AggregatedSignal, str], Optional[ExecutionPlan]]
     signal_source: Any
     mode: BotMode
+    active_strategy_mode: str
+    resolve_active_strategies: Callable[[str], List[str]]
+    is_entry_signal_confirmed: Callable[[Any, str, str], bool]
     process_full_auto: Callable[[TradeDecision, Dict[str, Any]], None]
     process_semi_auto: Callable[[TradeDecision, Dict[str, Any]], None]
     process_dry_run: Callable[[TradeDecision, Dict[str, Any]], None]
@@ -99,15 +102,19 @@ class SignalRuntimeHelper:
             daily_trades_count=daily_count,
         )
 
-        signals = deps.signal_generator.generate_sniper_signal(
+        strategy_mode = str(deps.active_strategy_mode or "standard").strip().lower() or "standard"
+        active_strategies = deps.resolve_active_strategies(strategy_mode)
+        signals = deps.signal_generator.generate_signals(
             data=data,
             symbol=symbol,
+            use_strategies=active_strategies,
         )
         if not isinstance(signals, list):
-            signals = deps.signal_generator.generate_signals(
-                data=data,
-                symbol=symbol,
-            )
+            fallback = getattr(deps.signal_generator, "generate_sniper_signal", None)
+            if callable(fallback):
+                signals = fallback(data=data, symbol=symbol)
+        if not isinstance(signals, list):
+            signals = []
 
         current_market_condition = None
         for generated_signal in signals:
@@ -144,6 +151,13 @@ class SignalRuntimeHelper:
                 continue
 
             signal_type = signal.signal_type.value.lower() if hasattr(signal.signal_type, "value") else str(signal.signal_type).lower()
+            if signal_type == "buy" and not deps.is_entry_signal_confirmed(data, signal_type, strategy_mode):
+                logger.debug(
+                    "[ConfirmationGate] %s BUY signal pending confirmation for mode=%s",
+                    symbol,
+                    strategy_mode,
+                )
+                continue
             if deps.is_reused_signal_trigger(signal):
                 logger.info(
                     "[Signal] %s %s ignored: trigger already consumed (%s)",

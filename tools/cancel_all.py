@@ -3,18 +3,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
-from api_client import BitkubClient
+from api_client import BinanceThClient
 import sqlite3
 
-client = BitkubClient()
+client = BinanceThClient()
 
 orders_to_cancel = [
-    ('THB_BTC',  '69cf3fe7dfee6b084db4f024m8a2qe', 'sell'),
-    ('THB_BTC',  '69ce772d2c558a67c31b566em8a2qe', 'buy'),
-    ('THB_BTC',  '69cd4ff08b3befcc66838a5cm8a2qe', 'sell'),
-    ('THB_DOGE', '69cf40d74ca5b83b061a47611o0oz7',  'sell'),
-    ('THB_DOGE', '69cd52446b652af21bbd385d1o0oz7',  'sell'),
-    ('THB_DOGE', '69cd51188b3befcc66839bad1o0oz7',  'sell'),
+    ('BTCUSDT',  '69cf3fe7dfee6b084db4f024m8a2qe', 'sell'),
+    ('BTCUSDT',  '69ce772d2c558a67c31b566em8a2qe', 'buy'),
+    ('BTCUSDT',  '69cd4ff08b3befcc66838a5cm8a2qe', 'sell'),
+    ('DOGEUSDT', '69cf40d74ca5b83b061a47611o0oz7',  'sell'),
+    ('DOGEUSDT', '69cd52446b652af21bbd385d1o0oz7',  'sell'),
+    ('DOGEUSDT', '69cd51188b3befcc66839bad1o0oz7',  'sell'),
 ]
 
 for symbol, oid, side in orders_to_cancel:

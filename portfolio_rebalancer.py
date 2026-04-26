@@ -32,6 +32,8 @@ MIN_CANDLES_FOR_TRADING = 1000
 
 # Database path (can be overridden via config)
 DEFAULT_DB_PATH = "crypto_bot.db"
+DEFAULT_QUOTE_ASSET = "USDT"
+_CASH_ASSETS = {"USDT", "THB"}
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -137,8 +139,9 @@ def _apply_sideways_target_allocation(
 
     receiving_assets = [asset for asset in cash_assets if asset in target_allocation]
     if not receiving_assets:
-        adjusted.setdefault("THB", 0.0)
-        receiving_assets = ["THB"]
+        fallback_cash = cash_assets[0] if cash_assets else DEFAULT_QUOTE_ASSET
+        adjusted.setdefault(fallback_cash, 0.0)
+        receiving_assets = [fallback_cash]
 
     freed_pct = max(0.0, 100.0 - sum(adjusted.values()))
     receiver_weight = sum(target_allocation.get(asset, 0.0) for asset in receiving_assets)
@@ -163,7 +166,7 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
     Check how many candles an asset has in the database.
     
     Args:
-        symbol: Trading pair symbol (e.g. "THB_BTC" or "BTC")
+        symbol: Trading pair symbol (e.g. "BTCUSDT" or "BTC")
         db_path: Path to SQLite database
     
     Returns:
@@ -173,17 +176,19 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
         return 0, False, "DB not found"
     
     try:
-        # Normalize symbol for DB query
-        # Config uses "BTC", DB uses "THB_BTC"
-        db_symbol = symbol if "_" in symbol else f"THB_{symbol}"
+        # Config often uses "BTC"; DB stores exchange pairs like "BTCUSDT".
+        raw_symbol = str(symbol or "").upper()
+        db_symbols = [raw_symbol] if raw_symbol else []
+        if raw_symbol and "_" not in raw_symbol and not raw_symbol.endswith(DEFAULT_QUOTE_ASSET):
+            db_symbols.extend([f"{raw_symbol}{DEFAULT_QUOTE_ASSET}", f"THB_{raw_symbol}"])
+        if not db_symbols:
+            return 0, False, "No symbol"
         
         conn = sqlite3.connect(db_path)
         try:
             cur = conn.cursor()
-            cur.execute(
-                'SELECT COUNT(*) FROM prices WHERE pair = ?',
-                (db_symbol,)
-            )
+            placeholders = ",".join("?" for _ in db_symbols)
+            cur.execute(f"SELECT COUNT(*) FROM prices WHERE pair IN ({placeholders})", tuple(db_symbols))
             count = cur.fetchone()[0]
         finally:
             conn.close()
@@ -276,7 +281,7 @@ def create_rebalance_order(
     priority: int = 0,
 ) -> Optional["RebalanceOrder"]:
     """Create a rebalance order if trade conditions are valid."""
-    if alloc.symbol.upper() == "THB":
+    if alloc.symbol.upper() in _CASH_ASSETS:
         return None
 
     trade_value = abs(trade_value)
@@ -845,8 +850,8 @@ class PortfolioRebalancer:
         self.config["target_allocation"] = dict(self._base_target_allocation)
         self.allow_new_assets = bool(self.config.get("allow_new_assets", True))
         self.cash_assets = _parse_asset_list(
-            os.environ.get("REBALANCE_CASH_ASSETS", self.config.get("cash_assets", ["THB", "USDT"]))
-        ) or ["THB"]
+            os.environ.get("REBALANCE_CASH_ASSETS", self.config.get("cash_assets", [DEFAULT_QUOTE_ASSET]))
+        ) or [DEFAULT_QUOTE_ASSET]
         self.sideways_exposure_factor = _coerce_fraction(
             os.environ.get(
                 "REBALANCE_SIDEWAYS_EXPOSURE_FACTOR",
@@ -876,7 +881,7 @@ class PortfolioRebalancer:
             "threshold_pct", 10.0
         )
         self.min_trade_value = self.config.get("min_trade_value", 1.0)
-        self.estimated_cost_pct = self.config.get("estimated_cost_pct", 0.5)  # 0.5% round-trip (Bitkub 0.25% x 2)
+        self.estimated_cost_pct = self.config.get("estimated_cost_pct", 0.2)  # Binance TH 0.1% x 2 round trip
         self._cooldown_minutes = max(0, _coerce_float(self.config.get("cooldown_minutes", 60), 60))
         
         # State
@@ -1266,7 +1271,7 @@ class PortfolioRebalancer:
         Returns:
             List of AllocationTarget with data readiness populated
         
-        NOTE: THB is treated as the quote/cash asset with price = 1.
+        NOTE: configured cash assets are treated as quote assets with price = 1.
         """
         allocations = []
         skipped = []
@@ -1276,7 +1281,7 @@ class PortfolioRebalancer:
         for symbol, target_pct in target_allocation.items():
             asset = str(symbol or "").upper()
             pos = portfolio_manager.get_position(asset)
-            is_cash_asset = asset == "THB"
+            is_cash_asset = asset in set(self.cash_assets)
             current_price = 1.0 if is_cash_asset else price_data.get(asset, 0.0)
 
             if not is_cash_asset and not self.allow_new_assets and not has_ever_held(asset, db_path):

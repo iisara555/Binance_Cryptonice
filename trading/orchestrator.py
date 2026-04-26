@@ -23,7 +23,7 @@ from enum import Enum
 from backtesting_validation import BacktestingValidator, ValidationStatus
 
 if TYPE_CHECKING:
-    from api_client import BitkubClient
+    from api_client import BinanceThClient
     from signal_generator import SignalGenerator
     from risk_management import RiskManager
     from trade_executor import TradeExecutor

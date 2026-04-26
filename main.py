@@ -19,7 +19,7 @@ import shlex
 import re
 import atexit
 import faulthandler
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from os import PathLike
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Iterable
@@ -40,16 +40,21 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Import project modules
-from config import BITKUB, TRADING, validate_config
-from api_client import BitkubClient, BitkubAPIError
-from data_collector import BitkubCollector
-from signal_generator import SignalGenerator, get_latest_signal_flow_snapshot
+from config import BINANCE, TRADING, validate_config
+from api_client import BinanceThClient, BinanceAPIError
+from data_collector import BinanceThCollector
+from signal_generator import (
+    SignalGenerator,
+    ensure_signal_flow_record,
+    get_latest_signal_flow_snapshot,
+)
 from risk_management import RiskManager, RiskConfig, resolve_effective_sl_tp_percentages
 from trade_executor import TradeExecutor, _quantize_decimal
 from strategies.adaptive_router import AdaptiveStrategyRouter, ModeDecision
 from trading_bot import TradingBotOrchestrator
 from telegram_bot import TelegramBotHandler
 from alerts import AlertSystem
+from weekly_review import WeeklyReviewer
 from dynamic_coin_config import (
     DEFAULT_WHITELIST_JSON,
     HybridDynamicPairResolver,
@@ -60,7 +65,7 @@ from logger_setup import setup_logging as configure_application_logging
 from logger_setup import get_shared_console
 from health_server import BotHealthServer
 from process_guard import acquire_bot_lock, release_bot_lock, get_lock_status
-from helpers import format_bitkub_time, get_current_price, now_bitkub, parse_as_bitkub_time
+from helpers import format_exchange_time, get_current_price, now_exchange_time, parse_as_exchange_time
 from state_management import normalize_buy_quantity
 from cli_ui import CLICommandCenter
 
@@ -92,27 +97,34 @@ def _sanitize_cli_input_line(value: Any) -> str:
 
 
 def _normalize_cli_pair(value: Any) -> str:
-    """Normalize user-facing pair inputs like BTC, THB_BTC, or BTC_THB."""
+    """Normalize user-facing pair inputs like BTC, BTCUSDT, THB_BTC, or BTC_THB."""
     raw = str(value or "").strip().upper()
     if not raw:
         return ""
-    if raw.startswith("THB_"):
+    for quote in ("USDT", "THB"):
+        if raw.startswith(f"{quote}_"):
+            return f"{raw.split('_', 1)[1]}USDT"
+        if raw.endswith(f"_{quote}"):
+            return f"{raw.rsplit('_', 1)[0]}USDT"
+    if raw.endswith("USDT") and "_" not in raw:
         return raw
-    if raw.endswith("_THB"):
-        return f"THB_{raw.split('_', 1)[0]}"
     if "_" not in raw:
-        return f"THB_{raw}"
+        return f"{raw}USDT"
     return raw
 
 
 def _extract_asset_from_pair(value: Any) -> str:
     normalized = _normalize_cli_pair(value)
-    if normalized.startswith("THB_"):
+    if normalized.endswith("USDT") and "_" not in normalized:
+        return normalized[:-4]
+    if normalized.startswith("THB_") or normalized.startswith("USDT_"):
         return normalized.split("_", 1)[1]
+    if normalized.endswith("_THB") or normalized.endswith("_USDT"):
+        return normalized.rsplit("_", 1)[0]
     return normalized
 
 
-def _clear_startup_auth_shutdown_state(api_client: Optional[BitkubClient] = None) -> None:
+def _clear_startup_auth_shutdown_state(api_client: Optional[BinanceThClient] = None) -> None:
     """Consume a startup auth failure so the app can continue in degraded mode."""
     import api_client as api_module
 
@@ -124,7 +136,7 @@ def _clear_startup_auth_shutdown_state(api_client: Optional[BitkubClient] = None
         try:
             circuit_breaker.reset()
         except Exception as exc:
-            logger.debug("Failed to reset Bitkub circuit breaker during startup degrade: %s", exc)
+            logger.debug("Failed to reset exchange circuit breaker during startup degrade: %s", exc)
 
 
 def _enable_startup_auth_degraded_mode(
@@ -132,7 +144,7 @@ def _enable_startup_auth_degraded_mode(
     reason: str,
     configured_pairs: Optional[Iterable[str]] = None,
 ) -> List[str]:
-    """Force a safe public-only startup mode when private Bitkub auth is unavailable."""
+    """Force a safe public-only startup mode when private exchange auth is unavailable."""
     data_config = config.setdefault("data", {})
     trading_config = config.setdefault("trading", {})
     fallback_pairs = _normalize_pairs(
@@ -334,12 +346,12 @@ def _resolve_telegram_credentials(config: Optional[Dict[str, Any]] = None) -> tu
 
 
 def resolve_runtime_trading_pairs(
-    api_client: BitkubClient,
+    api_client: BinanceThClient,
     configured_pairs: Optional[Iterable[str]] = None,
     data_config: Optional[Dict[str, Any]] = None,
     project_root: Optional[Path] = None,
 ) -> List[str]:
-    """Resolve tradable THB pairs from JSON whitelist plus live Bitkub readiness."""
+    """Resolve tradable runtime pairs from JSON whitelist plus live exchange readiness."""
     settings = _get_hybrid_dynamic_coin_settings(data_config)
     whitelist_path = resolve_whitelist_path(settings.get("whitelist_json_path"), project_root or PROJECT_ROOT)
     resolver = HybridDynamicPairResolver(JsonCoinWhitelistRepository(default_path=whitelist_path))
@@ -348,6 +360,7 @@ def resolve_runtime_trading_pairs(
         config_path=whitelist_path,
         configured_pairs=configured_pairs,
         min_quote_balance_thb=settings.get("min_quote_balance_thb"),
+        min_quote_balance_for_pairs=settings.get("min_quote_balance_for_pairs"),
         require_supported_market=settings.get("require_supported_market"),
         include_assets_with_balance=settings.get("include_assets_with_balance"),
     )
@@ -372,7 +385,7 @@ def resolve_runtime_trading_pairs(
     if isinstance(balances, dict):
         for asset, payload in balances.items():
             asset_key = str(asset or "").upper().strip()
-            if not asset_key or asset_key == "THB":
+            if not asset_key or asset_key in {"THB", "USDT"}:
                 continue
             available = 0.0
             reserved = 0.0
@@ -384,19 +397,19 @@ def resolve_runtime_trading_pairs(
             if (available + reserved) > 0:
                 held_assets.add(asset_key)
 
-    supported_thb_pairs = set()
+    supported_pairs = set()
     for row in supported_rows if isinstance(supported_rows, list) else []:
         symbol = str((row or {}).get("symbol", "")).upper().strip()
         if not symbol:
             continue
         normalized = _normalize_cli_pair(symbol)
-        if normalized.startswith("THB_"):
-            supported_thb_pairs.add(normalized)
+        if normalized:
+            supported_pairs.add(normalized)
 
     filtered_pairs = [
         pair
         for pair in pairs
-        if _extract_asset_from_pair(pair).upper() in held_assets and pair in supported_thb_pairs
+        if _extract_asset_from_pair(pair).upper() in held_assets and _normalize_cli_pair(pair) in supported_pairs
     ]
 
     return filtered_pairs
@@ -574,7 +587,7 @@ def _configure_faulthandler_logging() -> None:
         logger.warning("Failed to enable faulthandler logging: %s", exc)
 
 
-def setup_signal_handlers(bot: TradingBotOrchestrator, collector: BitkubCollector, telegram_handler=None):
+def setup_signal_handlers(bot: TradingBotOrchestrator, collector: BinanceThCollector, telegram_handler=None):
     """
     Setup signal handlers for graceful shutdown.
 
@@ -625,9 +638,13 @@ class TradingBotApp:
         """
         self._config_path = Path(config_path) if config_path is not None else Path(os.environ.get("BOT_CONFIG_PATH", PROJECT_ROOT / "bot_config.yaml"))
         self.config = _apply_strategy_mode_profile(config or load_bot_config(self._config_path))
+        if "read_only" not in self.config and isinstance(self.config.get("portfolio"), dict):
+            pr = self.config["portfolio"].get("read_only")
+            if pr is not None:
+                self.config["read_only"] = bool(pr)
         self.bot: Optional[TradingBotOrchestrator] = None
-        self.collector: Optional[BitkubCollector] = None
-        self.api_client: Optional[BitkubClient] = None
+        self.collector: Optional[BinanceThCollector] = None
+        self.api_client: Optional[BinanceThClient] = None
         self.signal_generator: Optional[SignalGenerator] = None
         self.risk_manager: Optional[RiskManager] = None
         self.executor: Optional[TradeExecutor] = None
@@ -637,8 +654,10 @@ class TradingBotApp:
         self.trading_disabled = threading.Event()  # Kill switch event
         self._shutdown_event = threading.Event()
         self._pair_reload_thread: Optional[threading.Thread] = None
+        self._weekly_review_thread: Optional[threading.Thread] = None
         self._pair_reload_lock = threading.Lock()
         self._pair_reload_signature: Optional[tuple[str, bool, int, int]] = None
+        self._last_weekly_review_key: Optional[str] = None
         self.health_server: Optional[BotHealthServer] = None
         self._health_server_started = False
         self._app_started_at = time.time()
@@ -812,21 +831,22 @@ class TradingBotApp:
         data_config = runtime_config.get("data", {}) or {}
         known_pairs = list(data_config.get("pairs") or [])
         try:
-            _, _, configured_assets = self._load_runtime_pairlist_document()
-            known_pairs.extend(f"THB_{asset}" for asset in configured_assets)
+            _, document, configured_assets = self._load_runtime_pairlist_document()
+            quote_asset = str(document.get("quote_asset") or "USDT").upper()
+            known_pairs.extend(f"{asset}{quote_asset}" if quote_asset == "USDT" else f"{quote_asset}_{asset}" for asset in configured_assets)
         except Exception as exc:
             logger.debug("[CLI] Failed to load runtime pair list document: %s", exc)
         known_pairs.extend(order.get("symbol") for order in self.list_active_orders() if order.get("symbol"))
         known_pairs.extend([
-            "THB_BTC",
-            "THB_ETH",
-            "THB_SOL",
-            "THB_XRP",
-            "THB_DOGE",
-            "THB_ADA",
-            "THB_BNB",
-            "THB_DOT",
-            "THB_LINK",
+            "BTCUSDT",
+            "ETHUSDT",
+            "SOLUSDT",
+            "XRPUSDT",
+            "DOGEUSDT",
+            "ADAUSDT",
+            "BNBUSDT",
+            "DOTUSDT",
+            "LINKUSDT",
         ])
         return _normalize_pairs(known_pairs)
 
@@ -859,7 +879,7 @@ class TradingBotApp:
         has_trailing_space = text.endswith(" ")
         known_pairs = self._get_cli_known_pairs()
         active_order_ids = [order.get("order_id") for order in self.list_active_orders() if order.get("order_id")]
-        default_pair = known_pairs[0] if known_pairs else "THB_BTC"
+        default_pair = known_pairs[0] if known_pairs else "BTCUSDT"
         pending = pending_confirmation or getattr(self, "_cli_pending_confirmation", None)
 
         if pending and not stripped:
@@ -1006,7 +1026,7 @@ class TradingBotApp:
         normalized = str(command or "").lower()
         summary = f"Confirm command: {command_text}"
         if normalized == "buy" and len(args) == 2:
-            summary = f"Confirm market BUY {_normalize_cli_pair(args[0])} with {float(args[1]):,.2f} THB"
+            summary = f"Confirm market BUY {_normalize_cli_pair(args[0])} with {float(args[1]):,.2f} quote"
         elif normalized == "track" and len(args) == 3:
             summary = (
                 f"Confirm tracked position {_normalize_cli_pair(args[0])} "
@@ -1197,13 +1217,13 @@ class TradingBotApp:
                 enabled = bool(entry.get("enabled", True))
                 entry = entry.get("symbol") or entry.get("asset") or entry.get("pair")
             asset = _extract_asset_from_pair(entry)
-            if not asset or asset == "THB" or not enabled or asset in seen_assets:
+            if not asset or asset in {"THB", "USDT"} or not enabled or asset in seen_assets:
                 continue
             seen_assets.add(asset)
             normalized_assets.append(asset)
 
         raw_document.setdefault("version", 1)
-        raw_document.setdefault("quote_asset", "THB")
+        raw_document.setdefault("quote_asset", "USDT")
         raw_document.setdefault("min_quote_balance_thb", settings.get("min_quote_balance_thb", 100.0))
         raw_document.setdefault("require_supported_market", settings.get("require_supported_market", True))
         raw_document.setdefault("include_assets_with_balance", settings.get("include_assets_with_balance", True))
@@ -1260,7 +1280,8 @@ class TradingBotApp:
         whitelist_path, document, current_assets = self._load_runtime_pairlist_document()
         remove_assets = {_extract_asset_from_pair(pair) for pair in normalized_pairs}
         updated_assets = [asset for asset in current_assets if asset not in remove_assets]
-        removed_pairs = [f"THB_{asset}" for asset in current_assets if asset in remove_assets]
+        quote_asset = str(document.get("quote_asset") or "USDT").upper()
+        removed_pairs = [f"{asset}{quote_asset}" if quote_asset == "USDT" else f"{quote_asset}_{asset}" for asset in current_assets if asset in remove_assets]
         self._write_runtime_pairlist_document(whitelist_path, document, updated_assets)
 
         if self.config.setdefault("data", {}).get("auto_detect_held_pairs", True):
@@ -1280,11 +1301,12 @@ class TradingBotApp:
         }
 
     def get_runtime_pairlist_status(self) -> Dict[str, Any]:
-        whitelist_path, _, configured_assets = self._load_runtime_pairlist_document()
+        whitelist_path, document, configured_assets = self._load_runtime_pairlist_document()
+        quote_asset = str(document.get("quote_asset") or "USDT").upper()
         return {
             "status": "ok",
             "pairlist_path": str(whitelist_path),
-            "configured_pairs": [f"THB_{asset}" for asset in configured_assets],
+            "configured_pairs": [f"{asset}{quote_asset}" if quote_asset == "USDT" else f"{quote_asset}_{asset}" for asset in configured_assets],
             "active_pairs": list(self.config.setdefault("data", {}).get("pairs") or []),
         }
 
@@ -1309,7 +1331,7 @@ class TradingBotApp:
                     logger.warning("[CLI] Failed to sync state machine after manual command: %s", exc)
 
     def submit_manual_market_buy(self, pair: str, thb_amount: float) -> Dict[str, Any]:
-        """Submit a market buy in THB and track it like a runtime position."""
+        """Submit a market buy in quote currency and track it like a runtime position."""
         self._ensure_manual_trade_allowed()
 
         symbol = _normalize_cli_pair(pair)
@@ -1318,7 +1340,7 @@ class TradingBotApp:
         except (TypeError, ValueError) as exc:
             raise ValueError("BUY amount must be a number") from exc
         if amount_value < 15.0:
-            raise ValueError("BUY amount must be at least 15 THB")
+            raise ValueError("BUY amount must be at least 15 quote")
 
         executor = self.executor
         if not executor:
@@ -1358,12 +1380,13 @@ class TradingBotApp:
         }
         executor.register_tracked_position(result.order_id, tracked_payload)
         self._sync_runtime_position_state()
-        logger.warning("[CLI] Manual market BUY submitted: %s %.2f THB | order_id=%s", symbol, amount_value, result.order_id)
+        logger.warning("[CLI] Manual market BUY submitted: %s %.2f quote | order_id=%s", symbol, amount_value, result.order_id)
         return {
             "status": "ok",
             "side": "buy",
             "symbol": symbol,
             "thb_amount": round(amount_value, 2),
+            "quote_amount": round(amount_value, 2),
             "order_id": result.order_id,
             "filled_amount": float(result.filled_amount or 0.0),
             "filled_price": reference_price,
@@ -1399,7 +1422,7 @@ class TradingBotApp:
         if avg_cost <= 0:
             raise ValueError("Tracked entry price must be greater than 0")
         if (quantity * avg_cost) < 15.0:
-            raise ValueError("Tracked position value must be at least 15 THB")
+            raise ValueError("Tracked position value must be at least 15 quote")
 
         active_orders = self.list_active_orders()
         existing = next((order for order in active_orders if order.get("symbol") == symbol), None)
@@ -1538,7 +1561,7 @@ class TradingBotApp:
             "  ui\n"
             "  ui log <debug|info|warning|error|critical>\n"
             "  ui footer <compact|verbose>\n"
-            "  buy <PAIR> <THB_AMOUNT>\n"
+            "  buy <PAIR> <QUOTE_AMOUNT>\n"
             "  track <PAIR> <COIN_AMOUNT> <ENTRY_PRICE>\n"
             "  sell <PAIR> <COIN_AMOUNT>\n"
             "  close <ORDER_ID>\n"
@@ -1622,7 +1645,7 @@ class TradingBotApp:
                         else float(portfolio_state.get('total_balance', portfolio_state.get('balance', 0)) or 0)
                     )
                     rs = risk_manager.get_risk_summary(portfolio_value)
-                    lines.append(f"Today: {rs.get('trades_today', 0)}/{rs.get('max_daily_trades', '-')} trades | Loss: {rs.get('daily_loss', 0):.2f}/{rs.get('daily_loss_max', 0):.2f} THB ({rs.get('daily_loss_pct', 0):.2f}%)")
+                    lines.append(f"Today: {rs.get('trades_today', 0)}/{rs.get('max_daily_trades', '-')} trades | Loss: {rs.get('daily_loss', 0):.2f}/{rs.get('daily_loss_max', 0):.2f} quote ({rs.get('daily_loss_pct', 0):.2f}%)")
                     lines.append(f"Cooldown active: {'Yes' if rs.get('cooling_down') else 'No'}")
                 return "\n".join(lines)
             if len(args) == 2 and args[0].lower() == "set":
@@ -1656,10 +1679,10 @@ class TradingBotApp:
 
         if command == "buy":
             if len(args) != 2:
-                return "Usage: buy <PAIR> <THB_AMOUNT>"
+                return "Usage: buy <PAIR> <QUOTE_AMOUNT>"
             result = self.submit_manual_market_buy(args[0], float(args[1]))
             return (
-                f"Market BUY submitted: {result['symbol']} {result['thb_amount']:.2f} THB | "
+                f"Market BUY submitted: {result['symbol']} {result['quote_amount']:.2f} quote | "
                 f"order_id={result['order_id']} | filled_price={result['filled_price']:,.4f}"
             )
 
@@ -1920,7 +1943,16 @@ class TradingBotApp:
 
     @staticmethod
     def _format_cli_timestamp(value: Any) -> str:
-        return format_bitkub_time(value)
+        return format_exchange_time(value)
+
+    def _get_quote_asset(self) -> str:
+        data_cfg = self.config.get("data", {}) if isinstance(self.config, dict) else {}
+        hybrid_cfg = data_cfg.get("hybrid_dynamic_coin_config", {}) if isinstance(data_cfg, dict) else {}
+        quote = str(hybrid_cfg.get("quote_asset") or "").strip().upper()
+        if not quote:
+            cash_assets = (self.config.get("rebalance", {}) or {}).get("cash_assets") or []
+            quote = str(cash_assets[0] if cash_assets else "").strip().upper()
+        return quote or "USDT"
 
     def _sample_api_latency(self, symbol: str) -> Optional[float]:
         now = time.time()
@@ -1979,11 +2011,12 @@ class TradingBotApp:
         return price
 
     def _get_cli_position_price_hint(self, symbol: str, include_entry_price: bool = True) -> Optional[float]:
-        if not symbol or not self.executor:
+        executor = getattr(self, "executor", None)
+        if not symbol or not executor:
             return None
 
         try:
-            open_orders = self.executor.get_open_orders() or []
+            open_orders = executor.get_open_orders() or []
         except Exception:
             return None
 
@@ -1999,6 +2032,66 @@ class TradingBotApp:
                     price = 0.0
                 if price > 0:
                     return price
+        return None
+
+    def _resolve_cli_asset_quote_rate(
+        self,
+        asset: str,
+        quote_asset: str,
+        live_dashboard_active: bool,
+    ) -> Optional[float]:
+        """Resolve asset->quote conversion rate using direct and inverse market symbols."""
+        asset_symbol = str(asset or "").upper()
+        quote_symbol = str(quote_asset or "").upper()
+        if not asset_symbol or not quote_symbol:
+            return None
+        if asset_symbol == quote_symbol:
+            return 1.0
+
+        def _read_price(symbol: str) -> Optional[float]:
+            if not symbol:
+                return None
+            price = self._get_cli_price(symbol, False)
+            if (not price or price <= 0) and not live_dashboard_active:
+                price = self._get_cli_price(symbol, True)
+            if not price or price <= 0:
+                cached = self._cli_price_cache.get(symbol)
+                if cached:
+                    price = cached[0]
+            if not price or price <= 0:
+                price = self._get_cli_position_price_hint(symbol)
+            try:
+                parsed = float(price or 0.0)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed > 0 else None
+
+        direct_pairs = [
+            f"{asset_symbol}{quote_symbol}",
+            f"{quote_symbol}_{asset_symbol}",
+        ]
+        inverse_pairs = [
+            f"{quote_symbol}{asset_symbol}",
+            f"{asset_symbol}_{quote_symbol}",
+        ]
+
+        seen: set[str] = set()
+        for pair in direct_pairs:
+            if pair in seen:
+                continue
+            seen.add(pair)
+            direct_price = _read_price(pair)
+            if direct_price and direct_price > 0:
+                return direct_price
+
+        for pair in inverse_pairs:
+            if pair in seen:
+                continue
+            seen.add(pair)
+            inverse_price = _read_price(pair)
+            if inverse_price and inverse_price > 0:
+                return 1.0 / inverse_price
+
         return None
 
     @staticmethod
@@ -2043,8 +2136,9 @@ class TradingBotApp:
         return "; ".join(waiting_rows[:limit])
 
     def _get_cli_balance_summary(self, portfolio_state: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate total portfolio value in THB and per-asset valuation details."""
+        """Calculate total portfolio value in quote terms and per-asset valuation details."""
         fallback_balance = float(portfolio_state.get("balance", 0.0) or 0.0)
+        quote_asset = self._get_quote_asset()
 
         def _get_fresh_cached_summary() -> Optional[Dict[str, Any]]:
             cached_summary = getattr(self, "_cli_balance_summary_cache", None)
@@ -2057,7 +2151,7 @@ class TradingBotApp:
         if not self.api_client or self.config.get("auth_degraded", False):
             return {
                 "total_balance": fallback_balance,
-                "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
+                "breakdown": [{"asset": quote_asset, "amount": fallback_balance, "value_thb": fallback_balance}],
             }
 
         live_dashboard_active = bool(getattr(self, "_live_dashboard_active", False))
@@ -2070,7 +2164,7 @@ class TradingBotApp:
             except Exception:
                 balance_state = {}
 
-            updated_at = parse_as_bitkub_time((balance_state or {}).get("updated_at"))
+            updated_at = parse_as_exchange_time((balance_state or {}).get("updated_at"))
             raw_poll_interval = getattr(getattr(self.bot, "_balance_monitor", None), "poll_interval_seconds", 30.0)
             try:
                 poll_interval_seconds = float(raw_poll_interval or 30.0)
@@ -2079,7 +2173,7 @@ class TradingBotApp:
             stale_after_seconds = max(poll_interval_seconds * 2.0, 60.0)
             if updated_at is not None:
                 try:
-                    if (now_bitkub() - updated_at).total_seconds() > stale_after_seconds:
+                    if (now_exchange_time() - updated_at).total_seconds() > stale_after_seconds:
                         balance_state = {}
                 except Exception:
                     balance_state = {}
@@ -2107,7 +2201,7 @@ class TradingBotApp:
                 return cached_summary
             return {
                 "total_balance": fallback_balance,
-                "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
+                "breakdown": [{"asset": quote_asset, "amount": fallback_balance, "value_thb": fallback_balance}],
             }
 
         total_value = 0.0
@@ -2128,22 +2222,14 @@ class TradingBotApp:
             if amount <= 0:
                 continue
 
-            if symbol == "THB":
+            if symbol == quote_asset:
                 total_value += amount
                 breakdown.append({"asset": symbol, "amount": amount, "value_thb": amount})
                 continue
 
-            current_price = self._get_cli_price(f"THB_{symbol}", False)
-            if (not current_price or current_price <= 0) and not live_dashboard_active:
-                current_price = self._get_cli_price(f"THB_{symbol}", True)
-            if (not current_price or current_price <= 0):
-                cached = self._cli_price_cache.get(f"THB_{symbol}")
-                if cached:
-                    current_price = cached[0]
-            if not current_price or current_price <= 0:
-                current_price = self._get_cli_position_price_hint(f"THB_{symbol}")
-            if current_price and current_price > 0:
-                value_thb = amount * current_price
+            conversion_rate = self._resolve_cli_asset_quote_rate(symbol, quote_asset, live_dashboard_active)
+            if conversion_rate and conversion_rate > 0:
+                value_thb = amount * conversion_rate
                 total_value += value_thb
                 breakdown.append({"asset": symbol, "amount": amount, "value_thb": value_thb})
 
@@ -2153,7 +2239,7 @@ class TradingBotApp:
                 return cached_summary
             return {
                 "total_balance": fallback_balance,
-                "breakdown": [{"asset": "THB", "amount": fallback_balance, "value_thb": fallback_balance}],
+                "breakdown": [{"asset": quote_asset, "amount": fallback_balance, "value_thb": fallback_balance}],
             }
 
         breakdown.sort(key=lambda item: float(item.get("value_thb") or 0.0), reverse=True)
@@ -2174,18 +2260,38 @@ class TradingBotApp:
         return match.group(1) == "True"
 
     @staticmethod
+    def _humanize_alignment_wait_reason(reason: str) -> str:
+        """Short Thai labels for Signal Radar status (same intent as CLI Signal Flow)."""
+        s = str(reason or "").strip()
+        if not s:
+            return "รอข้อมูล"
+        low = s.lower()
+        m = re.search(r"Insufficient data \((\d+)/(\d+) bars\)", s, re.I)
+        if m:
+            return f"แท่งไม่พอ {m.group(1)}/{m.group(2)}"
+        if "waiting for first signal cycle" in low:
+            return "รอรอบแรก"
+        if "collecting" in low:
+            return s[:40] if len(s) > 40 else s
+        return s[:44] + ("…" if len(s) > 44 else "")
+
+    @staticmethod
     def _describe_signal_alignment_status(record: Dict[str, Any], steps: Dict[str, Any]) -> str:
         data_check = steps.get("Sniper:DataCheck", {})
         data_check_result = str(data_check.get("result") or "").upper()
         data_check_reason = str(data_check.get("reason") or "").strip()
+        bootstrap = steps.get("Bootstrap", {})
+        bootstrap_reason = str(bootstrap.get("reason") or "").strip()
 
         if not record:
-            return "Waiting for first signal flow"
+            return "รอข้อมูลสัญญาณ"
         if data_check_result == "REJECT" and data_check_reason:
-            return f"Waiting: {data_check_reason}"
+            return TradingBotApp._humanize_alignment_wait_reason(data_check_reason)
         if data_check_result == "REJECT":
-            return "Waiting for market data"
-        return "Ready"
+            return "รอแท่งเทียน"
+        if bootstrap_reason:
+            return TradingBotApp._humanize_alignment_wait_reason(bootstrap_reason)
+        return "พร้อม"
 
     @staticmethod
     def _build_pair_runtime_context(multi_timeframe_status: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, str]]:
@@ -2229,6 +2335,13 @@ class TradingBotApp:
         for pair in trading_pairs:
             record = flow.get(str(pair or "").upper(), {})
             runtime_context = pair_runtime_context.get(str(pair or "").upper(), {})
+            if not record:
+                wait_hint = str(runtime_context.get("wait_detail") or "").strip()
+                if not wait_hint or wait_hint == "-":
+                    wait_hint = str(runtime_context.get("pair_state") or "").strip()
+                if not wait_hint or wait_hint in {"-", "Ready"}:
+                    wait_hint = "Waiting for first signal cycle"
+                record = ensure_signal_flow_record(str(pair or ""), wait_hint)
             steps = dict(record.get("steps") or {})
             macro = steps.get("Sniper:MacroTrend", {})
             micro = steps.get("Sniper:MicroTrend", {})
@@ -2259,7 +2372,7 @@ class TradingBotApp:
                 final_action = "SELL"
 
             status = self._describe_signal_alignment_status(record, steps)
-            if status != "Ready" and final_action == "HOLD":
+            if status != "พร้อม" and final_action == "HOLD":
                 final_action = "WAIT"
 
             rows.append(
@@ -2289,7 +2402,7 @@ class TradingBotApp:
         return rows
 
     @staticmethod
-    def _format_cli_recent_events(bot_status: Dict[str, Any], limit: int = 5) -> List[Dict[str, str]]:
+    def _format_cli_recent_events(bot_status: Dict[str, Any], limit: int = 3) -> List[Dict[str, str]]:
         events: List[Dict[str, str]] = []
 
         for item in list(bot_status.get("recent_trades") or []):
@@ -2315,7 +2428,7 @@ class TradingBotApp:
             )
 
         events.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
-        return events[:max(1, int(limit or 5))]
+        return events[:max(1, int(limit or 3))]
 
     def get_cli_snapshot(self, bot_name: Optional[str] = None) -> Dict[str, Any]:
         """Build a lightweight runtime snapshot for the Rich command center."""
@@ -2433,9 +2546,9 @@ class TradingBotApp:
         trading_pairs = list(bot_status.get("trading_pairs") or self.config.get("data", {}).get("pairs") or [])
         primary_symbol = trading_pairs[0] if trading_pairs else ""
         api_latency_ms = self._sample_api_latency(primary_symbol)
-        now_dt = now_bitkub()
+        now_dt = now_exchange_time()
         last_market_raw = bot_status.get("last_loop") or portfolio_state.get("timestamp")
-        last_market_dt = parse_as_bitkub_time(last_market_raw)
+        last_market_dt = parse_as_exchange_time(last_market_raw)
         market_age_seconds: Optional[int] = None
         if last_market_dt is not None:
             try:
@@ -2444,7 +2557,7 @@ class TradingBotApp:
                 market_age_seconds = None
 
         balance_monitor_status = dict(bot_status.get("balance_monitor") or {})
-        balance_updated_at = parse_as_bitkub_time(balance_monitor_status.get("updated_at"))
+        balance_updated_at = parse_as_exchange_time(balance_monitor_status.get("updated_at"))
         balance_age_seconds: Optional[int] = None
         if balance_updated_at is not None:
             try:
@@ -2506,9 +2619,14 @@ class TradingBotApp:
 
         # Include ALL whitelist coins in signal alignment, not just tradable ones
         try:
-            _, _, whitelist_assets = self._load_runtime_pairlist_document()
+            _, document, whitelist_assets = self._load_runtime_pairlist_document()
+            quote_asset = str(document.get("quote_asset") or "USDT").upper()
             all_signal_pairs = list(dict.fromkeys(
-                trading_pairs + [f"THB_{a}" for a in whitelist_assets if f"THB_{a}" not in trading_pairs]
+                trading_pairs + [
+                    (f"{asset}{quote_asset}" if quote_asset == "USDT" else f"{quote_asset}_{asset}")
+                    for asset in whitelist_assets
+                    if (f"{asset}{quote_asset}" if quote_asset == "USDT" else f"{quote_asset}_{asset}") not in trading_pairs
+                ]
             ))
         except Exception:
             all_signal_pairs = trading_pairs
@@ -2516,7 +2634,7 @@ class TradingBotApp:
             all_signal_pairs,
             bot_status.get("multi_timeframe"),
         )
-        recent_events = self._format_cli_recent_events(bot_status, limit=5)
+        recent_events = self._format_cli_recent_events(bot_status, limit=3)
         risk_summary = dict(bot_status.get("risk_summary") or {})
         candle_readiness = self._summarize_cli_candle_readiness(bot_status.get("multi_timeframe"))
         candle_waiting = self._summarize_cli_candle_waiting(bot_status.get("multi_timeframe"))
@@ -2524,19 +2642,20 @@ class TradingBotApp:
         _warn_snapshot_step("snapshot_sections", step_started)
 
         step_started = time.perf_counter()
-        total_balance_thb = float(balance_summary.get("total_balance", 0.0) or 0.0)
+        quote_asset = self._get_quote_asset()
+        total_balance_quote = float(balance_summary.get("total_balance", 0.0) or 0.0)
         balance_breakdown = []
         for item in list(balance_summary.get("breakdown") or []):
             asset = str(item.get("asset") or "").upper()
             amount = float(item.get("amount", 0.0) or 0.0)
-            value_thb = float(item.get("value_thb", 0.0) or 0.0)
-            if asset and value_thb > 0:
-                allocation_pct = (value_thb / total_balance_thb * 100.0) if total_balance_thb > 0 else 0.0
-                if asset == "THB":
+            value_quote = float(item.get("value_thb", 0.0) or 0.0)
+            if asset and value_quote > 0:
+                allocation_pct = (value_quote / total_balance_quote * 100.0) if total_balance_quote > 0 else 0.0
+                if asset in {quote_asset, "THB"}:
                     amount_text = f"{amount:,.2f}"
                 else:
                     amount_text = f"{amount:,.8f}"
-                balance_breakdown.append(f"{asset} {amount_text} = {value_thb:,.2f} THB ({allocation_pct:.2f}%)")
+                balance_breakdown.append(f"{asset} {amount_text} = {value_quote:,.2f} {quote_asset} ({allocation_pct:.2f}%)")
         _warn_snapshot_step("balance_breakdown", step_started)
 
         total_elapsed_ms = (time.perf_counter() - snapshot_started) * 1000.0
@@ -2558,7 +2677,7 @@ class TradingBotApp:
                 "log_level_filter": str(self._cli_log_level_filter or "INFO"),
                 "footer_mode": str(self._cli_footer_mode or "compact"),
             },
-            "updated_at": now_bitkub().strftime("%H:%M:%S"),
+            "updated_at": now_exchange_time().strftime("%H:%M:%S"),
             "signal_alignment": signal_alignment,
             "recent_events": recent_events,
             "system": {
@@ -2567,15 +2686,16 @@ class TradingBotApp:
                 "freshness": freshness,
                 "api_latency": f"{api_latency_ms:.0f} ms" if api_latency_ms is not None else "-",
                 "websocket_health": websocket_health,
+                "websocket_last_error": str(websocket_status.get("last_error") or "")[:160],
                 "balance_health": balance_health,
                 "candle_readiness": candle_readiness,
                 "candle_waiting": candle_waiting,
-                "available_balance": f"{float(portfolio_state.get('balance', 0.0) or 0.0):,.2f} THB",
-                "total_balance": f"{total_balance_thb:,.2f} THB",
+                "available_balance": f"{float(portfolio_state.get('balance', 0.0) or 0.0):,.2f} {quote_asset}",
+                "total_balance": f"{total_balance_quote:,.2f} {quote_asset}",
                 "balance_breakdown": balance_breakdown,
                 "trade_count": str(risk_summary.get("trades_today", bot_status.get("executed_today", 0))),
                 "max_daily_trades": str(risk_summary.get("max_daily_trades", "-")),
-                "daily_loss": f"{risk_summary.get('daily_loss', 0):.2f} / {risk_summary.get('daily_loss_max', 0):.2f} THB" if risk_summary else "-",
+                "daily_loss": f"{risk_summary.get('daily_loss', 0):.2f} / {risk_summary.get('daily_loss_max', 0):.2f} {quote_asset}" if risk_summary else "-",
                 "daily_loss_pct": f"{risk_summary.get('daily_loss_pct', 0):.2f}%" if risk_summary else "-",
                 "max_open_positions": str(risk_summary.get("max_open_positions", "-")),
                 "cooling_down": "Yes" if risk_summary.get("cooling_down") else "No",
@@ -2651,8 +2771,17 @@ class TradingBotApp:
                     "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
                     "max_open_positions": self.config.get("risk", {}).get("max_open_positions", 3),
                     "max_daily_trades": self.config.get("risk", {}).get("max_daily_trades", 10),
+                    "strategies": {
+                        "enabled": list(strategies_config.get("enabled") or []),
+                    },
+                    "mode_indicator_profiles": dict(self.config.get("mode_indicator_profiles", {}) or {}),
                     "scalping": strategies_config.get("scalping", {}),
                     "sniper": strategies_config.get("sniper", {}) or strategies_config.get("scalping", {}),
+                    "machete_v8b_lite": strategies_config.get("machete_v8b_lite", {}),
+                    "simple_scalp_plus": strategies_config.get("simple_scalp_plus", {}),
+                    "trend_following": strategies_config.get("trend_following", {}),
+                    "mean_reversion": strategies_config.get("mean_reversion", {}),
+                    "breakout": strategies_config.get("breakout", {}),
                 })
                 if self.risk_manager and self.signal_generator.set_database:
                     from database import get_database
@@ -2781,8 +2910,8 @@ class TradingBotApp:
                         data_config=refresh_data_config,
                         project_root=PROJECT_ROOT,
                     )
-            except BitkubAPIError as exc:
-                logger.warning("Runtime pair refresh skipped due to Bitkub API error: %s", exc)
+            except BinanceAPIError as exc:
+                logger.warning("Runtime pair refresh skipped due to exchange API error: %s", exc)
                 return _normalize_pairs(data_config.get("pairs") or [])
             except Exception as exc:
                 logger.error("Runtime pair refresh failed: %s", exc, exc_info=True)
@@ -2821,6 +2950,66 @@ class TradingBotApp:
             "Hybrid Dynamic Coin Config hot reload enabled | interval=%ss | path=%s",
             int(interval),
             whitelist_path,
+        )
+
+    def _run_weekly_review_once(self) -> None:
+        if not self.alert_system:
+            logger.debug("[WeeklyReview] Alert system unavailable, skipping run")
+            return
+        try:
+            from database import get_database
+
+            week_end = datetime.now(timezone.utc)
+            week_start = week_end - timedelta(days=7)
+            reviewer = WeeklyReviewer(
+                db=get_database(),
+                config=self.config,
+                alert_system=self.alert_system,
+            )
+            stats = reviewer.run_review(week_start=week_start, week_end=week_end)
+            logger.info(
+                "[WeeklyReview] Completed weekly review | grade=%s return=%+.2f%% trades=%d",
+                stats.grade,
+                stats.week_return_pct,
+                stats.total_trades,
+            )
+        except Exception as exc:
+            logger.error("[WeeklyReview] Scheduled review failed: %s", exc, exc_info=True)
+
+    def _start_weekly_review_scheduler(self) -> None:
+        review_cfg = dict(self.config.get("weekly_review", {}) or {})
+        if not bool(review_cfg.get("enabled", False)):
+            return
+        if self._weekly_review_thread and self._weekly_review_thread.is_alive():
+            return
+
+        day_of_week = int(review_cfg.get("day_of_week", 6))
+        hour_utc = int(review_cfg.get("hour_utc", 17))
+        interval = max(30.0, float(review_cfg.get("scheduler_poll_seconds", 60) or 60))
+
+        def _watch_loop() -> None:
+            while not self._shutdown_event.wait(interval):
+                now_utc = datetime.now(timezone.utc)
+                if now_utc.weekday() != day_of_week or now_utc.hour != hour_utc:
+                    continue
+                iso_year, iso_week, _ = now_utc.isocalendar()
+                run_key = f"{iso_year}-W{iso_week:02d}"
+                if run_key == self._last_weekly_review_key:
+                    continue
+                self._run_weekly_review_once()
+                self._last_weekly_review_key = run_key
+
+        self._weekly_review_thread = threading.Thread(
+            target=_watch_loop,
+            daemon=True,
+            name="WeeklyReviewScheduler",
+        )
+        self._weekly_review_thread.start()
+        logger.info(
+            "Weekly review scheduler enabled | day_of_week=%d hour_utc=%d interval=%ss",
+            day_of_week,
+            hour_utc,
+            int(interval),
         )
 
     def get_health_status(self) -> Dict[str, Any]:
@@ -2928,10 +3117,10 @@ class TradingBotApp:
         logger.info("ตรวจสอบ Config ผ่านเรียบร้อย")
         
         # 1. Initialize API Client
-        self.api_client = BitkubClient(
-            api_key=BITKUB.api_key,
-            api_secret=BITKUB.api_secret,
-            base_url=BITKUB.base_url
+        self.api_client = BinanceThClient(
+            api_key=BINANCE.api_key,
+            api_secret=BINANCE.api_secret,
+            base_url=BINANCE.base_url
         )
         logger.info("API Client initialized")
 
@@ -2949,12 +3138,12 @@ class TradingBotApp:
                         data_config=data_config,
                         project_root=PROJECT_ROOT,
                     )
-            except BitkubAPIError as exc:
+            except BinanceAPIError as exc:
                 if exc.code != 5:
                     raise
 
                 reason = (
-                    f"Bitkub private API blocked during startup: {exc.message}; "
+                    f"Exchange private API blocked during startup: {exc.message}; "
                     "running in degraded public-only mode"
                 )
                 _clear_startup_auth_shutdown_state(self.api_client)
@@ -2962,7 +3151,7 @@ class TradingBotApp:
                 self.trading_disabled.set()
                 auth_degraded = True
                 logger.warning(
-                    "Bitkub auth error 5 during startup — continuing in degraded mode: %s",
+                    "Exchange auth error during startup — continuing in degraded mode: %s",
                     exc,
                 )
                 logger.warning(
@@ -2978,9 +3167,9 @@ class TradingBotApp:
             elif auth_degraded:
                 logger.warning("Degraded startup mode active with no configured pairs — bot will run collector/monitor only")
             elif resolved_pairs:
-                logger.info(f"คู่เหรียญที่ถือบน Bitkub และจะติดตาม: {' add '.join(resolved_pairs)}")
+                logger.info(f"คู่เหรียญที่ถือบน Binance TH และจะติดตาม: {' add '.join(resolved_pairs)}")
             else:
-                logger.warning("Bitkub ไม่พบเหรียญที่ถืออยู่ในคู่ THB ที่เทรดได้ — bot จะเริ่มแบบไม่มีคู่เหรียญ active")
+                logger.warning("Binance TH ไม่พบเหรียญที่ถืออยู่ในคู่ที่เทรดได้ — bot จะเริ่มแบบไม่มีคู่เหรียญ active")
         else:
             resolved_pairs = _normalize_pairs(configured_pairs)
             data_config["pairs"] = resolved_pairs
@@ -3026,8 +3215,17 @@ class TradingBotApp:
             "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
             "max_open_positions": risk_config.get("max_open_positions", 3),
             "max_daily_trades": risk_config.get("max_daily_trades", 10),
+            "strategies": {
+                "enabled": list(strategies_config.get("enabled") or []),
+            },
+            "mode_indicator_profiles": dict(self.config.get("mode_indicator_profiles", {}) or {}),
             "scalping": strategies_config.get("scalping", {}),
             "sniper": strategies_config.get("sniper", {}) or strategies_config.get("scalping", {}),
+            "machete_v8b_lite": strategies_config.get("machete_v8b_lite", {}),
+            "simple_scalp_plus": strategies_config.get("simple_scalp_plus", {}),
+            "trend_following": strategies_config.get("trend_following", {}),
+            "mean_reversion": strategies_config.get("mean_reversion", {}),
+            "breakout": strategies_config.get("breakout", {}),
         })
         logger.info("ระบบสร้างสัญญาณเทรดพร้อมทำงาน (Signal Generator initialized)")
         
@@ -3111,11 +3309,13 @@ class TradingBotApp:
         pairs = list(data_config.get("pairs") or [])
         interval = data_config.get("collect_interval_seconds", 60)
         
-        self.collector = BitkubCollector(
+        self.collector = BinanceThCollector(
             pairs=pairs,
             interval=interval,
             multi_timeframe_config=self.config.get("multi_timeframe", {}),
         )
+        if self.bot is not None:
+            self.bot.collector = self.collector
         logger.info("ระบบเก็บข้อมูลเริ่มทำงาน (Data Collector initialized)")
         
         # 8. Initialize Adaptive Strategy Router (auto mode switching)
@@ -3157,6 +3357,7 @@ class TradingBotApp:
         self._start_health_server()
 
         self._start_pair_hot_reload()
+        self._start_weekly_review_scheduler()
         
         # Setup signal handlers only for standalone/main-thread execution.
         if register_signal_handlers:
@@ -3181,6 +3382,9 @@ class TradingBotApp:
         if self._pair_reload_thread and self._pair_reload_thread.is_alive():
             self._pair_reload_thread.join(timeout=5)
             self._pair_reload_thread = None
+        if self._weekly_review_thread and self._weekly_review_thread.is_alive():
+            self._weekly_review_thread.join(timeout=5)
+            self._weekly_review_thread = None
         
         # Stop bot first
         if self.bot:
@@ -3357,7 +3561,7 @@ def main():
     # Guarantee lock release even on abnormal exits (uncaught exceptions, os._exit)
     atexit.register(release_bot_lock)
 
-    # Proactive IP check — detect changes before Bitkub rejects us
+    # Proactive IP check — diagnostic visibility for exchange connectivity.
     try:
         from api_client import check_ip_change_on_startup
         check_ip_change_on_startup()

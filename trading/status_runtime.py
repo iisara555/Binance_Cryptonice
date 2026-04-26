@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from helpers import normalize_side_value
+from helpers import extract_base_asset, normalize_side_value
 
 logger = logging.getLogger(__name__)
 
@@ -26,12 +26,22 @@ class StatusRuntimeHelper:
 
     @staticmethod
     def _coerce_float(value: Any, default: float = 0.0) -> float:
-        if value is None:
-            return default
         try:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _parse_iso_time(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        text = str(value or "").strip()
+        if not text or text == "-":
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
     @staticmethod
     def format_alert_block(header: str, lines: List[str], now: Optional[datetime] = None) -> str:
@@ -40,7 +50,12 @@ class StatusRuntimeHelper:
 
     @staticmethod
     def format_coin_symbol(symbol: str) -> str:
-        return str(symbol or "").replace("THB_", "")
+        return extract_base_asset(symbol)
+
+    def quote_asset(self) -> str:
+        config = getattr(self.bot, "config", {}) or {}
+        hybrid_cfg = (config.get("data", {}) or {}).get("hybrid_dynamic_coin_config", {}) or {}
+        return str(hybrid_cfg.get("quote_asset") or "USDT").upper()
 
     def get_trailing_trace_context(self) -> Dict[str, Any]:
         executor = getattr(self.bot, "executor", None)
@@ -124,14 +139,15 @@ class StatusRuntimeHelper:
     ) -> str:
         pnl_emoji = "✅" if net_pnl >= 0 else "🔻"
         coin = self.format_coin_symbol(symbol)
+        quote = self.quote_asset()
         return self.format_alert_block(
             f"📤 <b>Position Closed</b>  {coin}  ({trigger_label})",
             [
                 f"Size <code>{amount:.8f}</code> {coin}",
-                f"Buy <code>{entry_cost:,.2f}</code> THB @ <code>{entry_price:,.2f}</code>",
-                f"Sell <code>{gross_exit:,.2f}</code> THB @ <code>{exit_price:,.2f}</code>",
-                f"{pnl_emoji} PnL <code>{net_pnl:+,.0f}</code> THB ({net_pnl_pct:+.2f}%)",
-                f"Fees <code>{total_fees:,.0f}</code> THB",
+                f"Buy <code>{entry_cost:,.2f}</code> {quote} @ <code>{entry_price:,.2f}</code>",
+                f"Sell <code>{gross_exit:,.2f}</code> {quote} @ <code>{exit_price:,.2f}</code>",
+                f"{pnl_emoji} PnL <code>{net_pnl:+,.0f}</code> {quote} ({net_pnl_pct:+.2f}%)",
+                f"Fees <code>{total_fees:,.0f}</code> {quote}",
             ],
             now=now,
         )
@@ -140,7 +156,8 @@ class StatusRuntimeHelper:
         plan = decision.plan
         now = datetime.now()
         fill_price = result.filled_price or plan.entry_price
-        size_thb = result.filled_amount * fill_price
+        notional = result.filled_amount * fill_price
+        quote = self.quote_asset()
         sl = plan.stop_loss if plan else 0
         tp = plan.take_profit if plan else 0
         conf = plan.confidence if plan else 0
@@ -150,8 +167,8 @@ class StatusRuntimeHelper:
             f"📥 <b>Position Opened</b>  {coin}",
             [
                 f"Size <code>{float(result.filled_amount or 0.0):.8f}</code> {coin}",
-                f"Fill Price <code>{fill_price:,.0f}</code> THB",
-                f"Notional <code>{size_thb:,.0f}</code> THB  |  Confidence {conf:.0%}",
+                f"Fill Price <code>{fill_price:,.0f}</code> {quote}",
+                f"Notional <code>{notional:,.0f}</code> {quote}  |  Confidence {conf:.0%}",
                 f"SL <code>{sl:,.0f}</code>  |  TP <code>{tp:,.0f}</code>",
             ],
             now=now,
@@ -160,20 +177,21 @@ class StatusRuntimeHelper:
     def format_skip_alert(self, decision: Any) -> str:
         plan = decision.plan
         reason = getattr(decision.risk_check, 'reason', getattr(decision.risk_check, 'reasons', 'Unknown reason'))
-        coin = plan.symbol.replace("THB_", "") if plan else ""
+        coin = self.format_coin_symbol(plan.symbol) if plan else ""
         side = normalize_side_value(getattr(plan, "side", ""), default="n/a").upper() if plan else "N/A"
         return f"🛡️ <b>Risk Control</b>  {coin} {side}\nReason: {reason}"
 
     def format_pending_alert(self, decision: Any, portfolio: Dict[str, Any]) -> str:
         plan = decision.plan
         coin = self.format_coin_symbol(plan.symbol) if plan else ""
+        quote = self.quote_asset()
         with self.bot._pending_decisions_lock:
             decision_id = len(self.bot._pending_decisions) - 1
         return self.format_alert_block(
             f"⏳ <b>Approval Required</b>  {coin}",
             [
-                f"Price <code>{plan.entry_price:,.0f}</code> THB  |  Confidence {plan.confidence:.0%}",
-                f"Balance <code>{portfolio['balance']:,.0f}</code> THB",
+                f"Price <code>{plan.entry_price:,.0f}</code> {quote}  |  Confidence {plan.confidence:.0%}",
+                f"Balance <code>{portfolio['balance']:,.0f}</code> {quote}",
                 f"ID: <code>{decision_id}</code>  /approve {decision_id}",
             ],
         )
@@ -181,9 +199,9 @@ class StatusRuntimeHelper:
     def format_dry_run_alert(self, decision: Any, portfolio: Dict[str, Any]) -> str:
         del portfolio
         plan = decision.plan
-        coin = plan.symbol.replace("THB_", "") if plan else ""
+        coin = self.format_coin_symbol(plan.symbol) if plan else ""
         side = normalize_side_value(getattr(plan, "side", ""), default="n/a").upper() if plan else "N/A"
-        return f"🧪 <b>Dry Run</b>  {coin} {side} @ {plan.entry_price:,.0f} THB  ({plan.confidence:.0%})"
+        return f"🧪 <b>Dry Run</b>  {coin} {side} @ {plan.entry_price:,.0f} {self.quote_asset()}  ({plan.confidence:.0%})"
 
     def build_multi_timeframe_status(self) -> Dict[str, Any]:
         timeframes = list(getattr(self.bot, "mtf_timeframes", []) or [])
@@ -204,6 +222,17 @@ class StatusRuntimeHelper:
         if db is None:
             return status
 
+        gating_timeframes = list(timeframes)
+        require_htf_confirmation = bool(getattr(self.bot, "_mtf_confirmation_required", False))
+        primary_timeframe = str(getattr(self.bot, "timeframe", "1h") or "1h")
+        if not require_htf_confirmation and primary_timeframe in timeframes:
+            primary_idx = timeframes.index(primary_timeframe)
+            gating_timeframes = timeframes[: primary_idx + 1]
+        if not gating_timeframes:
+            gating_timeframes = list(timeframes)
+        gating_set = set(gating_timeframes)
+        status["readiness_timeframes"] = list(gating_timeframes)
+
         conn = None
         cursor = None
         try:
@@ -222,8 +251,10 @@ class StatusRuntimeHelper:
                     count, latest = cursor.fetchone()
                     count_value = int(count or 0)
                     waiting_candles = max(0, self.required_candles - count_value)
-                    waiting_total += waiting_candles
-                    if waiting_candles > 0:
+                    required_for_readiness = timeframe in gating_set
+                    if required_for_readiness:
+                        waiting_total += waiting_candles
+                    if required_for_readiness and waiting_candles > 0:
                         blocking_timeframes.append(f"{timeframe}:{waiting_candles}")
                     timeframe_rows.append(
                         {
@@ -231,6 +262,7 @@ class StatusRuntimeHelper:
                             "count": count_value,
                             "required_candles": self.required_candles,
                             "waiting_candles": waiting_candles,
+                            "required_for_readiness": required_for_readiness,
                             "latest": latest.isoformat() if hasattr(latest, "isoformat") else (str(latest) if latest else None),
                         }
                     )
@@ -242,7 +274,11 @@ class StatusRuntimeHelper:
                         "required_candles": self.required_candles,
                         "waiting_candles": waiting_total,
                         "waiting_summary": ", ".join(blocking_timeframes) if blocking_timeframes else "ready",
-                        "ready": all((row["waiting_candles"] or 0) <= 0 for row in timeframe_rows),
+                        "ready": all(
+                            (row.get("waiting_candles") or 0) <= 0
+                            for row in timeframe_rows
+                            if row.get("required_for_readiness", True)
+                        ),
                     }
                 )
 
@@ -325,22 +361,88 @@ class StatusRuntimeHelper:
             portfolio_state = portfolio_state_getter() or {}
         risk_manager = getattr(self.bot, "risk_manager", None)
 
-        if getattr(self.bot, "_ws_client", None):
-            ws_state = "connected" if self.bot._ws_client.is_connected() else "disconnected"
-            live_symbol = trading_pairs[0] if trading_pairs else trading_pair
+        ws_client = getattr(self.bot, "_ws_client", None)
+        ws_enabled = bool(getattr(self.bot, "_ws_enabled", False))
+        import_ok = bool(getattr(self.bot, "_ws_import_ok", False))
+        pair_list = list(trading_pairs or [])
+
+        ws_last_error: Optional[str] = None
+        # Prefer config/runtime flags over a stale client object (e.g. FAILED after dependency/off).
+        if not ws_enabled:
+            ws_state = "disabled"
+            live_price = None
+        elif not import_ok:
+            ws_state = "no_backend"
+            live_price = None
+        elif ws_client:
+            if self.bot._ws_client.is_connected():
+                ws_state = "connected"
+            else:
+                raw_state = getattr(ws_client, "state", None)
+                state_text = str(getattr(raw_state, "value", raw_state) or "").strip().lower()
+                if state_text in {"connecting", "reconnecting", "failed", "disconnected"}:
+                    ws_state = state_text
+                else:
+                    ws_state = "disconnected"
+            live_symbol = pair_list[0] if pair_list else trading_pair
             live_tick = self.latest_ticker_getter(live_symbol) if self.websocket_available and self.latest_ticker_getter else None
             live_price = live_tick.last if live_tick else None
+            try:
+                stats = ws_client.get_stats() if callable(getattr(ws_client, "get_stats", None)) else None
+                if isinstance(stats, dict):
+                    err = stats.get("last_error")
+                    if err:
+                        ws_last_error = str(err)[:200]
+            except Exception:
+                pass
+        elif not pair_list:
+            ws_state = "no_pairs"
+            live_price = None
         else:
             ws_state = "not_started"
             live_price = None
 
         balance_monitor = getattr(self.bot, "_balance_monitor", None)
         balance_state = balance_monitor.get_state() if balance_monitor else None
+        balances = dict((balance_state or {}).get("balances") or {})
+        quote_asset = self.quote_asset()
+        raw_balance_monitor_cfg = (getattr(self.bot, "config", {}) or {}).get("balance_monitor", {}) or {}
+        try:
+            max_event_age_hours = float(raw_balance_monitor_cfg.get("event_tape_max_age_hours", 12.0) or 12.0)
+        except (TypeError, ValueError):
+            max_event_age_hours = 12.0
+        max_event_age_seconds = max(0.0, max_event_age_hours * 3600.0)
+        now_dt = datetime.now()
+        active_assets = {
+            str(asset or "").upper()
+            for asset, payload in balances.items()
+            if self._coerce_float((payload or {}).get("total"), 0.0) > 0
+        }
+        active_assets.add(quote_asset)
         balance_events: List[Dict[str, str]] = []
-        for row in list((balance_state or {}).get("last_events") or [])[:5]:
+        seen_event_keys: set[str] = set()
+        for row in list((balance_state or {}).get("last_events") or []):
             event_type = str(row.get("event_type") or "BAL")
             coin = str(row.get("coin") or "").upper()
             amount = self._coerce_float(row.get("amount"), 0.0)
+            occurred_at_raw = row.get("occurred_at")
+            occurred_dt = self._parse_iso_time(occurred_at_raw)
+            if occurred_dt is not None and max_event_age_seconds > 0:
+                try:
+                    age_seconds = abs((now_dt - occurred_dt.replace(tzinfo=None)).total_seconds())
+                    if age_seconds > max_event_age_seconds:
+                        continue
+                except Exception:
+                    pass
+
+            # Drop stale legacy history rows from previous exchange context.
+            if coin and coin not in active_assets:
+                continue
+
+            event_key = f"{event_type}|{coin}|{amount:.8f}|{occurred_at_raw}"
+            if event_key in seen_event_keys:
+                continue
+            seen_event_keys.add(event_key)
             message = f"{event_type} {coin} {amount:,.4f}".strip()
             balance_events.append(
                 {
@@ -349,6 +451,8 @@ class StatusRuntimeHelper:
                     "message": message,
                 }
             )
+            if len(balance_events) >= 5:
+                break
 
         recent_trades: List[Dict[str, str]] = []
         for row in list(getattr(self.bot, "_executed_today", []) or [])[-5:]:
@@ -437,6 +541,7 @@ class StatusRuntimeHelper:
                 "enabled": getattr(self.bot, "_ws_enabled", False),
                 "state": ws_state,
                 "live_price": live_price,
+                "last_error": ws_last_error,
             },
             "risk_summary": risk_manager.get_risk_summary(risk_portfolio_value) if risk_manager else {},
         }

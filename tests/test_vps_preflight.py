@@ -3,7 +3,7 @@ from scripts import vps_preflight
 
 def _make_project_layout(tmp_path):
     (tmp_path / ".env").write_text(
-        "BITKUB_API_KEY=test_key\nBITKUB_API_SECRET=test_secret\n",
+        "BINANCE_API_KEY=test_key\nBINANCE_API_SECRET=test_secret\n",
         encoding="utf-8",
     )
     (tmp_path / "bot_config.yaml").write_text("monitoring: {}\n", encoding="utf-8")

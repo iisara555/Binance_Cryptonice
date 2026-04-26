@@ -80,6 +80,7 @@ class ManagedLifecycleHelper:
             "state_managed": True,
         }
         self.bot.executor.register_tracked_position(snapshot.entry_order_id, pos_data)
+        self.bot._register_sl_hold_entry(snapshot.entry_order_id)
         self.bot._log_filled_order(
             snapshot.symbol,
             "buy",
@@ -112,7 +113,7 @@ class ManagedLifecycleHelper:
         exit_fee = gross_exit * BITKUB_FEE_PCT
         net_exit = gross_exit - exit_fee
         total_fees = entry_fee + exit_fee
-        net_pnl = net_exit - entry_cost
+        net_pnl = net_exit - entry_cost - entry_fee
         net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0.0
         now = datetime.now()
 
@@ -180,6 +181,7 @@ class ManagedLifecycleHelper:
             record_trade_activity = getattr(risk_manager, "record_trade_activity", None)
             if callable(record_trade_activity):
                 record_trade_activity()
+        self.bot._cleanup_sl_hold_entry(snapshot.entry_order_id)
 
         if str(snapshot.trigger or "").upper() == "TIME":
             state_manager = getattr(self.bot, "_state_manager", None)
@@ -239,10 +241,11 @@ class ManagedLifecycleHelper:
             notes=f"state={snapshot.state.value};status={result.status.value}",
         )
         coin = self.bot._format_coin_symbol(decision.plan.symbol)
+        quote = self.bot._status_helper.quote_asset() if hasattr(self.bot, "_status_helper") else "USDT"
         msg = self.bot._format_alert_block(
             f"📥 <b>ส่งคำสั่งซื้อ</b>  {coin}",
             [
-                f"ราคา  <code>{decision.plan.entry_price:,.0f}</code> THB  ({decision.plan.confidence:.0%})",
+                f"ราคา  <code>{decision.plan.entry_price:,.0f}</code> {quote}  ({decision.plan.confidence:.0%})",
                 "ขนาดไม้จะคำนวณตามยอดคงเหลือ/ความเสี่ยงตอนส่งออเดอร์",
                 f"SL <code>{decision.plan.stop_loss:,.0f}</code>  TP <code>{decision.plan.take_profit:,.0f}</code>",
             ],
@@ -278,14 +281,15 @@ class ManagedLifecycleHelper:
 
         # ── Pre-check: detect dust before hitting the API ──
         _raw_min = getattr(self.bot.executor, "_min_order_thb", None)
-        min_order_thb = float(_raw_min) if isinstance(_raw_min, (int, float)) else 15.0
-        order_value_thb = amount * exit_price
-        if order_value_thb < min_order_thb:
+        min_order_quote = float(_raw_min) if isinstance(_raw_min, (int, float)) else 15.0
+        order_value_quote = amount * exit_price
+        if order_value_quote < min_order_quote:
             logger.warning(
-                "[Dust] Skipping %s exit for %s — value %.2f THB < min %.0f THB. Force-closing as dust.",
-                triggered, pos_symbol, order_value_thb, min_order_thb,
+                "[Dust] Skipping %s exit for %s — value %.2f quote < min %.0f quote. Force-closing as dust.",
+                triggered, pos_symbol, order_value_quote, min_order_quote,
             )
             self.bot.executor.remove_tracked_position(position_id)
+            self.bot._cleanup_sl_hold_entry(position_id)
             self.bot._state_manager._drop(pos_symbol)
             try:
                 self.bot.db.log_closed_trade({
@@ -328,6 +332,7 @@ class ManagedLifecycleHelper:
                     pos_symbol, position_id, error_code, result.message,
                 )
                 self.bot.executor.remove_tracked_position(position_id)
+                self.bot._cleanup_sl_hold_entry(position_id)
                 self.bot._state_manager._drop(pos_symbol)
                 try:
                     self.bot.db.log_closed_trade({
@@ -439,12 +444,14 @@ class ManagedLifecycleHelper:
                             filled_price,
                         )
                         if self.bot.send_alerts:
+                            quote = self.bot._status_helper.quote_asset() if hasattr(self.bot, "_status_helper") else "USDT"
+                            coin = self.bot._format_coin_symbol(snapshot.symbol)
                             msg = self.bot._format_alert_block(
-                                f"✅ <b>ซื้อสำเร็จ (Filled)</b>  {snapshot.symbol.replace('THB_', '')}",
+                                f"✅ <b>ซื้อสำเร็จ (Filled)</b>  {coin}",
                                 [
                                     f"ได้ของจำนวน: <code>{filled_amount:.6f}</code>",
-                                    f"ที่ราคา: <code>{filled_price:,.2f}</code> THB",
-                                    f"มูลค่าไม้: <code>{filled_amount * filled_price:,.2f}</code> THB",
+                                    f"ที่ราคา: <code>{filled_price:,.2f}</code> {quote}",
+                                    f"มูลค่าไม้: <code>{filled_amount * filled_price:,.2f}</code> {quote}",
                                 ],
                             )
                             self.bot._send_alert(msg, to_telegram=True)
@@ -474,7 +481,7 @@ class ManagedLifecycleHelper:
                             logger.info("[State] %s -> idle | pending buy timed out", snapshot.symbol)
                             if self.bot.send_alerts:
                                 msg = self.bot._format_alert_block(
-                                    f"⏰ <b>ยกเลิกคำสั่งซื้อ (ตกรถ)</b>  {snapshot.symbol.replace('THB_', '')}",
+                                    f"⏰ <b>ยกเลิกคำสั่งซื้อ (ตกรถ)</b>  {self.bot._format_coin_symbol(snapshot.symbol)}",
                                     ["ออเดอร์ Limit ไม่ถูกจับคู่ภายในเวลาที่กำหนด", "ดึงออเดอร์กลับและรอสัญญาณใหม่"],
                                 )
                                 self.bot._send_alert(msg, to_telegram=True)

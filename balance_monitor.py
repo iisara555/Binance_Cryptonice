@@ -1,4 +1,4 @@
-"""Bitkub balance monitoring for deposits, withdrawals, and threshold alerts."""
+"""Exchange balance monitoring for deposits, withdrawals, and threshold alerts."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ class BalanceEvent:
 
 
 class BalanceMonitor:
-    """Poll Bitkub balance and history endpoints to detect wallet activity."""
+    """Poll exchange balance and history endpoints to detect wallet activity."""
 
     def __init__(
         self,
@@ -109,8 +109,12 @@ class BalanceMonitor:
         self.poll_interval_seconds = max(5, int(self.config.get("poll_interval_seconds", 30) or 30))
         self.api_timeout_seconds = max(1.0, float(self.config.get("api_timeout_seconds", 10.0) or 10.0))
         self.persist_path = Path(self.config.get("persist_path") or "balance_monitor_state.json")
-        self.thb_min_threshold = _safe_float(
-            os.environ.get("THB_MIN_THRESHOLD", self.config.get("thb_min_threshold", 0.0)),
+        self.quote_asset = str(self.config.get("quote_asset") or os.environ.get("QUOTE_ASSET") or "USDT").upper()
+        self.quote_min_threshold = _safe_float(
+            os.environ.get(
+                "QUOTE_MIN_THRESHOLD",
+                self.config.get("quote_min_threshold", 0.0),
+            ),
             0.0,
         )
         self.global_coin_min_threshold = _safe_float(
@@ -120,6 +124,7 @@ class BalanceMonitor:
         self.coin_min_thresholds = dict(self.config.get("coin_min_thresholds") or {})
         self.coin_min_thresholds.update(_parse_asset_threshold_map(os.environ.get("COIN_MIN_THRESHOLDS", "")))
         self._bootstrap_history_on_startup = bool(self.config.get("bootstrap_history_on_startup", True))
+        self._clean_startup_event_tape = bool(self.config.get("clean_startup_event_tape", True))
 
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -212,6 +217,8 @@ class BalanceMonitor:
                     self._state["updated_at"] = datetime.now().isoformat()
                     self._state["balances"] = normalized_balances
                     self._state["api_health"] = copy.deepcopy(self._endpoint_health)
+                    if self._clean_startup_event_tape:
+                        self._state["last_events"] = []
 
                 self._check_thresholds(normalized_balances)
                 self._save_state()
@@ -362,7 +369,7 @@ class BalanceMonitor:
         balances: Dict[str, Dict[str, float]],
     ) -> List[BalanceEvent]:
         events: List[BalanceEvent] = []
-        thb_balance = balances.get("THB", {}).get("available", 0.0)
+        quote_balance = balances.get(self.quote_asset, {}).get("available", 0.0)
 
         for item in fiat_deposits:
             txn_id = str(item.get("txn_id") or item.get("txn") or "")
@@ -374,9 +381,9 @@ class BalanceMonitor:
             events.append(
                 BalanceEvent(
                     event_type="DEPOSIT",
-                    coin="THB",
+                    coin=self.quote_asset,
                     amount=_safe_float(item.get("amount"), 0.0),
-                    balance=thb_balance,
+                    balance=quote_balance,
                     occurred_at=_parse_event_time(item.get("time")),
                     transaction_id=txn_id,
                     status="complete",
@@ -394,9 +401,9 @@ class BalanceMonitor:
             events.append(
                 BalanceEvent(
                     event_type="WITHDRAWAL",
-                    coin="THB",
+                    coin=self.quote_asset,
                     amount=_safe_float(item.get("amount"), 0.0),
-                    balance=thb_balance,
+                    balance=quote_balance,
                     occurred_at=_parse_event_time(item.get("time")),
                     transaction_id=txn_id,
                     status="complete",
@@ -476,11 +483,15 @@ class BalanceMonitor:
         return events
 
     def _check_thresholds(self, balances: Dict[str, Dict[str, float]]) -> None:
-        thb_available = balances.get("THB", {}).get("available", 0.0)
-        self._handle_threshold_alert("THB", thb_available, self.thb_min_threshold)
+        quote_available = balances.get(self.quote_asset, {}).get("available", 0.0)
+        self._handle_threshold_alert(self.quote_asset, quote_available, self.quote_min_threshold)
 
         tracked_coins = set(self.coin_min_thresholds)
-        tracked_coins.update(asset for asset, payload in balances.items() if asset != "THB" and payload.get("total", 0.0) > 0)
+        tracked_coins.update(
+            asset
+            for asset, payload in balances.items()
+            if asset != self.quote_asset and payload.get("total", 0.0) > 0
+        )
         for coin in tracked_coins:
             minimum = self.coin_min_thresholds.get(coin, self.global_coin_min_threshold)
             if minimum <= 0:
@@ -591,6 +602,22 @@ class BalanceMonitor:
         self._low_balance_alerts = set(payload.get("low_balance_alerts", []))
         with self._state_lock:
             self._state.update(payload.get("state", {}))
+            raw_last_events = list(self._state.get("last_events") or [])
+            normalized_events: List[Dict[str, Any]] = []
+            for row in raw_last_events:
+                if not isinstance(row, dict):
+                    continue
+                event_coin = str(row.get("coin") or "").upper()
+                if event_coin and event_coin not in {self.quote_asset, "THB", "USDT"}:
+                    # Keep non-cash asset events as-is.
+                    normalized_events.append(dict(row))
+                    continue
+                # Keep only recent cash events to avoid noisy stale startup tape.
+                occurred_at = _parse_event_time(row.get("occurred_at"))
+                if (datetime.now() - occurred_at).total_seconds() > 24 * 3600:
+                    continue
+                normalized_events.append(dict(row))
+            self._state["last_events"] = normalized_events[:25]
 
     def _save_state(self) -> None:
         payload = {

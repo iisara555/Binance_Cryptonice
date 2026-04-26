@@ -327,15 +327,46 @@ candle_retention:
 
 ```json
 {
-  "coins": [
-    "BTC",
-    "ETH",
-    "KUB",
-    "SOL"
+  "version": 1,
+  "quote_asset": "THB",
+  "min_quote_balance_thb": 100.0,
+  "require_supported_market": true,
+  "include_assets_with_balance": true,
+  "assets": [
+    { "symbol": "BTC", "enabled": true },
+    { "symbol": "ETH", "enabled": true },
+    { "symbol": "BNB", "enabled": true },
+    { "symbol": "SOL", "enabled": true },
+    { "symbol": "XRP", "enabled": true },
+    { "symbol": "ADA", "enabled": true },
+    { "symbol": "DOGE", "enabled": true },
+    { "symbol": "LINK", "enabled": true },
+    { "symbol": "MATIC", "enabled": true }
   ],
-  "version": "1.0"
+  "updated_at": "2026-04-26T20:00:00+07:00"
 }
 ```
+
+> หมายเหตุ: ในไฟล์นี้ต้องใช้ `base symbol` เช่น `BTC`, `ETH` (ไม่ใช่ `BTCUSDT`).
+
+## 3.3 Recommended Whitelist Notes (2026-04)
+
+reference profile ด้านล่างใช้เพื่อเลือกโหมดให้เหมาะกับสินทรัพย์:
+
+| Symbol | Name | Liquidity | Volatility | Suitable modes | Reason |
+|--------|------|-----------|------------|----------------|--------|
+| BTCUSDT | Bitcoin | high | medium | scalping, trend_only, standard | สภาพคล่องสูงสุด — อ้างอิงตลาดทั้งหมด |
+| ETHUSDT | Ethereum | high | medium-high | scalping, trend_only, standard | สภาพคล่องอันดับ 2 — ecosystem ใหญ่ |
+| BNBUSDT | BNB | high | medium | scalping, trend_only, standard | Native token Binance.th — สภาพคล่องดีมากบน platform นี้ |
+| SOLUSDT | Solana | high | high | scalping, trend_only | Volume สูง — volatile ดีสำหรับ scalping |
+| XRPUSDT | XRP | high | medium-high | scalping, trend_only, standard | Volume สูงมาก — spread แคบ เหมาะ scalping |
+| ADAUSDT | Cardano | medium-high | high | scalping, standard | Volume ดี — price ต่ำ position size ยืดหยุ่น |
+| DOGEUSDT | Dogecoin | high | very-high | scalping | Volume สูงมาก — meme momentum เหมาะ scalping |
+| LINKUSDT | Chainlink | medium-high | high | trend_only, standard | Volume ดี — trend ชัดเจน เหมาะ trend_only |
+| MATICUSDT | Polygon | medium-high | high | scalping, standard | Volume ดี — price ต่ำ เหมาะ scalping |
+
+> mapping สำหรับ runtime ไฟล์ `coin_whitelist.json`:
+> `BTCUSDT->BTC`, `ETHUSDT->ETH`, `BNBUSDT->BNB`, `SOLUSDT->SOL`, `XRPUSDT->XRP`, `ADAUSDT->ADA`, `DOGEUSDT->DOGE`, `LINKUSDT->LINK`, `MATICUSDT->MATIC`
 
 ---
 

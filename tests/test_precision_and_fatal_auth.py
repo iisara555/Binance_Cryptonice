@@ -4,31 +4,30 @@ from unittest.mock import Mock, patch
 import pytest
 
 from alerts import AlertLevel
-from api_client import BitkubClient, FatalAuthException
+from api_client import BinanceAuthException, BinanceThClient
 from portfolio_manager import PortfolioManager
 from trading_bot import TradingBotOrchestrator
 
 
-def test_unsuppressed_auth_error_5_raises_fatal_auth_exception_without_global_shutdown():
+def test_unsuppressed_binance_auth_error_raises_auth_exception_without_global_shutdown():
     import api_client as api_module
 
     api_module.SHOULD_SHUTDOWN = False
     api_module.SHUTDOWN_REASON = ''
 
-    client = BitkubClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
+    client = BinanceThClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
     client.check_clock_sync = Mock(return_value=True)
-    client._get_server_time = Mock(return_value=1234567890000)
 
     response = Mock()
     response.status_code = 401
-    response.text = '{"error":5}'
-    response.json.return_value = {'error': 5}
+    response.text = '{"code":-2015,"msg":"Invalid API-key"}'
+    response.json.return_value = {'code': -2015, 'msg': 'Invalid API-key'}
 
     with patch('api_client.requests.request', return_value=response):
-        with pytest.raises(FatalAuthException) as exc_info:
+        with pytest.raises(BinanceAuthException) as exc_info:
             client.get_balances()
 
-    assert exc_info.value.code == 5
+    assert exc_info.value.code == -2015
     assert api_module.SHOULD_SHUTDOWN is False
     assert api_module.SHUTDOWN_REASON == ''
 
@@ -41,7 +40,7 @@ def test_main_loop_stops_gracefully_on_fatal_auth_exception():
     bot._loop_count = 0
     bot._maybe_run_candle_retention_cleanup = Mock()
     bot._maybe_run_db_maintenance = Mock()
-    bot._run_iteration = Mock(side_effect=FatalAuthException(5, 'fatal auth failure'))
+    bot._run_iteration = Mock(side_effect=BinanceAuthException(-2015, 'fatal auth failure'))
 
     with patch('trading_bot.time.sleep'):
         TradingBotOrchestrator._main_loop(bot)
@@ -57,7 +56,7 @@ def test_main_loop_routes_fatal_auth_alert_through_alert_system_not_api_layer():
     bot._loop_count = 0
     bot._maybe_run_candle_retention_cleanup = Mock()
     bot._maybe_run_db_maintenance = Mock()
-    bot._run_iteration = Mock(side_effect=FatalAuthException(5, 'fatal auth failure <bad>'))
+    bot._run_iteration = Mock(side_effect=BinanceAuthException(-2015, 'fatal auth failure <bad>'))
     bot.alert_system = Mock()
 
     with patch('trading_bot.time.sleep'):

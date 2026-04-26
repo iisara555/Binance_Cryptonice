@@ -4,7 +4,7 @@ Shared Helper Utilities — Phase 3 code quality cleanup.
 Provides common functions used across multiple modules to reduce
 duplication and improve consistency:
 - Price fetching (WebSocket cache → REST fallback)
-- Balance lookups (THB / base asset with safe defaults)
+- Balance lookups (quote / base asset with safe defaults)
 - Price formatting / logging helpers
 - Typed aliases for common return types
 """
@@ -17,19 +17,20 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-BITKUB_TIMEZONE = timezone(timedelta(hours=7), name="ICT")
+THAILAND_TIMEZONE = timezone(timedelta(hours=7), name="ICT")
+BITKUB_TIMEZONE = THAILAND_TIMEZONE  # Backward-compatible alias.
 
 
-def now_bitkub() -> datetime:
-    """Return the current time in Bitkub's Thailand timezone."""
-    return datetime.now(timezone.utc).astimezone(BITKUB_TIMEZONE)
+def now_exchange_time() -> datetime:
+    """Return the current time in the exchange-local Thailand timezone."""
+    return datetime.now(timezone.utc).astimezone(THAILAND_TIMEZONE)
 
 
-def parse_as_bitkub_time(value: Any) -> Optional[datetime]:
-    """Normalize a datetime-like value to Bitkub's Thailand timezone.
+def parse_as_exchange_time(value: Any) -> Optional[datetime]:
+    """Normalize a datetime-like value to the exchange-local Thailand timezone.
 
     Naive runtime timestamps are treated as UTC so VPS-rendered CLI times stay
-    aligned with Bitkub time.
+    aligned with Binance Thailand operating time.
     """
     if not value:
         return None
@@ -44,20 +45,35 @@ def parse_as_bitkub_time(value: Any) -> Optional[datetime]:
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(BITKUB_TIMEZONE)
+    return dt.astimezone(THAILAND_TIMEZONE)
 
 
-def format_bitkub_time(value: Any, fmt: str = "%H:%M:%S") -> str:
-    """Format a datetime-like value in Bitkub's Thailand timezone."""
+def format_exchange_time(value: Any, fmt: str = "%H:%M:%S") -> str:
+    """Format a datetime-like value in the exchange-local Thailand timezone."""
     if not value:
         return "-"
     try:
-        dt = parse_as_bitkub_time(value)
+        dt = parse_as_exchange_time(value)
     except (TypeError, ValueError):
         return str(value)
     if dt is None:
         return "-"
     return dt.strftime(fmt)
+
+
+def now_bitkub() -> datetime:
+    """Compatibility alias for older callers; prefer ``now_exchange_time``."""
+    return now_exchange_time()
+
+
+def parse_as_bitkub_time(value: Any) -> Optional[datetime]:
+    """Compatibility alias for older callers; prefer ``parse_as_exchange_time``."""
+    return parse_as_exchange_time(value)
+
+
+def format_bitkub_time(value: Any, fmt: str = "%H:%M:%S") -> str:
+    """Compatibility alias for older callers; prefer ``format_exchange_time``."""
+    return format_exchange_time(value, fmt=fmt)
 
 
 # ── Price Fetching ──────────────────────────────────────────────────────────────
@@ -76,9 +92,9 @@ def get_current_price(
     Priority: WebSocket cache (fresh) → REST API ticker → stale WebSocket cache → None
 
     Args:
-        symbol: Trading pair symbol (e.g. 'THB_BTC' or 'BTC_THB')
-        api_client: BitkubClient instance (None to skip REST fallback)
-        ws_client: BitkubWebSocket instance (None to skip WS lookup)
+        symbol: Trading pair symbol (e.g. 'BTCUSDT', 'THB_BTC', or 'BTC_THB')
+        api_client: BinanceThClient-compatible instance (None to skip REST fallback)
+        ws_client: WebSocket client instance (None to skip WS lookup)
 
     Returns:
         (price, source) tuple where source is one of:
@@ -93,9 +109,12 @@ def get_current_price(
     stale_ws_price: Optional[float] = None
     if ws_client is not None:
         try:
-            # Direct import of module-level function — avoids circular deps
-            from bitkub_websocket import get_latest_ticker
-            tick = get_latest_ticker(symbol)
+            ticker_getter = getattr(ws_client, "get_latest_ticker", None)
+            tick = ticker_getter(symbol) if callable(ticker_getter) else None
+            if tick is None:
+                # Backward-compatible legacy module lookup for older WS clients.
+                from bitkub_websocket import get_latest_ticker
+                tick = get_latest_ticker(symbol)
             if tick and getattr(tick, "last", 0) > 0:
                 tick_age = _time.time() - getattr(tick, "timestamp", 0.0)
                 if tick_age <= _WS_TICK_MAX_AGE_SECONDS:
@@ -131,14 +150,14 @@ def get_balance(
     default: float = 0.0,
 ) -> float:
     """
-    Safely get available balance for an asset from Bitkub API.
+    Safely get available balance for an asset from the active exchange API.
 
     Handles both nested dict (v3 API) and flat dict formats.
     Caches the result per call (no internal cache) — API is always hit.
 
     Args:
-        api_client: BitkubClient instance
-        asset: Asset symbol (e.g. 'THB', 'BTC', 'XAUT')
+        api_client: BinanceThClient-compatible instance
+        asset: Asset symbol (e.g. 'USDT', 'THB', 'BTC', 'XAUT')
         default: Value to return if balance cannot be fetched
 
     Returns:
@@ -167,8 +186,13 @@ def _extract_balance(
 
 
 def get_thb_balance(api_client: Any, default: float = 0.0) -> float:
-    """Get THB balance — convenience alias."""
+    """Get THB balance — compatibility convenience alias."""
     return get_balance(api_client, "THB", default)
+
+
+def get_quote_balance(api_client: Any, quote_asset: str = "USDT", default: float = 0.0) -> float:
+    """Get quote-asset balance, defaulting to Binance-style USDT."""
+    return get_balance(api_client, quote_asset, default)
 
 
 def get_crypto_balance(
@@ -180,17 +204,23 @@ def get_crypto_balance(
     Get crypto asset balance from a trading pair symbol.
 
     Examples:
+        'BTCUSDT' → BTC balance
         'THB_BTC' → BTC balance
         'BTC_THB' → BTC balance (auto-extracts base asset)
     """
+    normalized = str(symbol or "").strip().upper()
+    for quote in ("USDT", "THB"):
+        if normalized.endswith(quote) and "_" not in normalized and len(normalized) > len(quote):
+            return get_balance(api_client, normalized[: -len(quote)], default)
+
     # Extract base asset: 'THB_BTC' → 'BTC', 'BTC_THB' → 'BTC'
-    parts = symbol.upper().split("_")
-    base = parts[1] if len(parts) == 2 else symbol.upper()
+    parts = normalized.split("_")
+    base = parts[1] if len(parts) == 2 else normalized
 
     # THB pairs: exclude quote currency from result
-    if base in ("THB",):
+    if base in ("THB", "USDT"):
         # For 'THB_BTC', base asset is at index 1
-        if len(parts) == 2 and parts[0] == "THB":
+        if len(parts) == 2 and parts[0] in {"THB", "USDT"}:
             base = parts[1]
 
     return get_balance(api_client, base, default)
@@ -202,7 +232,7 @@ def normalize_symbol(symbol: str) -> str:
     """
     Normalize a trading pair symbol to standard format.
 
-    Ensures THB pairs have consistent casing:
+    Ensures pair strings have consistent casing:
         btc_thb  → BTC_THB
         THB_btc  → THB_BTC
     """
@@ -212,17 +242,22 @@ def normalize_symbol(symbol: str) -> str:
 
 def extract_base_asset(symbol: str) -> str:
     """
-    Extract the base (non-THB) asset from a trading pair.
+    Extract the base (non-quote) asset from a trading pair.
 
     Examples:
+        'BTCUSDT' → 'BTC'
         'THB_BTC' → 'BTC'
         'BTC_THB' → 'BTC'
         'THB_XAUT' → 'XAUT'
     """
-    parts = symbol.upper().split("_")
+    normalized = str(symbol or "").upper()
+    for quote in ("USDT", "THB"):
+        if normalized.endswith(quote) and "_" not in normalized and len(normalized) > len(quote):
+            return normalized[: -len(quote)]
+    parts = normalized.split("_")
     if len(parts) == 2:
-        return parts[0] if parts[1] == "THB" else parts[1]
-    return symbol.upper()
+        return parts[0] if parts[1] in {"THB", "USDT"} else parts[1]
+    return normalized
 
 
 def normalize_side_value(side: Any, default: str = "") -> str:
@@ -233,10 +268,10 @@ def normalize_side_value(side: Any, default: str = "") -> str:
 
 def symbol_for_api(symbol: str) -> str:
     """
-    Format symbol for Bitkub API calls.
+    Format symbol for exchange API calls.
 
-    Some API endpoints expect 'THB_BTC' while others accept
-    lowercase. This ensures consistent uppercase format.
+    The Binance client accepts both Binance symbols and legacy internal pairs,
+    then maps them to Binance Thailand symbols.
     """
     return normalize_symbol(symbol)
 
@@ -246,10 +281,10 @@ def calc_net_pnl(
     exit_price: float,
     quantity: float,
     side: str,
-    fee_pct: float = 0.0025,
+    fee_pct: float = 0.001,
 ) -> Dict[str, float]:
     """
-    Calculate net P/L after Bitkub fees (0.25% per side).
+    Calculate net P/L after exchange fees (default: Binance TH 0.1% per side).
 
     Returns dict with:
         entry_fee, exit_fee, total_fees, gross_exit, net_exit, net_pnl, net_pnl_pct
@@ -262,7 +297,7 @@ def calc_net_pnl(
     normalized_side = str(getattr(side, "value", side) or "").lower()
 
     if normalized_side == "buy":
-        net_pnl = net_exit - entry_cost
+        net_pnl = net_exit - entry_cost - entry_fee
     else:
         net_pnl = (entry_cost - gross_exit) - entry_fee
 
@@ -281,7 +316,7 @@ def calc_net_pnl(
 
 def parse_ticker_last(ticker: Any) -> Optional[float]:
     """
-    Extract the last/current price from a Bitkub ticker response.
+    Extract the last/current price from an exchange ticker response.
 
     Handles multiple response formats:
     - List with dict element: [{'last': ..., ...}, ...]

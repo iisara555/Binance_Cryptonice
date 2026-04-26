@@ -65,13 +65,25 @@ def _diag(pair: str, step: str, result: str, reason: str = ""):
 # ─────────────────────────────────────────────────────────────────────────────
 # Pair volatility classification
 # ─────────────────────────────────────────────────────────────────────────────
-# BTC pairs are considered "low volatility", ALT pairs are "high volatility"
-# Bitkub only has THB pairs (THB_BTC, THB_ETH, etc.)
+# BTC pairs are considered "low volatility", ALT pairs are "high volatility".
+# Project migrated from Bitkub (THB_*) to Binance Thailand (*USDT) — both
+# formats are accepted so legacy state files / tests keep working.
 VOLATILITY_CLASS = {
-    # BTC pairs – lower vol, tighter SL/TP
+    # --- NEW: SPEC_04 — Binance Thailand symbol format -----------------
+    # BTC pair – lower vol, tighter SL/TP
+    "BTCUSDT": "low",
+    # ALT pairs – higher vol, wider SL/TP
+    "ETHUSDT": "high",
+    "SOLUSDT": "high",
+    "XRPUSDT": "high",
+    "BNBUSDT": "high",
+    "ADAUSDT": "high",
+    "DOTUSDT": "high",
+    "LINKUSDT": "high",
+    "DOGEUSDT": "high",
+    # --- Legacy (Bitkub) — kept for backward compatibility -------------
     "THB_BTC": "low",
     "BTC_THB": "low",
-    # ALT pairs – higher vol, wider SL/TP
     "THB_ETH": "high",
     "THB_SOL": "high",
     "THB_XRP": "high",
@@ -79,17 +91,14 @@ VOLATILITY_CLASS = {
     "THB_ADA": "high",
     "THB_DOT": "high",
     "THB_LINK": "high",
-    "THB_DOGE": "high",  # DOGE is high vol
+    "THB_DOGE": "high",
 }
 
-# Bitkub Trading Fees
-# https://www.bitkub.com/fee
-# Maker: 0.25%, Taker: 0.25% (same for crypto)
-# Round trip = 0.50% total (buy + sell)
-BITKUB_FEE_PER_SIDE = 0.0025  # 0.25%
-BITKUB_FEE_ROUND_TRIP = 0.0050  # 0.50%
+# Binance Thailand trading fees: 0.1% per side, 0.2% round trip.
+BINANCE_TH_FEE_PER_SIDE = 0.001
+BINANCE_TH_FEE_ROUND_TRIP = 0.002
 
-DEFAULT_MIN_ORDER_THB = 15.0      # Bitkub minimum
+DEFAULT_MIN_ORDER_QUOTE = 15.0
 MIN_ORDER_BUFFER = 1.10   # 10% safety buffer
 
 # Default SL/TP percentages by volatility class
@@ -99,6 +108,35 @@ DEFAULT_SL_TP = {
     "low": {"stop_loss_pct": -2.0, "take_profit_pct": 4.0},    # BTC: tighter pair-specific default profile
     "high": {"stop_loss_pct": -4.0, "take_profit_pct": 7.0},   # ALT: wider for volatile altcoins  net R:R≈1.63
 }
+
+
+# --- NEW: SPEC_04 — Per-mode ATR profile -----------------------------------
+# Each trading mode uses its own ATR multiplier so SL/TP distance scales with
+# the mode's hold time and noise tolerance:
+#   scalping   → 1.2 (tight, small TP)
+#   trend_only → 1.8 (wider, room for swings)
+#   standard   → 1.5 (middle of the road)
+# Falls back to RiskConfig.atr_multiplier (2.5) when no mode is supplied so
+# legacy callers stay backward compatible.
+MODE_ATR_PROFILES: Dict[str, Dict[str, float]] = {
+    "scalping":   {"atr_multiplier": 1.2, "atr_period": 14},
+    "trend_only": {"atr_multiplier": 1.8, "atr_period": 14},
+    "standard":   {"atr_multiplier": 1.5, "atr_period": 14},
+}
+
+
+def get_atr_profile(mode: Optional[str]) -> Dict[str, float]:
+    """Return ATR profile (multiplier + period) for a trading mode.
+
+    Unknown / missing modes fall back to the conservative defaults
+    (multiplier=2.5, period=14) so callers can use this helper safely
+    without pre-validating ``mode``.
+    """
+    key = str(mode or "").strip().lower()
+    profile = MODE_ATR_PROFILES.get(key)
+    if profile is None:
+        return {"atr_multiplier": 2.5, "atr_period": 14}
+    return dict(profile)
 
 
 def classify_pair_volatility(symbol: str) -> str:
@@ -211,7 +249,7 @@ class RiskConfig:
     max_open_positions: int = 5
     max_daily_trades: int = 10
     cool_down_minutes: int = 5
-    min_order_amount: float = DEFAULT_MIN_ORDER_THB
+    min_order_amount: float = DEFAULT_MIN_ORDER_QUOTE
     # ATR-based SL settings
     atr_multiplier: float = 2.5               # SL distance = ATR * this
     atr_period: int = 14                      # ATR lookback period
@@ -255,7 +293,7 @@ class RiskConfig:
             max_open_positions=data.get("trading", {}).get("max_open_positions", 5),
             max_daily_trades=data.get("trading", {}).get("max_daily_trades", 10),
             cool_down_minutes=data.get("trading", {}).get("cool_down_minutes", 5),
-            min_order_amount=data.get("trading", {}).get("min_order_amount", DEFAULT_MIN_ORDER_THB),
+            min_order_amount=data.get("trading", {}).get("min_order_amount", DEFAULT_MIN_ORDER_QUOTE),
         )
 
     def to_file(self, path: str):
@@ -293,7 +331,7 @@ class RiskConfig:
 class RiskCheckResult:
     allowed: bool
     reason: str = ""
-    suggested_size: float = 0.0  # THB amount to trade
+    suggested_size: float = 0.0  # quote amount to trade
 
 
 class RiskManager:
@@ -512,7 +550,7 @@ class RiskManager:
             
             # risk_based_size is in base asset units (e.g. BTC)
             risk_based_quantity = risk_amount / risk_per_unit
-            # Convert back to quote asset (e.g. USD/THB) for the position size
+            # Convert back to quote asset for the position size
             suggested_investment = risk_based_quantity * entry_price
             suggested = min(suggested_investment, hard_cap)
             
@@ -533,20 +571,20 @@ class RiskManager:
             # Align with hard_cap / max_position_per_trade_pct (not a fixed 20%)
             if min_viable > hard_cap:
                 reason = (
-                    f"Portfolio too small for minimum order: min_viable={min_viable:.2f} THB "
-                    f"> max position cap {hard_cap:.2f} THB "
+                    f"Portfolio too small for minimum order: min_viable={min_viable:.2f} quote "
+                    f"> max position cap {hard_cap:.2f} quote "
                     f"({self.config.max_position_per_trade_pct:.1f}% of portfolio)"
                 )
                 _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", reason)
                 return RiskCheckResult(False, reason)
             suggested = min_viable
             logger.info(
-                "[RiskMgr] Size adjusted to minimum viable: %.2f THB",
+                "[RiskMgr] Size adjusted to minimum viable: %.2f quote",
                 min_viable,
             )
 
         _diag("GLOBAL", "RiskMgr:PositionSize", "PASS",
-              f"Position size approved: {suggested:.2f} THB")
+              f"Position size approved: {suggested:.2f} quote")
         return RiskCheckResult(True, "Position size OK", round(suggested, 2))
 
     def validate_risk_reward(
@@ -613,6 +651,7 @@ class RiskManager:
         atr_value: float,
         direction: str = "long",
         risk_reward_ratio: float = 2.0,
+        mode: Optional[str] = None,   # --- NEW: SPEC_04 — per-mode ATR multiplier
     ) -> tuple[float, float]:
         """
         Calculate SL and TP prices purely from ATR.
@@ -624,6 +663,10 @@ class RiskManager:
             atr_value: Current ATR value
             direction: 'long' only for spot mode
             risk_reward_ratio: TP distance = SL distance * this ratio
+            mode: Optional trading mode ("scalping" | "trend_only" | "standard").
+                  When provided and known, the multiplier is taken from
+                  MODE_ATR_PROFILES[mode] instead of self.config.atr_multiplier.
+                  Unknown/None ⇒ fall back to RiskConfig (backward compatible).
 
         Returns:
             (stop_loss_price, take_profit_price)
@@ -632,7 +675,14 @@ class RiskManager:
         if str(direction or "long").lower() != "long":
             return 0.0, 0.0
 
-        sl_distance = precise_multiply(atr_value, self.config.atr_multiplier)
+        # --- NEW: SPEC_04 — pick multiplier from MODE_ATR_PROFILES if mode set
+        mode_key = str(mode or "").strip().lower()
+        if mode_key and mode_key in MODE_ATR_PROFILES:
+            multiplier = float(MODE_ATR_PROFILES[mode_key]["atr_multiplier"])
+        else:
+            multiplier = float(self.config.atr_multiplier)
+
+        sl_distance = precise_multiply(atr_value, multiplier)
         tp_distance = precise_multiply(sl_distance, risk_reward_ratio)
 
         sl = precise_round(precise_subtract(entry_price, sl_distance), 6)
@@ -804,8 +854,8 @@ def check_pair_correlation(
     the trade is blocked to avoid concentrated directional exposure.
 
     Args:
-        candidate_symbol: THB_XXX pair to evaluate.
-        open_symbols: List of THB_XXX pairs currently held.
+        candidate_symbol: trading pair to evaluate.
+        open_symbols: List of trading pairs currently held.
         db: Database instance with ``get_candles(symbol, interval, limit)``.
         threshold: Correlation coefficient above which the trade is blocked (0.0-1.0).
         lookback_candles: Number of candles to compute correlation over.
@@ -866,3 +916,433 @@ def check_pair_correlation(
     except Exception as exc:
         logger.debug("Correlation check failed for %s: %s", candidate_symbol, exc)
         return RiskCheckResult(True, f"Correlation check skipped: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# --- NEW: SPEC_04 — Anti-Whipsaw guards (SLHoldGuard / ConfirmationGate /
+# slippage). These are stateless or lightly stateful helpers — they do NOT
+# replace any logic in RiskManager / calc_sl_tp_from_atr; they sit alongside
+# it and are invoked by trading_bot.py at the appropriate lifecycle hooks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class SLHoldGuard:
+    """Anti-immediate-SL guard.
+
+    After a position is opened, suppresses SL triggers for at least
+    ``MIN_HOLD_SECONDS[mode]`` seconds so noise spikes around the entry
+    fill cannot whipsaw the position out instantly.
+
+    All public methods are thread-safe — concurrent calls from the OMS
+    thread, monitor thread, and main loop are serialised through an
+    internal RLock.
+    """
+
+    MIN_HOLD_SECONDS: Dict[str, int] = {
+        "scalping":   30,    # 30 seconds
+        "trend_only": 300,   # 5 minutes
+        "standard":   60,    # 1 minute
+    }
+
+    def __init__(self) -> None:
+        self._entry_times: Dict[str, Dict[str, Any]] = {}
+        # RLock so get_status() can safely call is_sl_locked() if needed.
+        self._lock = threading.RLock()
+
+    # ── lifecycle hooks ────────────────────────────────────────────────
+
+    def register_entry(self, position_id: str, mode: str = "standard") -> None:
+        """Call immediately after a position is opened successfully."""
+        if not position_id:
+            return
+        normalized_mode = str(mode or "standard").strip().lower() or "standard"
+        with self._lock:
+            self._entry_times[str(position_id)] = {
+                "time": datetime.now(),
+                "mode": normalized_mode,
+            }
+        logger.debug(
+            "[SLHoldGuard] Registered position_id=%s mode=%s",
+            position_id, normalized_mode,
+        )
+
+    def cleanup(self, position_id: str) -> None:
+        """Call once the position is closed / no longer tracked."""
+        if not position_id:
+            return
+        with self._lock:
+            self._entry_times.pop(str(position_id), None)
+
+    # ── queries ────────────────────────────────────────────────────────
+
+    def is_sl_locked(self, position_id: str) -> bool:
+        """Return True while the SL is still suppressed for this position.
+
+        Returns False for unknown / cleaned-up positions so the caller's
+        SL logic can run as usual.
+        """
+        if not position_id:
+            return False
+        with self._lock:
+            entry = self._entry_times.get(str(position_id))
+        if not entry:
+            return False
+
+        mode = str(entry.get("mode", "standard"))
+        min_hold = self.MIN_HOLD_SECONDS.get(mode, 60)
+        elapsed = (datetime.now() - entry["time"]).total_seconds()
+        locked = elapsed < min_hold
+
+        if locked:
+            remaining = max(0.0, min_hold - elapsed)
+            logger.debug(
+                "[SLHoldGuard] %s locked for %.0fs more (mode=%s)",
+                position_id, remaining, mode,
+            )
+        return locked
+
+    def get_status(self) -> Dict[str, Dict[str, Any]]:
+        """Return per-position lock status snapshot for CLI/dashboard display."""
+        with self._lock:
+            now = datetime.now()
+            result: Dict[str, Dict[str, Any]] = {}
+            for pid, info in self._entry_times.items():
+                mode = str(info.get("mode", "standard"))
+                min_hold = self.MIN_HOLD_SECONDS.get(mode, 60)
+                age = (now - info["time"]).total_seconds()
+                result[pid] = {
+                    "mode": mode,
+                    "age_seconds": round(age, 2),
+                    "min_hold_seconds": min_hold,
+                    "locked": age < min_hold,
+                }
+            return result
+
+
+class ConfirmationGate:
+    """Wait for N closed candles to confirm a signal direction before entry.
+
+    Prevents entry on intra-bar noise spikes by requiring the next ``N``
+    candles (per mode) to close in the signal direction relative to the
+    candle on which the signal fired.
+    """
+
+    CONFIRMATION_CANDLES: Dict[str, int] = {
+        "scalping":   1,   # need 1 candle close above signal
+        "trend_only": 2,   # need 2 candle closes
+        "standard":   1,
+    }
+
+    @staticmethod
+    def _close(candle: Any) -> float:
+        """Best-effort extraction of a close price from dict, object, or kline row."""
+        if candle is None:
+            return 0.0
+        if isinstance(candle, dict):
+            value = candle.get("close", candle.get("c", 0))
+        elif isinstance(candle, (list, tuple)) and len(candle) > 4:
+            value = candle[4]
+        else:
+            value = getattr(candle, "close", getattr(candle, "c", 0))
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def is_confirmed(
+        candles: List[Any],
+        signal_side: str,
+        mode: str = "standard",
+    ) -> bool:
+        """Return True when the latest candles confirm ``signal_side``.
+
+        Args:
+            candles: chronological list of candles. Each entry can be a dict
+                with a 'close' (or 'c') key, or any object exposing a
+                ``.close``/``.c`` attribute. The first usable element from
+                the tail of the slice is treated as the "signal candle"; the
+                next ``N`` closes must all be in the signal direction.
+            signal_side: "BUY" or "SELL".
+            mode: trading mode key into CONFIRMATION_CANDLES.
+
+        Returns:
+            True if confirmed (entry allowed), False otherwise.
+        """
+        n = ConfirmationGate.CONFIRMATION_CANDLES.get(
+            str(mode or "standard").strip().lower(), 1
+        )
+        if not candles or len(candles) < n + 1:
+            return False
+
+        recent = candles[-(n + 1):]
+        signal_close = ConfirmationGate._close(recent[0])
+        confirm_closes = [ConfirmationGate._close(c) for c in recent[1:]]
+
+        if signal_close <= 0 or any(c <= 0 for c in confirm_closes):
+            # Treat malformed data as "not yet confirmed" — fail safe.
+            logger.debug(
+                "[ConfirmationGate] Skipping confirmation — non-positive close "
+                "(signal=%.6f, confirm=%s)", signal_close, confirm_closes,
+            )
+            return False
+
+        side_upper = str(signal_side or "").strip().upper()
+        if side_upper == "BUY":
+            confirmed = all(c > signal_close for c in confirm_closes)
+        elif side_upper == "SELL":
+            confirmed = all(c < signal_close for c in confirm_closes)
+        else:
+            return False
+
+        if not confirmed:
+            logger.debug(
+                "[ConfirmationGate] %s not confirmed yet (need %d candle "
+                "close(s) %s %.6f, got %s)",
+                side_upper, n,
+                "above" if side_upper == "BUY" else "below",
+                signal_close, confirm_closes,
+            )
+        return confirmed
+
+
+# --- NEW: SPEC_04 — Slippage guard ----------------------------------------
+# Per-mode tolerance for the price drift between the signal candle's close
+# and the live price seen at entry. If exceeded → skip the entry instead of
+# chasing the move.
+MAX_SLIPPAGE_PCT: Dict[str, float] = {
+    "scalping":   0.15,   # 0.15% max
+    "trend_only": 0.30,
+    "standard":   0.20,
+}
+
+
+def check_slippage(
+    signal_price: float,
+    current_price: float,
+    mode: str = "standard",
+) -> bool:
+    """Return True if slippage exceeds the per-mode tolerance (skip entry).
+
+    Args:
+        signal_price: price observed when the signal fired.
+        current_price: price at which the entry would actually be placed.
+        mode: trading mode key into MAX_SLIPPAGE_PCT.
+
+    Returns:
+        True  → slippage too high, caller should skip entry.
+        False → slippage acceptable, caller may proceed.
+    """
+    try:
+        s = float(signal_price)
+        c = float(current_price)
+    except (TypeError, ValueError):
+        return False
+    if s <= 0:
+        return False
+
+    slippage_pct = abs(c - s) / s * 100.0
+    max_slip = float(MAX_SLIPPAGE_PCT.get(
+        str(mode or "standard").strip().lower(), 0.20
+    ))
+    if slippage_pct > max_slip:
+        logger.info(
+            "[Slippage] Skip entry: slippage=%.3f%% > max=%.3f%% "
+            "(mode=%s, signal=%.6f, current=%.6f)",
+            slippage_pct, max_slip, mode, s, c,
+        )
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# --- NEW: PreTradeGate ---
+# Inspired by Freqtrade + Nate Herk's "buy-side gate": every order must pass
+# an explicit checklist before it is sent to the exchange. Failures are logged
+# with a precise reason — no silent skips, no "hope" overrides.
+#
+# PreTradeGate is intentionally stateless. It CALLS the existing RiskManager
+# helpers (check_daily_loss_limit / check_cooldown / _get_current_drawdown_pct)
+# and the MAX_SLIPPAGE_PCT table rather than reimplementing them, so the
+# source of truth for risk policy stays in RiskManager.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class GateCheckResult:
+    """Outcome of a :meth:`PreTradeGate.check_all` invocation.
+
+    Attributes:
+        passed: True only if every entry in ``checks`` passed.
+        checks: full audit trail — one dict per check with the keys
+            ``{"name": str, "passed": bool, "reason": str}``.
+        failed_checks: names of any failed checks, in execution order.
+    """
+
+    passed: bool
+    checks: List[Dict[str, Any]]
+    failed_checks: List[str]
+
+    def summary(self) -> str:
+        if self.passed:
+            return f"\u2705 All {len(self.checks)} gate checks passed"
+        return f"\u274c BLOCKED \u2014 failed: {', '.join(self.failed_checks)}"
+
+
+class PreTradeGate:
+    """Explicit pre-trade checklist run before every order.
+
+    Every check below MUST pass; if even one fails the trade is rejected and
+    the failure reason is surfaced through :meth:`GateCheckResult.summary` so
+    the caller can log it and emit a SIGNAL_FLOW diagnostic line.
+
+    The gate is stateless: it relies on the supplied RiskManager and config
+    for all policy decisions, and it never mutates RiskManager state on its
+    own (any side effects come from the existing RiskManager methods it
+    delegates to, e.g. the daily-counter rollover inside
+    ``check_daily_loss_limit``).
+    """
+
+    def check_all(
+        self,
+        symbol: str,
+        side: str,                        # "BUY" | "SELL"
+        proposed_amount_usdt: float,      # order size in quote (USDT)
+        portfolio_value: float,
+        open_positions_count: int,
+        daily_trades_today: int,
+        current_price: float,
+        signal_price: float,              # price observed when signal fired
+        signal_confidence: float,         # 0.0 – 1.0
+        mode: str,
+        config: Dict[str, Any],
+        risk_manager: "RiskManager",
+    ) -> GateCheckResult:
+        """Run all gate checks and return an aggregated :class:`GateCheckResult`.
+
+        ``side`` is currently informational (the bot is spot-only / long-only)
+        but is kept in the signature so future short logic can branch on it
+        without breaking the public API.
+        """
+        checks: List[Dict[str, Any]] = []
+
+        # Normalise mode once for any per-mode lookups (config keys + slippage).
+        mode_key = str(mode or "standard").strip().lower() or "standard"
+
+        # ── 1. Portfolio value ─────────────────────────────────────
+        min_balance = float(
+            config.get("portfolio", {}).get("min_balance_threshold", 100)
+        )
+        checks.append({
+            "name": "Portfolio above minimum",
+            "passed": portfolio_value >= min_balance,
+            "reason": f"portfolio={portfolio_value:.2f} min={min_balance:.2f}",
+        })
+
+        # ── 2. Max open positions ──────────────────────────────────
+        max_pos = int(config.get("risk", {}).get("max_open_positions", 6))
+        checks.append({
+            "name": "Max positions not reached",
+            "passed": open_positions_count < max_pos,
+            "reason": f"open={open_positions_count} max={max_pos}",
+        })
+
+        # ── 3. Max daily trades ────────────────────────────────────
+        max_daily = int(config.get("risk", {}).get("max_daily_trades", 50))
+        checks.append({
+            "name": "Daily trade limit",
+            "passed": daily_trades_today < max_daily,
+            "reason": f"today={daily_trades_today} max={max_daily}",
+        })
+
+        # ── 4. Daily loss limit (delegated to RiskManager) ─────────
+        daily_check = risk_manager.check_daily_loss_limit(portfolio_value)
+        checks.append({
+            "name": "Daily loss limit",
+            "passed": bool(daily_check.allowed),
+            "reason": daily_check.reason or ("OK" if daily_check.allowed else "blocked"),
+        })
+
+        # ── 5. Position size ≤ max % of portfolio ──────────────────
+        max_pos_pct = float(
+            config.get("risk", {}).get("max_position_per_trade_pct", 15)
+        )
+        pos_pct = (
+            (proposed_amount_usdt / portfolio_value * 100.0)
+            if portfolio_value > 0 else 0.0
+        )
+        checks.append({
+            "name": "Position size within limit",
+            "passed": pos_pct <= max_pos_pct,
+            "reason": f"size={pos_pct:.1f}% max={max_pos_pct:.1f}%",
+        })
+
+        # ── 6. Minimum order size (Binance.th min ≈ $10) ───────────
+        min_order = float(
+            config.get("trading", {}).get("min_order_amount", 10.0)
+        )
+        checks.append({
+            "name": "Above minimum order size",
+            "passed": proposed_amount_usdt >= min_order,
+            "reason": f"order={proposed_amount_usdt:.2f} min={min_order:.2f}",
+        })
+
+        # ── 7. Cooldown between trades (delegated to RiskManager) ──
+        cooling = bool(risk_manager.check_cooldown())
+        checks.append({
+            "name": "Cooldown not active",
+            "passed": not cooling,
+            "reason": "Cooldown active" if cooling else "OK",
+        })
+
+        # ── 8. Signal confidence above mode threshold ──────────────
+        mode_profiles = config.get("mode_indicator_profiles", {}) or {}
+        min_conf = float(
+            (mode_profiles.get(mode_key) or {}).get("min_confidence", 0.30)
+        )
+        try:
+            conf_val = float(signal_confidence)
+        except (TypeError, ValueError):
+            conf_val = 0.0
+        checks.append({
+            "name": "Signal confidence threshold",
+            "passed": conf_val >= min_conf,
+            "reason": f"confidence={conf_val:.3f} min={min_conf:.3f}",
+        })
+
+        # ── 9. Slippage guard (skipped if no valid signal price) ───
+        try:
+            sig_p = float(signal_price)
+        except (TypeError, ValueError):
+            sig_p = 0.0
+        try:
+            cur_p = float(current_price)
+        except (TypeError, ValueError):
+            cur_p = 0.0
+        if sig_p > 0:
+            slippage_pct = abs(cur_p - sig_p) / sig_p * 100.0
+            max_slip = float(MAX_SLIPPAGE_PCT.get(mode_key, 0.20))
+            checks.append({
+                "name": "Slippage within limit",
+                "passed": slippage_pct <= max_slip,
+                "reason": f"slippage={slippage_pct:.3f}% max={max_slip:.3f}%",
+            })
+
+        # ── 10. Drawdown limit (delegated to RiskManager) ──────────
+        drawdown_pct = float(risk_manager._get_current_drawdown_pct(portfolio_value))
+        max_dd = float(
+            config.get("risk", {}).get("max_drawdown_threshold_pct", 12.0)
+        )
+        checks.append({
+            "name": "Drawdown within limit",
+            "passed": drawdown_pct < max_dd,
+            "reason": f"drawdown={drawdown_pct:.1f}% max={max_dd:.1f}%",
+        })
+
+        # ── Aggregate ──────────────────────────────────────────────
+        failed = [c["name"] for c in checks if not c["passed"]]
+        return GateCheckResult(
+            passed=len(failed) == 0,
+            checks=checks,
+            failed_checks=failed,
+        )

@@ -8,7 +8,7 @@ Commands:
 - /status         : Show current trading status, open orders, balances
 - /pairs          : Show configured trading pairs
 - /kill           : EMERGENCY STOP - requires inline button confirmation
-- /pnl            : P&L summary in THB
+- /pnl            : P&L summary in quote currency
 
 Usage (integrated into main.py):
   from telegram_bot import TelegramBotHandler
@@ -28,11 +28,6 @@ from typing import Optional, Dict, Any, List
 import requests
 
 from alerts import TelegramSender, escape_html
-
-try:
-    from bitkub_websocket import get_latest_ticker
-except Exception:  # pragma: no cover - websocket dependency can be absent in some envs
-    get_latest_ticker = None
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +53,42 @@ def no_keyboard() -> Dict[str, Any]:
 
 
 def _normalize_ticker_symbol(symbol: str) -> str:
-    """Normalize Bitkub ticker rows to the app's internal THB_BASE format."""
+    """Normalize exchange ticker rows to a known runtime symbol."""
     raw = str(symbol or "").strip().upper()
-    if not raw or "_" not in raw:
+    if not raw:
         return ""
-    base, quote = raw.split("_", 1)
+    if "_" in raw:
+        base, quote = raw.split("_", 1)
+        if quote == "THB":
+            return f"THB_{base}"
+        return raw
+    if raw.endswith("USDT"):
+        return raw
+    return ""
+
+
+def _extract_base_asset(symbol: str, quote_asset: str = "USDT") -> str:
+    raw = str(symbol or "").strip().upper()
+    quote = str(quote_asset or "USDT").strip().upper()
+    if not raw:
+        return ""
+    if raw.startswith("THB_"):
+        return raw.split("_", 1)[1]
+    if raw.endswith("_THB"):
+        return raw.split("_", 1)[0]
+    if quote and raw.endswith(quote):
+        return raw[: -len(quote)]
+    return raw
+
+
+def _build_pair(base_asset: str, quote_asset: str = "USDT") -> str:
+    base = str(base_asset or "").strip().upper()
+    quote = str(quote_asset or "USDT").strip().upper()
+    if not base:
+        return ""
     if quote == "THB":
         return f"THB_{base}"
-    return raw
+    return f"{base}{quote}"
 
 
 class TelegramBotHandler:
@@ -103,7 +126,7 @@ class TelegramBotHandler:
         self._lock = threading.Lock()
 
         self._pending_kill_msg_id: Optional[int] = None
-        self._base_assets = ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOT", "LINK", "DOGE", "MATIC"]
+        self._base_assets = ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOT", "LINK", "DOGE", "POL"]
         self._start_time = time.time()
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -286,7 +309,7 @@ class TelegramBotHandler:
         pairs = bot_status.get("trading_pairs") or self.pairs
 
         text = (
-            f"🤖 <b>Bitkub Trading Bot</b>\n"
+            f"🤖 <b>Binance Thailand Trading Bot</b>\n"
             f"{'─' * 20}\n"
             f"สถานะ  {status_emoji}\n"
             f"โหมด  {mode}\n"
@@ -302,7 +325,7 @@ class TelegramBotHandler:
         if degraded:
             text += (
                 f"\n\n⚠️ <b>Degraded Mode</b>\n"
-                f"{degraded_reason or 'Bitkub private API unavailable'}\n"
+                f"{degraded_reason or 'Exchange private API unavailable'}\n"
                 f"การเทรดถูกปิดใช้งานจนกว่าจะแก้ไข credentials"
             )
         self._send(text)
@@ -330,20 +353,35 @@ class TelegramBotHandler:
         api = self.app_ref.api_client
         return api.get_balances()
 
+    def _get_quote_asset(self) -> str:
+        config = getattr(self.app_ref, "config", {}) or {}
+        hybrid_cfg = (config.get("data", {}) or {}).get("hybrid_dynamic_coin_config", {}) or {}
+        quote = str(hybrid_cfg.get("quote_asset") or "").strip().upper()
+        if quote:
+            return quote
+        configured_pairs = list(self.pairs or [])
+        bot_ref = getattr(self.app_ref, "bot", None)
+        if bot_ref and hasattr(bot_ref, "get_status"):
+            try:
+                status_pairs = bot_ref.get_status().get("trading_pairs") or []
+                configured_pairs.extend(status_pairs)
+            except Exception:
+                pass
+        for pair in configured_pairs:
+            text = str(pair or "").upper()
+            if text.endswith("USDT"):
+                return "USDT"
+            if text.startswith("THB_") or text.endswith("_THB"):
+                return "THB"
+        return "USDT"
+
     def _get_cached_price(self, symbol: str) -> Optional[float]:
         """Fast price lookup that avoids network calls in Telegram /status."""
-        pair = f"THB_{symbol}"
-
-        if callable(get_latest_ticker):
-            try:
-                tick = get_latest_ticker(pair)
-                if tick and getattr(tick, "last", None) is not None:
-                    return float(tick.last)
-            except Exception as exc:
-                logger.debug("Telegram cached price lookup failed for %s: %s", pair, exc)
+        quote_asset = self._get_quote_asset()
+        pair = _build_pair(symbol, quote_asset)
 
         cache = getattr(self.app_ref, "_cli_price_cache", {}) or {}
-        cached = cache.get(pair)
+        cached = cache.get(pair) or cache.get(f"THB_{str(symbol or '').upper()}")
         if isinstance(cached, tuple) and cached:
             try:
                 return float(cached[0]) if cached[0] is not None else None
@@ -375,26 +413,27 @@ class TelegramBotHandler:
         if auth_degraded:
             text += (
                 f"\n⚠️ <b>Degraded Mode</b>\n"
-                f"{auth_reason or 'Bitkub private API unavailable'}\n"
+                f"{auth_reason or 'Exchange private API unavailable'}\n"
                 f"การเทรดถูกปิดใช้งาน\n"
             )
         else:
             try:
                 balances = self._get_status_balances()
+                quote_asset = self._get_quote_asset()
 
-                thb_balance = self._safe_balance_amount(balances.get("THB", {}))
-                total_value = thb_balance
+                quote_balance = self._safe_balance_amount(balances.get(quote_asset, {}))
+                total_value = quote_balance
 
                 holdings = []
                 for sym, bal in balances.items():
                     sym = str(sym).upper()
                     avail = self._safe_balance_amount(bal)
-                    if sym != "THB" and avail > 0.0001:
+                    if sym != quote_asset and avail > 0.0001:
                         price = self._get_cached_price(sym)
                         if price is not None and price > 0:
                             val = avail * price
                             total_value += val
-                            holdings.append(f"  {sym}  <code>{avail:.6f}</code>  ~{val:,.0f} THB")
+                            holdings.append(f"  {sym}  <code>{avail:.6f}</code>  ~{val:,.2f} {quote_asset}")
                         else:
                             holdings.append(f"  {sym}  <code>{avail:.6f}</code>  ~N/A")
 
@@ -405,13 +444,13 @@ class TelegramBotHandler:
 
                 text += (
                     f"\n<b>พอร์ต</b>\n"
-                    f"เงินสด  <code>{thb_balance:,.2f}</code> THB\n"
+                    f"เงินสด  <code>{quote_balance:,.2f}</code> {quote_asset}\n"
                 )
                 if holdings:
                     text += "\n".join(holdings) + "\n"
                 text += (
-                    f"รวม  <code>{total_value:,.2f}</code> THB\n"
-                    f"{pnl_emoji} PnL  <code>{pnl:+,.2f}</code> THB ({pnl_pct:+.2f}%)\n"
+                    f"รวม  <code>{total_value:,.2f}</code> {quote_asset}\n"
+                    f"{pnl_emoji} PnL  <code>{pnl:+,.2f}</code> {quote_asset} ({pnl_pct:+.2f}%)\n"
                 )
             except Exception as e:
                 logger.warning("Balance error: %s", e)
@@ -452,7 +491,8 @@ class TelegramBotHandler:
 
 
     def _cmd_pnl(self):
-        """Show detailed P&L summary from closed trades in THB."""
+        """Show detailed P&L summary from closed trades in quote currency."""
+        quote_asset = self._get_quote_asset()
         db_path = self.app_ref.config.get("database", {}).get("db_path", "crypto_bot.db")
         if not os.path.exists(db_path):
             self._send("❌ ไม่พบฐานข้อมูล")
@@ -500,23 +540,23 @@ class TelegramBotHandler:
             "",
             f"<b>ตลอดกาล</b>",
             f"  จำนวน  {total_trades} เที่ยว",
-            f"  ผลลัพธ์  <code>{total_pnl:+,.2f}</code> THB",
-            f"  ค่าธรรมเนียม  <code>{total_fees:,.2f}</code> THB",
+            f"  ผลลัพธ์  <code>{total_pnl:+,.2f}</code> {quote_asset}",
+            f"  ค่าธรรมเนียม  <code>{total_fees:,.2f}</code> {quote_asset}",
             f"  สถิติ  {wins}W / {losses}L ({win_rate:.1f}%)",
             "",
             f"<b>วันนี้</b>",
             f"  จำนวน  {today_trades} เที่ยว",
-            f"  ผลลัพธ์  <code>{today_pnl:+,.2f}</code> THB",
+            f"  ผลลัพธ์  <code>{today_pnl:+,.2f}</code> {quote_asset}",
         ]
         if recent:
             lines.append("")
             lines.append("<b>10 รายการล่าสุด</b>")
             lines.append("─" * 20)
             for sym, side, pnl, pnl_pct, trigger, _closed_at in recent:
-                coin = sym.replace("THB_", "") if sym else sym
+                coin = _extract_base_asset(sym, quote_asset) if sym else sym
                 pnl_e = "🟢" if (pnl or 0) >= 0 else "🔴"
                 trigger_str = f" [{trigger}]" if trigger else ""
-                lines.append(f"{pnl_e} {coin}  <code>{pnl:+,.0f}</code> THB  ({pnl_pct:+.1f}%){trigger_str}")
+                lines.append(f"{pnl_e} {coin}  <code>{pnl:+,.2f}</code> {quote_asset}  ({pnl_pct:+.1f}%){trigger_str}")
 
         lines.extend(["", "─" * 20])
         lines.append(f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
@@ -579,10 +619,9 @@ class TelegramBotHandler:
                 balances = {}
             for pair in pairs_to_check:
                 try:
-                    parts = pair.upper().split("_")
-                    if len(parts) != 2:
+                    base = _extract_base_asset(pair, self._get_quote_asset())
+                    if not base:
                         continue
-                    base = parts[1]
                     amt = float(balances.get(base, 0))
                     if amt > 0.00001:
                         r = api.place_ask(symbol=pair, amount=amt, rate=0, order_type="market")

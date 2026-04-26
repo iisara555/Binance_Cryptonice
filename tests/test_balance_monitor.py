@@ -23,14 +23,14 @@ def test_detect_fiat_deposit_and_withdrawal_events(tmp_path):
     alert_system = Mock()
     monitor = _build_monitor(tmp_path, alert_system=alert_system)
 
-    balances = {"THB": {"available": 12_500.0, "reserved": 0.0, "total": 12_500.0}}
+    balances = {"USDT": {"available": 12_500.0, "reserved": 0.0, "total": 12_500.0}}
     deposits = [{"txn_id": "dep-1", "status": "complete", "amount": "5000", "time": "2024-01-01T10:00:00Z"}]
     withdrawals = [{"txn_id": "wd-1", "status": "complete", "amount": "1500", "time": "2024-01-01T11:00:00Z"}]
 
     events = monitor._detect_fiat_events(deposits, withdrawals, balances)
 
     assert [event.event_type for event in events] == ["DEPOSIT", "WITHDRAWAL"]
-    assert [event.coin for event in events] == ["THB", "THB"]
+    assert [event.coin for event in events] == ["USDT", "USDT"]
     assert [event.amount for event in events] == [5000.0, 1500.0]
     assert all(event.balance == 12_500.0 for event in events)
 
@@ -83,7 +83,7 @@ def test_detect_crypto_withdrawal_lifecycle(tmp_path):
 def test_first_poll_bootstraps_existing_history_without_emitting_events(tmp_path):
     monitor = _build_monitor(tmp_path)
     monitor.api_client.get_balances.return_value = {
-        "THB": {"available": 100.0, "reserved": 0.0, "total": 100.0},
+        "USDT": {"available": 100.0, "reserved": 0.0, "total": 100.0},
         "BTC": {"available": 0.25, "reserved": 0.0, "total": 0.25},
     }
     monitor.api_client.get_fiat_deposit_history.return_value = [
@@ -128,7 +128,7 @@ def test_first_poll_bootstraps_existing_history_without_emitting_events(tmp_path
 def test_second_poll_emits_only_new_history_after_bootstrap(tmp_path):
     monitor = _build_monitor(tmp_path)
     monitor.api_client.get_balances.return_value = {
-        "THB": {"available": 500.0, "reserved": 0.0, "total": 500.0}
+        "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}
     }
     monitor.api_client.get_crypto_deposit_history.return_value = {"items": []}
     monitor.api_client.get_crypto_withdraw_history.return_value = {"items": []}
@@ -160,7 +160,7 @@ def test_second_poll_emits_only_new_history_after_bootstrap(tmp_path):
 def test_first_poll_can_emit_existing_history_when_bootstrap_disabled(tmp_path):
     monitor = _build_monitor(tmp_path, config={"bootstrap_history_on_startup": False})
     monitor.api_client.get_balances.return_value = {
-        "THB": {"available": 500.0, "reserved": 0.0, "total": 500.0}
+        "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}
     }
     monitor.api_client.get_fiat_deposit_history.return_value = [
         {"txn_id": "dep-old", "status": "complete", "amount": "1000", "time": "2022-01-01T00:00:00Z"}
@@ -183,17 +183,17 @@ def test_threshold_alerts_only_repeat_after_recovery(tmp_path):
         tmp_path,
         alert_system=alert_system,
         config={
-            "thb_min_threshold": 500.0,
+            "quote_min_threshold": 500.0,
             "coin_min_thresholds": {"BTC": 0.01},
         },
     )
 
     low_balances = {
-        "THB": {"available": 100.0, "reserved": 0.0, "total": 100.0},
+        "USDT": {"available": 100.0, "reserved": 0.0, "total": 100.0},
         "BTC": {"available": 0.001, "reserved": 0.0, "total": 0.001},
     }
     healthy_balances = {
-        "THB": {"available": 1_000.0, "reserved": 0.0, "total": 1_000.0},
+        "USDT": {"available": 1_000.0, "reserved": 0.0, "total": 1_000.0},
         "BTC": {"available": 0.02, "reserved": 0.0, "total": 0.02},
     }
 
@@ -229,12 +229,12 @@ def test_poll_once_stops_dispatch_after_callback_requests_shutdown(tmp_path):
     seen_events = []
 
     def on_event(event, state):
-        seen_events.append((event.transaction_id, state["balances"]["THB"]["available"]))
+        seen_events.append((event.transaction_id, state["balances"]["USDT"]["available"]))
         monitor.stop()
 
     monitor = _build_monitor(tmp_path, on_event=on_event, config={"bootstrap_history_on_startup": False})
     monitor.api_client.get_balances.return_value = {
-        "THB": {"available": 500.0, "reserved": 0.0, "total": 500.0}
+        "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}
     }
     monitor.api_client.get_fiat_deposit_history.return_value = [
         {"txn_id": "dep-1", "status": "complete", "amount": "100", "time": "2024-01-01T00:00:00Z"},

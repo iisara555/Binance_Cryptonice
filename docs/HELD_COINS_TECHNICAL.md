@@ -28,6 +28,18 @@
 - keep held assets in scope แม้ quote balance จะต่ำ
 - hot reload pair list ได้โดยไม่ restart เมื่อ config JSON เปลี่ยน
 
+current whitelist profile:
+
+- `BTC`
+- `ETH`
+- `BNB`
+- `SOL`
+- `XRP`
+- `ADA`
+- `DOGE`
+- `LINK`
+- `MATIC`
+
 จุด config ที่เกี่ยวข้อง:
 
 ```yaml

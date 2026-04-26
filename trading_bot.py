@@ -16,6 +16,7 @@ Also includes:
 
 from __future__ import annotations
 
+import sys
 import time
 import logging
 import threading
@@ -28,12 +29,13 @@ import os
 
 from signal_generator import SignalGenerator, AggregatedSignal
 from trade_executor import TradeExecutor, ExecutionPlan, OrderSide, OrderResult
-from risk_management import RiskManager, resolve_effective_sl_tp_percentages
+from risk_management import ConfirmationGate, PreTradeGate, RiskManager, SLHoldGuard, resolve_effective_sl_tp_percentages
 from indicators import calculate_atr, calculate_adx
-from api_client import BitkubClient, FatalAuthException
+from api_client import BinanceThClient, BinanceAuthException
 from balance_monitor import BalanceEvent, BalanceMonitor
 from database import get_database
-from helpers import calc_net_pnl, normalize_side_value
+from helpers import calc_net_pnl, extract_base_asset, normalize_side_value
+from minimal_roi import build_roi_tables, compute_net_profit_pct
 from state_management import TradeLifecycleState, TradeStateManager, TradeStateSnapshot
 from strategy_base import MarketCondition
 from trading.execution_runtime import ExecutionRuntimeDeps, ExecutionRuntimeHelper
@@ -50,8 +52,8 @@ from trading.orchestrator import BotMode, SignalSource, TradeDecision
 # Type-checking imports (Pylance static analysis — not executed at runtime)
 if TYPE_CHECKING:
     from monitoring import MonitoringService as _MonitoringServiceType
-    from bitkub_websocket import BitkubWebSocket as _BitkubWebSocketType
-    from bitkub_websocket import PriceTick as _PriceTickType
+    _BitkubWebSocketType = Any
+    _PriceTickType = Any
 
 # Runtime monitoring import (graceful fallback if module missing)
 try:
@@ -76,16 +78,30 @@ def _coerce_trade_float(val, default: float = 0.0) -> float:
         return default
 
 # WebSocket real-time price support
+_WEBSOCKET_BACKEND = "none"
+_WEBSOCKET_CLIENT_INSTALLED = False
 try:
-    from bitkub_websocket import get_websocket, stop_websocket, PriceTick, get_latest_ticker
+    import binance_websocket as _binance_ws_mod
+    from binance_websocket import get_websocket, stop_websocket, PriceTick, get_latest_ticker
+
     _WEBSOCKET_AVAILABLE = True
+    _WEBSOCKET_BACKEND = "binance_native"
+    _WEBSOCKET_CLIENT_INSTALLED = bool(getattr(_binance_ws_mod, "WEBSOCKET_RUNTIME_OK", False))
 except ImportError:
-    _WEBSOCKET_AVAILABLE = False
-    get_websocket = None
-    stop_websocket = None
-    PriceTick = None
-    get_latest_ticker = None
-    logger.warning("bitkub_websocket not available — falling back to REST polling")
+    try:
+        import bitkub_websocket as _bitkub_ws_mod
+        from bitkub_websocket import get_websocket, stop_websocket, PriceTick, get_latest_ticker
+
+        _WEBSOCKET_AVAILABLE = True
+        _WEBSOCKET_BACKEND = "bitkub_legacy"
+        _WEBSOCKET_CLIENT_INSTALLED = bool(getattr(_bitkub_ws_mod, "WEBSOCKET_RUNTIME_OK", False))
+    except ImportError:
+        _WEBSOCKET_AVAILABLE = False
+        get_websocket = None
+        stop_websocket = None
+        PriceTick = None
+        get_latest_ticker = None
+        logger.warning("No websocket backend available — falling back to REST polling")
 
 
 class TradingBotOrchestrator:
@@ -99,7 +115,7 @@ class TradingBotOrchestrator:
     def __init__(
         self,
         config: Dict[str, Any],
-        api_client: BitkubClient,
+        api_client: BinanceThClient,
         signal_generator: SignalGenerator,
         risk_manager: RiskManager,
         executor: TradeExecutor,
@@ -112,7 +128,7 @@ class TradingBotOrchestrator:
 
         Args:
             config: Bot configuration dict from YAML/JSON
-            api_client: Bitkub API client
+            api_client: Binance Thailand API client
             signal_generator: SignalGenerator instance
             risk_manager: RiskManager instance
             executor: TradeExecutor instance
@@ -122,6 +138,9 @@ class TradingBotOrchestrator:
         """
         self.config = config
         self.api_client = api_client
+        configured_exchange = str(config.get("exchange") or config.get("exchange_name") or "").strip().lower()
+        api_base_url = str(getattr(api_client, "base_url", "") or "").lower()
+        self._binance_mode = configured_exchange.startswith("binance") or "binance" in api_base_url or not configured_exchange
         self.signal_generator = signal_generator
         self.risk_manager = risk_manager
         self.executor = executor
@@ -178,6 +197,20 @@ class TradingBotOrchestrator:
             "trend_following", "mean_reversion", "breakout", "scalping"
         ])
         self._active_strategy_mode = str(config.get("active_strategy_mode") or "standard").lower()
+        gate_cfg = dict(config.get("pre_trade_gate", {}) or {})
+        self._pre_trade_gate_enabled = bool(gate_cfg.get("enabled", True))
+        self._pre_trade_gate = PreTradeGate()
+        self._sl_hold_guard = SLHoldGuard()
+        roi_cfg = config.get("minimal_roi")
+        if not isinstance(roi_cfg, dict):
+            roi_cfg = {
+                "enabled": True,
+                "scalping": {"0": 0.03, "15": 0.015, "30": 0.008, "60": 0.004},
+                "standard": {"0": 0.04, "30": 0.02, "60": 0.01, "120": 0.004},
+                "trend_only": {"0": 0.08, "120": 0.03, "360": 0.015, "720": 0.006},
+            }
+        self._minimal_roi_enabled = bool(roi_cfg.get("enabled", True))
+        self._minimal_roi_tables = build_roi_tables(roi_cfg) if self._minimal_roi_enabled else {}
         scalping_cfg = dict(self.strategies_config.get("scalping", {}) or {})
         self._scalping_mode_enabled = self._active_strategy_mode == "scalping"
         self._scalping_position_timeout_minutes = int(scalping_cfg.get("position_timeout_minutes", 30) or 30)
@@ -275,40 +308,61 @@ class TradingBotOrchestrator:
 
         # === WebSocket Real-time Prices ===
         self._ws_client: Optional[_BitkubWebSocketType] = None
-        self._ws_enabled: bool = config.get("websocket", {}).get("enabled", True)
-        if self._ws_enabled and _WEBSOCKET_AVAILABLE and self.trading_pairs:
-            try:
-                # Collect all symbols from data config
-                ws_symbols = [p.upper() for p in self.trading_pairs]
-                ws_symbols = list(dict.fromkeys(ws_symbols))  # dedupe, preserve order
-
-                ws = get_websocket(  # type: ignore[misc]
-                    symbols=ws_symbols,
-                    on_tick=self._on_ws_tick,
+        ws_cfg = config.get("websocket", {}) or {}
+        self._ws_import_ok: bool = bool(_WEBSOCKET_AVAILABLE and _WEBSOCKET_CLIENT_INSTALLED)
+        self._ws_enabled: bool = bool(ws_cfg.get("enabled", True))
+        websocket_cfg = dict(ws_cfg)
+        self._last_ws_start_attempt_at: float = 0.0
+        try:
+            self._ws_start_retry_interval_seconds = max(
+                5.0,
+                float(websocket_cfg.get("startup_retry_interval_seconds", 20.0) or 20.0),
+            )
+        except (TypeError, ValueError):
+            self._ws_start_retry_interval_seconds = 20.0
+        if self._ws_enabled and self._binance_mode and _WEBSOCKET_BACKEND != "binance_native":
+            logger.warning(
+                "Binance mode active but native Binance websocket backend is unavailable. "
+                "Runtime price checks will use Binance REST. "
+                "Ensure `binance_websocket.py` is on PYTHONPATH and run: pip install websocket-client"
+            )
+            self._ws_enabled = False
+        if self._ws_enabled and not self._ws_import_ok:
+            if _WEBSOCKET_AVAILABLE and not _WEBSOCKET_CLIENT_INSTALLED:
+                logger.warning(
+                    "WebSocket enabled but Python package `websocket-client` is missing for %s. "
+                    'Install: "%s" -m pip install websocket-client',
+                    sys.executable,
+                    sys.executable,
                 )
-                if ws is not None:
-                    self._ws_client = ws
-                logger.info(
-                    f"เชื่อมต่อ WebSocket สำเร็จ | เหรียญที่ติดตาม: {ws_symbols} | "
-                    f"url=wss://api.bitkub.com/websocket"
-                )
-            except Exception as e:
-                logger.error(f"เกิดข้อผิดพลาดในการเริ่มต้น WebSocket: {e}")
-                self._ws_enabled = False
-        else:
-            if not _WEBSOCKET_AVAILABLE:
-                logger.info("ไม่ได้เปิดใช้งาน WebSocket (ไม่พบโมดูลที่เกี่ยวข้อง)")
-            elif not self.trading_pairs:
-                logger.info("ไม่ได้เปิดใช้งาน WebSocket เพราะ Bitkub ไม่พบคู่เหรียญที่ถืออยู่")
             else:
-                logger.info("ปิดการใช้งาน WebSocket ในไฟล์คอนฟิก (disabled in config)")
+                logger.warning(
+                    "WebSocket enabled in config but no websocket backend could be imported. "
+                    "For Binance TH install: pip install websocket-client"
+                )
+            self._ws_enabled = False
+        elif self._ws_enabled and not self.trading_pairs:
+            logger.info(
+                "WebSocket enabled but there are no trading pairs yet; "
+                "streams will start after pairs exist (hybrid resolver / pair refresh)."
+            )
+        elif not self._ws_enabled:
+            logger.info("WebSocket disabled in config or due to exchange/backend compatibility")
+
+        if self._ws_enabled and self._ws_import_ok and self.trading_pairs:
+            started_ok = self._start_or_refresh_websocket(self.trading_pairs, reason="startup")
+            if not started_ok:
+                logger.warning(
+                    "WebSocket did not attach a client at startup (empty symbols or backend error); "
+                    "main loop will retry if enabled."
+                )
 
         logger.info(
             f"TradingBotOrchestrator initialized | "
             f"Mode: {self.mode.value} | "
             f"Pairs: {self.trading_pairs} | "
             f"Signal Source: {self.signal_source.value} | "
-            f"WebSocket: {'enabled' if self._ws_enabled else 'disabled'}"
+            f"WebSocket: {'enabled' if self._ws_enabled else 'disabled'} ({_WEBSOCKET_BACKEND})"
         )
 
         # M6 fix: per-position deduplication guard for WS SL/TP exit threads.
@@ -316,6 +370,7 @@ class TradingBotOrchestrator:
         # ticks would otherwise create hundreds of threads for the same position.
         self._ws_sltp_inflight: set = set()
         self._ws_sltp_inflight_lock = threading.Lock()
+        self._last_candle_backfill_attempt_at = 0.0
 
         # === Performance caches ===
         # Cache TTLs (seconds)
@@ -336,11 +391,11 @@ class TradingBotOrchestrator:
         self._prune_invalid_btc_positions()
         # Important startup order:
         # 1) prune DB ghosts
-        # 2) reconcile against Bitkub (in start())
+        # 2) reconcile against the active exchange (in start())
         # 3) sync OMS in-memory tracking from DB (after reconciliation)
 
     def _prune_invalid_btc_positions(self) -> None:
-        """Drop THB_BTC rows with impossible base size (any side) and zero-remaining ghosts.
+        """Drop BTC rows with impossible base size (any side) and zero-remaining ghosts.
 
         Invalid amount rows are not present in OMS memory (sync skips them), so pruning
         must hit SQLite directly, then clear zero-remaining rows.
@@ -348,9 +403,9 @@ class TradingBotOrchestrator:
         n_invalid = 0
         n_zero = 0
         try:
-            n_invalid = self.db.delete_positions_thb_btc_amount_over_limit(1.0)
+            n_invalid = self.db.delete_invalid_btc_amount_positions(1.0)
         except Exception as ex:
-            logger.error("[Startup] Failed to prune invalid THB_BTC amount positions: %s", ex)
+            logger.error("[Startup] Failed to prune invalid BTC amount positions: %s", ex)
         try:
             n_zero = self.db.delete_positions_zero_remaining()
         except Exception as ex:
@@ -449,8 +504,8 @@ class TradingBotOrchestrator:
         if helper is None:
             helper = PortfolioRuntimeHelper(
                 self,
-                websocket_available=_WEBSOCKET_AVAILABLE,
-                latest_ticker_getter=get_latest_ticker,
+                websocket_available=bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)),
+                latest_ticker_getter=get_latest_ticker if bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)) else None,
             )
             self._portfolio_runtime_helper = helper
         return helper
@@ -477,7 +532,7 @@ class TradingBotOrchestrator:
         self,
         balance_state: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
-        """Drop filled tracked positions whose base-asset balance is gone on Bitkub."""
+        """Drop filled tracked positions whose base-asset balance is gone on the exchange."""
         if not self.executor:
             return []
 
@@ -519,7 +574,7 @@ class TradingBotOrchestrator:
                 continue
 
             # Grace period: do not remove positions that were just created.
-            # Bitkub balance API / cache may lag behind a fresh fill.
+            # Exchange balance API / cache may lag behind a fresh fill.
             pos_ts = position.get("timestamp")
             if pos_ts is not None:
                 if isinstance(pos_ts, str):
@@ -532,7 +587,7 @@ class TradingBotOrchestrator:
                     if age_seconds < self._BALANCE_RECONCILE_GRACE_SECONDS:
                         continue
 
-            base_asset = symbol.split("_", 1)[1].upper()
+            base_asset = extract_base_asset(symbol)
             balance_total = self._extract_total_balance(snapshot, base_asset)
             tracked_amount = max(filled_amount, amount, remaining_amount, 0.0)
             dust_threshold = min(max(tracked_amount * 0.01, 1e-8), 1e-6)
@@ -549,10 +604,71 @@ class TradingBotOrchestrator:
                 balance_total,
             )
 
-        if removed_symbols and self._state_machine_enabled:
+        added_symbols = self._bootstrap_missing_positions_from_balance_state(snapshot)
+
+        if (removed_symbols or added_symbols) and self._state_machine_enabled:
             self._state_manager.sync_in_position_states(self.executor.get_open_orders())
 
         return removed_symbols
+
+    def _bootstrap_missing_positions_from_balance_state(
+        self,
+        balance_state: Optional[Dict[str, Any]] = None,
+        target_pairs: Optional[List[str]] = None,
+    ) -> List[str]:
+        if not self.executor:
+            return []
+
+        snapshot = balance_state or self.get_balance_state()
+        balances = (snapshot or {}).get("balances") or {}
+        if not balances:
+            return []
+
+        try:
+            source_pairs = target_pairs if target_pairs is not None else (self._get_trading_pairs() or [])
+        except Exception:
+            source_pairs = target_pairs or []
+
+        active_pairs = [
+            str(pair).strip().upper()
+            for pair in source_pairs
+            if str(pair).strip()
+        ]
+        if not active_pairs:
+            return []
+
+        try:
+            open_orders = self.executor.get_open_orders() or []
+        except Exception:
+            open_orders = []
+        if not isinstance(open_orders, list):
+            open_orders = []
+        tracked_symbols = {
+            str(position.get("symbol") or "").upper()
+            for position in open_orders
+            if isinstance(position, dict)
+            and str(position.get("symbol") or "").strip()
+            and normalize_side_value(position.get("side")) == "buy"
+        }
+
+        missing_pairs: List[str] = []
+        for pair in active_pairs:
+            if pair in tracked_symbols:
+                continue
+
+            base_asset = extract_base_asset(pair)
+            if self._extract_total_balance(snapshot, base_asset) <= 0:
+                continue
+
+            missing_pairs.append(pair)
+
+        if not missing_pairs:
+            return []
+
+        registered = self._bootstrap_held_positions(balances=balances, target_pairs=missing_pairs)
+        if registered:
+            logger.info("[Balance Reconcile] Bootstrapped held wallet positions into Position Book: %s", registered)
+        return registered
 
     def _preserve_bootstrap_position_from_balances(
         self,
@@ -568,7 +684,7 @@ class TradingBotOrchestrator:
             return False
 
         symbol = str(local_pos.get("symbol") or "").upper()
-        if "_" not in symbol:
+        if not symbol:
             return False
 
         side_value = local_pos.get("side", OrderSide.BUY)
@@ -576,7 +692,7 @@ class TradingBotOrchestrator:
         if side_str != "buy":
             return False
 
-        base_asset = symbol.split("_", 1)[1].upper()
+        base_asset = extract_base_asset(symbol)
         balance_payload = (balances or {}).get(base_asset, {}) if isinstance(balances, dict) else {}
         balance_total = self._extract_total_balance({"balances": {base_asset: balance_payload}}, base_asset)
         if balance_total <= 0:
@@ -1141,6 +1257,13 @@ class TradingBotOrchestrator:
             return
 
         try:
+            balance_config = dict(balance_config)
+            quote_asset = (
+                balance_config.get("quote_asset")
+                or (config.get("data", {}) or {}).get("hybrid_dynamic_coin_config", {}).get("quote_asset")
+                or "USDT"
+            )
+            balance_config.setdefault("quote_asset", str(quote_asset).upper())
             self._balance_monitor = BalanceMonitor(
                 api_client=self.api_client,
                 config=balance_config,
@@ -1162,8 +1285,14 @@ class TradingBotOrchestrator:
 
         if event.source == "crypto" and event.event_type == "DEPOSIT":
             asset = str(event.coin or "").upper()
-            pair = f"THB_{asset}" if asset else ""
-            tracked_position = self._find_tracked_position_by_symbol(pair)
+            pair = f"{asset}USDT" if asset else ""
+            legacy_pair = f"THB_{asset}" if asset else ""
+            pair_candidates = [candidate for candidate in (pair, legacy_pair) if candidate]
+            tracked_position = next(
+                (found for candidate in pair_candidates if (found := self._find_tracked_position_by_symbol(candidate))),
+                None,
+            )
+            display_pair = str((tracked_position or {}).get("symbol") or pair or legacy_pair)
             wallet_balance = self._extract_total_balance(balance_state, asset)
 
             if not tracked_position and pair:
@@ -1171,31 +1300,36 @@ class TradingBotOrchestrator:
                     active_pairs = {str(item).upper() for item in (self._get_trading_pairs() or [])}
                 except Exception:
                     active_pairs = set()
-                if pair in active_pairs and wallet_balance > 0:
+                bootstrap_pair = next((candidate for candidate in pair_candidates if candidate in active_pairs), pair)
+                if bootstrap_pair in active_pairs and wallet_balance > 0:
                     try:
-                        self._bootstrap_held_positions()
+                        self._bootstrap_missing_positions_from_balance_state(balance_state, target_pairs=[bootstrap_pair])
                     except Exception as exc:
-                        logger.error("Failed to bootstrap deposited position %s: %s", pair, exc, exc_info=True)
-                    tracked_position = self._find_tracked_position_by_symbol(pair)
+                        logger.error("Failed to bootstrap deposited position %s: %s", bootstrap_pair, exc, exc_info=True)
+                    tracked_position = next(
+                        (found for candidate in pair_candidates if (found := self._find_tracked_position_by_symbol(candidate))),
+                        None,
+                    )
+                    display_pair = str((tracked_position or {}).get("symbol") or bootstrap_pair)
 
             if tracked_position:
                 entry_price = _coerce_trade_float(tracked_position.get("entry_price"), 0.0)
                 if str(tracked_position.get("bootstrap_source") or "").strip():
                     message = (
                         f"External crypto deposit detected: {asset} +{event.amount:.8f} "
-                        f"(wallet {wallet_balance:.8f}). {pair} was registered into Position Book at "
+                        f"(wallet {wallet_balance:.8f}). {display_pair} was registered into Position Book at "
                         f"entry {entry_price:,.2f} via bootstrap tracking."
                     )
                 else:
                     message = (
                         f"External crypto deposit detected: {asset} +{event.amount:.8f} "
-                        f"(wallet {wallet_balance:.8f}). Tracked {pair} entry remains {entry_price:,.2f}; "
+                        f"(wallet {wallet_balance:.8f}). Tracked {display_pair} entry remains {entry_price:,.2f}; "
                         f"bot will not average-in this deposit automatically."
                     )
             else:
                 message = (
                     f"External crypto deposit detected: {asset} +{event.amount:.8f} "
-                    f"(wallet {wallet_balance:.8f}). No tracked {pair} position exists, so the deposit "
+                    f"(wallet {wallet_balance:.8f}). No tracked {display_pair} position exists, so the deposit "
                     f"was not auto-converted into a managed bot position."
                 )
 
@@ -1203,14 +1337,15 @@ class TradingBotOrchestrator:
             if self.send_alerts:
                 self._send_alert(message, to_telegram=True)
 
-        if event.coin == "THB":
+        quote_asset = str(getattr(getattr(self, "_balance_monitor", None), "quote_asset", "USDT") or "USDT").upper()
+        if str(event.coin or "").upper() == quote_asset:
             if event.event_type == "DEPOSIT":
-                self._clear_pause_reason("balance-monitor-thb-withdrawal")
-                logger.info("THB deposit detected | amount=%.2f | balance=%.2f", event.amount, event.balance)
+                self._clear_pause_reason("balance-monitor-quote-withdrawal")
+                logger.info("%s deposit detected | amount=%.2f | balance=%.2f", quote_asset, event.amount, event.balance)
             elif event.event_type.startswith("WITHDRAWAL"):
                 self._set_pause_reason(
-                    "balance-monitor-thb-withdrawal",
-                    f"THB withdrawal detected ({event.amount:,.2f} THB)",
+                    "balance-monitor-quote-withdrawal",
+                    f"{quote_asset} withdrawal detected ({event.amount:,.2f} {quote_asset})",
                 )
 
     def get_balance_state(self) -> Dict[str, Any]:
@@ -1258,12 +1393,12 @@ class TradingBotOrchestrator:
             self._last_candle_retention_cleanup_at = time.time()
 
         # ── HOTFIX FATAL-01: Ghost Orders Reconciliation ───────────────────
-        # Before starting the main loop, forcefully query Bitkub API for
+        # Before starting the main loop, forcefully query the exchange API for
         # real open orders and balances. Use the authoritative remote data to
         # overwrite local SQLite state, preventing ghost orders after crash.
         if self._auth_degraded:
             logger.warning(
-                "[Startup] Auth degraded mode active — skipping private Bitkub startup sync: %s",
+                "[Startup] Auth degraded mode active — skipping private exchange startup sync: %s",
                 self._auth_degraded_reason or "private API unavailable",
             )
         else:
@@ -1280,7 +1415,7 @@ class TradingBotOrchestrator:
         # ── H3/H4: Unblock OMS monitor after reconciliation is fully done ──
         # This MUST come after both _reconcile_on_startup() and
         # sync_open_orders_from_db() so the OMS always starts from a
-        # Bitkub-authoritative, DB-consistent state.
+        # Exchange-authoritative, DB-consistent state.
         self.executor.set_reconcile_complete()
 
         balance_monitor = getattr(self, "_balance_monitor", None)
@@ -1295,8 +1430,15 @@ class TradingBotOrchestrator:
     def _bootstrap_held_coin_history(self) -> None:
         self._get_startup_runtime_helper().bootstrap_held_coin_history()
 
-    def _bootstrap_held_positions(self) -> None:
-        self._get_startup_runtime_helper().bootstrap_held_positions()
+    def _bootstrap_held_positions(
+        self,
+        balances: Optional[Dict[str, Any]] = None,
+        target_pairs: Optional[List[str]] = None,
+    ) -> List[str]:
+        return self._get_startup_runtime_helper().bootstrap_held_positions(
+            balances=balances,
+            target_pairs=target_pairs,
+        )
 
     def _reconcile_on_startup(self):
         self._get_startup_runtime_helper().reconcile_on_startup()
@@ -1328,11 +1470,61 @@ class TradingBotOrchestrator:
                 logger.warning(f"เกิดข้อผิดพลาดในการหยุด OMS executor: {e}")
 
         logger.info("เทรดบอทหยุดการทำงานโดยสมบูรณ์")
+
+    def _start_or_refresh_websocket(self, symbols: List[str], reason: str = "runtime") -> bool:
+        if not (self._ws_enabled and self._ws_import_ok and get_websocket):
+            return False
+        normalized_symbols = [str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()]
+        if not normalized_symbols:
+            return False
+
+        self._last_ws_start_attempt_at = time.time()
+        ws = get_websocket(symbols=normalized_symbols, on_tick=self._on_ws_tick)  # type: ignore[misc]
+        if ws is None:
+            logger.warning(
+                "WebSocket backend returned no client (%s) | reason=%s | symbols=%s",
+                _WEBSOCKET_BACKEND,
+                reason,
+                normalized_symbols,
+            )
+            return False
+        self._ws_client = ws
+        logger.info(
+            "WebSocket ready (%s) | reason=%s | symbols=%s",
+            _WEBSOCKET_BACKEND,
+            reason,
+            normalized_symbols,
+        )
+        return True
+
+    def _ensure_websocket_started(self) -> None:
+        if not (self._ws_enabled and self._ws_import_ok and self.trading_pairs):
+            return
+        ws_client = getattr(self, "_ws_client", None)
+        if ws_client is not None:
+            try:
+                is_connected = getattr(ws_client, "is_connected", None)
+                if callable(is_connected) and bool(is_connected()):
+                    return
+            except Exception:
+                pass
+            raw_state = getattr(ws_client, "state", "")
+            state_text = str(getattr(raw_state, "value", raw_state) or "").strip().lower()
+            if state_text in {"connecting", "reconnecting", "connected"}:
+                return
+        now_ts = time.time()
+        if (now_ts - float(getattr(self, "_last_ws_start_attempt_at", 0.0) or 0.0)) < self._ws_start_retry_interval_seconds:
+            return
+        try:
+            self._start_or_refresh_websocket(list(self.trading_pairs), reason="retry")
+        except Exception as exc:
+            logger.warning("WebSocket retry start failed: %s", exc)
     
     def _main_loop(self):
         """Main trading loop - runs every interval_seconds."""
         while self.running:
             try:
+                self._ensure_websocket_started()
                 self._last_loop_time = datetime.now()
                 self._loop_count += 1
                 self._maybe_run_candle_retention_cleanup()
@@ -1343,12 +1535,12 @@ class TradingBotOrchestrator:
                 # Run one iteration
                 self._run_iteration()
 
-            except FatalAuthException as exc:
+            except BinanceAuthException as exc:
                 logger.critical("🚨 GRACEFUL SHUTDOWN: %s", exc.message)
                 alert_system = getattr(self, "alert_system", None)
                 if alert_system is not None:
                     try:
-                        title = "FATAL: Bitkub Auth Error 5" if getattr(exc, "code", None) == 5 else "FATAL: Bitkub Auth Error"
+                        title = "FATAL: Exchange Auth Error"
                         alert_system.send(
                             AlertLevel.CRITICAL,
                             format_fatal_auth_alert(exc.message, title=title),
@@ -1405,12 +1597,10 @@ class TradingBotOrchestrator:
         self.config["trading_pair"] = self.trading_pair
         self.config.setdefault("trading", {})["trading_pair"] = self.trading_pair
 
-        if self._ws_enabled and _WEBSOCKET_AVAILABLE:
+        if self._ws_enabled and self._ws_import_ok:
             try:
                 if normalized:
-                    ws = get_websocket(symbols=normalized, on_tick=self._on_ws_tick)  # type: ignore[misc]
-                    if ws is not None:
-                        self._ws_client = ws
+                    self._start_or_refresh_websocket(normalized, reason=f"pair_update:{reason}")
                 elif stop_websocket:
                     stop_websocket()
                     self._ws_client = None
@@ -1450,6 +1640,22 @@ class TradingBotOrchestrator:
             if skipped != getattr(self, "_last_candle_readiness_skipped", None):
                 logger.info("[Candle Guard] Skipping pairs without complete candle readiness: %s", list(skipped))
                 self._last_candle_readiness_skipped = skipped
+            collector = getattr(self, "collector", None)
+            should_backfill = bool(
+                allow_refresh
+                and collector is not None
+                and getattr(collector, "multi_timeframe_enabled", False)
+            )
+            if should_backfill:
+                now_ts = time.time()
+                if (now_ts - float(getattr(self, "_last_candle_backfill_attempt_at", 0.0) or 0.0)) >= 120.0:
+                    try:
+                        self._last_candle_backfill_attempt_at = now_ts
+                        collector._warm_pairs_backfill(list(skipped))
+                        self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}
+                        logger.info("[Candle Guard] Triggered warm backfill for lagging pairs: %s", list(skipped))
+                    except Exception as exc:
+                        logger.debug("Warm backfill trigger failed for %s: %s", list(skipped), exc)
         else:
             self._last_candle_readiness_skipped = ()
 
@@ -1643,9 +1849,9 @@ class TradingBotOrchestrator:
         if helper is None:
             helper = PositionMonitorHelper(
                 self,
-                websocket_available=_WEBSOCKET_AVAILABLE,
-                price_tick_available=PriceTick is not None,
-                latest_ticker_getter=get_latest_ticker,
+                websocket_available=bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)),
+                price_tick_available=bool(PriceTick is not None and getattr(self, "_ws_enabled", False)),
+                latest_ticker_getter=get_latest_ticker if bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)) else None,
             )
             self._position_monitor_helper = helper
         return helper
@@ -1679,6 +1885,35 @@ class TradingBotOrchestrator:
     def _advance_managed_trade_states(self) -> None:
         self._get_managed_lifecycle_helper().advance_managed_trade_states()
 
+    def _resolve_active_strategies_for_mode(self, mode: str) -> List[str]:
+        generator = getattr(self, "signal_generator", None)
+        if generator is None:
+            return []
+        try:
+            return list(generator.get_active_strategies_for_mode(mode))
+        except Exception as exc:
+            logger.debug("Failed to resolve active strategies for mode=%s: %s", mode, exc)
+            return []
+
+    def _is_entry_signal_confirmed(self, data: Any, signal_type: str, mode: str) -> bool:
+        if str(signal_type or "").lower() != "buy":
+            return True
+        if data is None or getattr(data, "empty", True):
+            return False
+        candles_required = ConfirmationGate.CONFIRMATION_CANDLES.get(
+            str(mode or "standard").strip().lower() or "standard",
+            1,
+        )
+        min_rows = candles_required + 1
+        if len(data) < min_rows:
+            return False
+        try:
+            closes = data["close"].astype(float).tail(min_rows).tolist()
+        except Exception:
+            return False
+        candles = [{"close": close_val} for close_val in closes]
+        return bool(ConfirmationGate.is_confirmed(candles, "BUY", mode=mode))
+
     def _build_signal_runtime_deps(self) -> SignalRuntimeDeps:
         return SignalRuntimeDeps(
             get_portfolio_state=self._get_portfolio_state,
@@ -1697,6 +1932,9 @@ class TradingBotOrchestrator:
             create_execution_plan_for_symbol=self._create_execution_plan_for_symbol,
             signal_source=self.signal_source,
             mode=self.mode,
+            active_strategy_mode=str(getattr(self, "_active_strategy_mode", "standard") or "standard"),
+            resolve_active_strategies=self._resolve_active_strategies_for_mode,
+            is_entry_signal_confirmed=self._is_entry_signal_confirmed,
             process_full_auto=self._process_full_auto,
             process_semi_auto=self._process_semi_auto,
             process_dry_run=self._process_dry_run,
@@ -1756,14 +1994,68 @@ class TradingBotOrchestrator:
             auth_degraded=bool(getattr(self, "_auth_degraded", False)),
             mode=self.mode,
             executed_today=self.__dict__.setdefault("_executed_today", []),
+            pre_trade_gate_check=self._check_pre_trade_gate,
+            register_sl_hold_entry=self._register_sl_hold_entry,
         )
+
+    def _check_pre_trade_gate(self, decision: TradeDecision, portfolio: Dict[str, Any]) -> bool:
+        if not bool(getattr(self, "_pre_trade_gate_enabled", True)):
+            return True
+        plan = getattr(decision, "plan", None)
+        if plan is None or getattr(plan, "close_position", False):
+            return True
+        if getattr(self, "risk_manager", None) is None:
+            return True
+
+        side_value = str(getattr(getattr(plan, "side", ""), "value", getattr(plan, "side", "")) or "").upper()
+        if side_value not in {"BUY", "SELL"}:
+            return True
+
+        current_price = float(getattr(plan, "entry_price", 0.0) or 0.0)
+        try:
+            from helpers import parse_ticker_last
+            ticker = self.api_client.get_ticker(plan.symbol)
+            current_price = float(parse_ticker_last(ticker) or current_price or 0.0)
+        except Exception:
+            pass
+
+        proposed_quote = float(getattr(plan, "amount", 0.0) or 0.0)
+        if side_value == "SELL":
+            proposed_quote *= max(float(getattr(plan, "entry_price", 0.0) or current_price or 0.0), 0.0)
+
+        if getattr(self, "_state_machine_enabled", False) and getattr(self, "_state_manager", None):
+            open_positions_count = len(self._state_manager.list_active_states())
+        else:
+            open_positions_count = len(self.executor.get_open_orders())
+
+        result = self._pre_trade_gate.check_all(
+            symbol=plan.symbol,
+            side=side_value,
+            proposed_amount_usdt=proposed_quote,
+            portfolio_value=self._get_risk_portfolio_value(portfolio),
+            open_positions_count=open_positions_count,
+            daily_trades_today=len(getattr(self, "_executed_today", []) or []),
+            current_price=current_price,
+            signal_price=float(getattr(plan, "entry_price", 0.0) or current_price or 0.0),
+            signal_confidence=float(getattr(plan, "confidence", 0.0) or 0.0),
+            mode=str(getattr(self, "_active_strategy_mode", "standard") or "standard"),
+            config=self.config,
+            risk_manager=self.risk_manager,
+        )
+        if result.passed:
+            return True
+
+        logger.warning("[PreTradeGate] %s blocked: %s", plan.symbol, result.summary())
+        if self.send_alerts:
+            self._send_alert(f"PreTradeGate blocked {plan.symbol}: {result.summary()}", to_telegram=False)
+        return False
     
     def _run_iteration(self):
         """Run one iteration of the trading logic for all pairs."""
         if self._auth_degraded:
             if not self._auth_degraded_logged:
                 logger.warning(
-                    "Trading loop running in degraded public-only mode — skipping reconciliation, balances, and order execution until Bitkub credentials are fixed"
+                    "Trading loop running in degraded public-only mode — skipping reconciliation, balances, and order execution until exchange credentials are fixed"
                 )
                 self._auth_degraded_logged = True
             return
@@ -2002,8 +2294,8 @@ class TradingBotOrchestrator:
             helper = StatusRuntimeHelper(
                 self,
                 required_candles=_MIN_CANDLES_FOR_TRADING_READINESS,
-                websocket_available=_WEBSOCKET_AVAILABLE,
-                latest_ticker_getter=get_latest_ticker,
+                websocket_available=bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)),
+                latest_ticker_getter=get_latest_ticker if bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)) else None,
             )
             self._status_runtime_helper = helper
         return helper
@@ -2120,7 +2412,7 @@ class TradingBotOrchestrator:
             current_price=current_price,
             profit_pct=profit_pct,
         )
-        coin = symbol.replace("THB_", "")
+        coin = extract_base_asset(symbol)
         msg = (
             f"Trailing SL  {coin}  {old_sl:,.0f} → {new_sl:,.0f}  "
             f"profit +{profit_pct:.2f}%  price {current_price:,.0f}"
@@ -2148,6 +2440,62 @@ class TradingBotOrchestrator:
     
     def get_pending_decisions(self) -> List[Dict[str, Any]]:
         return self._get_status_runtime_helper().get_pending_decisions()
+
+    def _register_sl_hold_entry(self, position_id: str) -> None:
+        guard = getattr(self, "_sl_hold_guard", None)
+        if guard is not None and position_id:
+            guard.register_entry(str(position_id), str(getattr(self, "_active_strategy_mode", "standard") or "standard"))
+
+    def _cleanup_sl_hold_entry(self, position_id: str) -> None:
+        guard = getattr(self, "_sl_hold_guard", None)
+        if guard is not None and position_id:
+            guard.cleanup(str(position_id))
+
+    def _is_sl_hold_locked(self, position_id: str) -> bool:
+        guard = getattr(self, "_sl_hold_guard", None)
+        return bool(guard is not None and position_id and guard.is_sl_locked(str(position_id)))
+
+    @staticmethod
+    def _coerce_opened_at(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        except (TypeError, ValueError):
+            return None
+
+    def _minimal_roi_exit_signal(
+        self,
+        *,
+        symbol: str,
+        side: Any,
+        entry_price: float,
+        current_price: float,
+        opened_at: Any,
+    ) -> tuple[bool, str]:
+        if not bool(getattr(self, "_minimal_roi_enabled", False)):
+            return False, ""
+        tables = getattr(self, "_minimal_roi_tables", {}) or {}
+        mode = str(getattr(self, "_active_strategy_mode", "standard") or "standard")
+        table = tables.get(mode) or tables.get("standard") or next(iter(tables.values()), None)
+        if table is None:
+            return False, ""
+        opened_dt = self._coerce_opened_at(opened_at)
+        if opened_dt is None:
+            return False, ""
+        hold_minutes = max((datetime.now() - opened_dt).total_seconds() / 60.0, 0.0)
+        side_value = str(getattr(side, "value", side) or "BUY").upper()
+        net_profit = compute_net_profit_pct(
+            float(entry_price or 0.0),
+            float(current_price or 0.0),
+            side=side_value,
+        )
+        hit, reason = table.should_exit(net_profit, hold_minutes)
+        if hit:
+            logger.info("[MinimalROI] %s exit allowed: %s", symbol, reason)
+        return hit, reason
 
     def _check_positions_for_sl_tp(self):
         self._get_position_monitor_helper().check_positions_for_sl_tp()

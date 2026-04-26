@@ -3,9 +3,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
 load_dotenv()
-from api_client import BitkubClient
+from api_client import BinanceThClient
 
-client = BitkubClient()
+client = BinanceThClient()
 balances = client.get_balances()
 
 print('=== All Non-Zero Balances ===')

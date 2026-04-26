@@ -20,8 +20,12 @@ from risk_management import precise_add, precise_multiply, precise_divide
 
 logger = logging.getLogger(__name__)
 
-# Bitkub trading fee (0.25% per side)
-BITKUB_FEE_PCT = 0.0025
+# Binance Thailand fee model: 0.2% round trip = 0.1% per side.
+BINANCE_TH_ROUND_TRIP_FEE = 0.002
+BINANCE_TH_FEE_PCT = BINANCE_TH_ROUND_TRIP_FEE / 2
+
+# Backward-compatible name used across runtime PnL paths.
+BITKUB_FEE_PCT = BINANCE_TH_FEE_PCT
 
 # Late-bound WS import (avoids circular dep at module load)
 _ws_mod = None
@@ -53,10 +57,14 @@ def _ws_ticker(symbol: str):
     global _ws_mod
     if _ws_mod is None:
         try:
-            import bitkub_websocket as _bws
+            import binance_websocket as _bws
             _ws_mod = _bws
         except ImportError:
-            return None
+            try:
+                import bitkub_websocket as _bws
+                _ws_mod = _bws
+            except ImportError:
+                return None
     return _ws_mod.get_latest_ticker(symbol)
 
 
@@ -301,10 +309,34 @@ class TradeExecutor:
         """Convert side-like values to OrderSide enum with a deterministic fallback."""
         return OrderSide.BUY if self._normalize_side(side) == "buy" else default
 
+    def _split_symbol(self, symbol: Optional[str]) -> Tuple[str, str]:
+        """Return (base_asset, quote_asset) for THB_BTC, BTC_THB, or BTCUSDT."""
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return "", "USDT"
+
+        known_quotes = ("USDT", "THB", "BUSD", "USD")
+        if "_" in sym:
+            left, right = sym.split("_", 1)
+            if right in known_quotes:
+                return left, right
+            if left in known_quotes:
+                return right, left
+            return right, left
+
+        for quote in known_quotes:
+            if sym.endswith(quote) and len(sym) > len(quote):
+                return sym[:-len(quote)], quote
+
+        return sym, "USDT"
+
     def _extract_base_asset(self, symbol: Optional[str]) -> str:
-        """Extract base asset from THB_BASE symbol format."""
-        sym = str(symbol or "")
-        return sym.split("_")[1] if "_" in sym else sym
+        base_asset, _ = self._split_symbol(symbol)
+        return base_asset
+
+    def _extract_quote_asset(self, symbol: Optional[str]) -> str:
+        _, quote_asset = self._split_symbol(symbol)
+        return quote_asset
 
     def _reject_nonpositive_amount(self, amount_dec: Decimal, side_label: str, symbol: str) -> Optional[OrderResult]:
         """Reject orders with non-positive amount using a consistent response shape."""
@@ -1010,46 +1042,75 @@ class TradeExecutor:
             symbol = order.symbol
             price = 0.0 if order.order_type == "market" else (order.price or 0.0)
             price_dec = _to_decimal(price)
-            min_order_thb = _to_decimal(getattr(self, "_min_order_thb", 15.0))
+            min_order_quote = _to_decimal(getattr(self, "_min_order_thb", 15.0))
 
             if order.side == OrderSide.BUY:
+                _, quote_asset = self._split_symbol(symbol)
+                quote_asset_upper = quote_asset.upper()
                 order_amount_dec = _to_decimal(order.amount)
                 reject_result = self._reject_nonpositive_amount(order_amount_dec, "BUY", symbol)
                 if reject_result:
                     return reject_result
-                thb_amount = order_amount_dec
+                quote_amount = order_amount_dec
                 balances = self.api_client.get_balances(force_refresh=True, allow_stale=False)
-                available_thb = self._get_decimal_balance(balances, "THB")
+                available_quote = self._get_decimal_balance(balances, quote_asset_upper)
 
                 logger.info("[BUY] Order details:")
                 logger.info("  Coin: %s", symbol)
                 logger.info("  Type: %s", order.order_type.upper())
-                logger.info("  THB amount: %s", self._format_balance_for_display("THB", thb_amount))
-                logger.info("  THB avail: %s", self._format_balance_for_display("THB", available_thb))
-                logger.info("  Price: %s THB", self._format_balance_for_display("THB", price_dec))
+                logger.info("  %s amount: %s", quote_asset_upper, self._format_balance_for_display(quote_asset_upper, quote_amount))
+                logger.info("  %s avail: %s", quote_asset_upper, self._format_balance_for_display(quote_asset_upper, available_quote))
+                logger.info("  Price: %s %s", self._format_balance_for_display(quote_asset_upper, price_dec), quote_asset_upper)
 
-                if thb_amount < min_order_thb:
-                    logger.error("[Cancel] THB %.2f < minimum %.2f — not sending", float(thb_amount), float(min_order_thb))
-                    return OrderResult(False, OrderStatus.REJECTED,
-                                       message="Order %.2f THB below minimum %.2f" % (float(thb_amount), float(min_order_thb)),
-                                       error_code=-1, ordered_amount=float(thb_amount))
+                if quote_amount < min_order_quote:
+                    logger.error(
+                        "[Cancel] %s %.2f < minimum %.2f — not sending",
+                        quote_asset_upper,
+                        float(quote_amount),
+                        float(min_order_quote),
+                    )
+                    return OrderResult(
+                        False,
+                        OrderStatus.REJECTED,
+                        message="Order %.2f %s below minimum %.2f" % (float(quote_amount), quote_asset_upper, float(min_order_quote)),
+                        error_code=-1,
+                        ordered_amount=float(quote_amount),
+                    )
 
-                if thb_amount > available_thb:
-                    logger.warning("[Balance Check] Insufficient THB (%.2f < %.2f) — skipping", float(available_thb), float(thb_amount))
-                    return OrderResult(False, OrderStatus.REJECTED, message="THB insufficient", error_code=18)
+                if quote_amount > available_quote:
+                    logger.warning(
+                        "[Balance Check] Insufficient %s (%.2f < %.2f) — skipping",
+                        quote_asset_upper,
+                        float(available_quote),
+                        float(quote_amount),
+                    )
+                    return OrderResult(False, OrderStatus.REJECTED, message=f"{quote_asset_upper} insufficient", error_code=18)
 
-                max_thb = _quantize_decimal(available_thb * Decimal("0.95"), 2)
-                if thb_amount > max_thb:
-                    logger.warning("[Size] %.2f THB > 95%% of %.2f — capping", float(thb_amount), float(max_thb))
-                    thb_amount = max_thb
-                thb_amount = _quantize_decimal(thb_amount, 2)
+                quote_decimals = self.ASSET_DECIMALS.get(quote_asset_upper, 2)
+                max_quote = _quantize_decimal(available_quote * Decimal("0.95"), quote_decimals)
+                if quote_amount > max_quote:
+                    logger.warning(
+                        "[Size] %.2f %s > 95%% of %.2f — capping",
+                        float(quote_amount),
+                        quote_asset_upper,
+                        float(max_quote),
+                    )
+                    quote_amount = max_quote
+                quote_amount = _quantize_decimal(quote_amount, quote_decimals)
 
-                response = self.api_client.place_bid(symbol=symbol, amount=float(thb_amount), rate=float(price_dec), order_type=order.order_type, client_id=idempotency_key)
+                response = self.api_client.place_bid(
+                    symbol=symbol,
+                    amount=float(quote_amount),
+                    rate=float(price_dec),
+                    order_type=order.order_type,
+                    client_id=idempotency_key,
+                )
                 logger.info("[Response] %s", str(response)[:500])
                 response_context = "place_bid"
             else:
-                base_asset = self._extract_base_asset(symbol)
+                base_asset, quote_asset = self._split_symbol(symbol)
                 base_asset_upper = base_asset.upper()
+                quote_asset_upper = quote_asset.upper()
                 order_amount_dec = _to_decimal(order.amount)
 
                 reject_result = self._reject_nonpositive_amount(order_amount_dec, "SELL", symbol)
@@ -1064,7 +1125,7 @@ class TradeExecutor:
                 logger.info("  Type: %s", order.order_type.upper())
                 logger.info("  Amount: %s", self._format_balance_for_display(base_asset_upper, order_amount_dec))
                 logger.info("  %s avail: %s", base_asset_upper, self._format_balance_for_display(base_asset_upper, available_base))
-                logger.info("  Price: %s THB", self._format_balance_for_display("THB", price_dec))
+                logger.info("  Price: %s %s", self._format_balance_for_display(quote_asset_upper, price_dec), quote_asset_upper)
 
                 # Only check THB value — don't reject by balance amount
                 # Bitkub min trade value is ~10-15 THB
@@ -1077,15 +1138,26 @@ class TradeExecutor:
                     except Exception:
                         logger.warning("[Value Check] Could not fetch market price for zero-price validation.")
 
-                order_value_thb = order_amount_dec * check_price
-                if check_price > 0 and order_value_thb < min_order_thb:
+                order_value_quote = order_amount_dec * check_price
+                if check_price > 0 and order_value_quote < min_order_quote:
                     logger.warning(
-                        "[Value Check] %s order value %.4f THB < MIN %.2f THB — rejecting",
-                        base_asset_upper, float(order_value_thb), float(min_order_thb)
+                        "[Value Check] %s order value %.4f %s < MIN %.2f %s — rejecting",
+                        base_asset_upper,
+                        float(order_value_quote),
+                        quote_asset_upper,
+                        float(min_order_quote),
+                        quote_asset_upper,
                     )
-                    return OrderResult(False, OrderStatus.REJECTED,
-                                       message="Order value %.2f THB below minimum %.2f" % (float(order_value_thb), float(min_order_thb)),
-                                       error_code=18)
+                    return OrderResult(
+                        False,
+                        OrderStatus.REJECTED,
+                        message="Order value %.2f %s below minimum %.2f" % (
+                            float(order_value_quote),
+                            quote_asset_upper,
+                            float(min_order_quote),
+                        ),
+                        error_code=18,
+                    )
 
                 if order_amount_dec > available_base:
                     logger.warning("[Balance Check] %s insufficient (%.8f < %.8f) — rejecting",
@@ -1171,7 +1243,7 @@ class TradeExecutor:
             return result
         except Exception as e:
             logger.error("Order placement error: %s", e, exc_info=True)
-            # Preserve error code from BitkubAPIError so callers can detect permanent failures
+            # Preserve error code from BinanceAPIError so callers can detect permanent failures
             _err_code = getattr(e, "code", None)
             return OrderResult(
                 success=False, status=OrderStatus.ERROR,
@@ -1255,7 +1327,7 @@ class TradeExecutor:
 
         # Position sizing
         if plan.side == OrderSide.SELL:
-            base_asset = self._extract_base_asset(plan.symbol)
+            base_asset, _ = self._split_symbol(plan.symbol)
             try:
                 balances = self.api_client.get_balances()
                 avail = float(self._get_decimal_balance(balances, base_asset))
@@ -1281,17 +1353,19 @@ class TradeExecutor:
                     message="%s balance = 0" % base_asset.upper()
                 )
         else:
+            _, quote_asset = self._split_symbol(plan.symbol)
+            quote_asset_upper = quote_asset.upper()
             if plan.close_position:
                 try:
                     balances = self.api_client.get_balances()
-                    avail_thb = float(self._get_decimal_balance(balances, "THB"))
+                    avail_quote = float(self._get_decimal_balance(balances, quote_asset_upper))
                 except Exception as e:
-                    logger.error("Failed to fetch THB balance: %s", e, exc_info=True)
-                    avail_thb = 0.0
-                amount = avail_thb / plan.entry_price if plan.entry_price else 0
+                    logger.error("Failed to fetch %s balance: %s", quote_asset_upper, e, exc_info=True)
+                    avail_quote = 0.0
+                amount = avail_quote / plan.entry_price if plan.entry_price else 0
                 if amount <= 0:
-                    logger.warning("[Balance Check] THB balance = 0 — rejecting")
-                    return OrderResult(False, OrderStatus.REJECTED, message="THB balance = 0")
+                    logger.warning("[Balance Check] %s balance = 0 — rejecting", quote_asset_upper)
+                    return OrderResult(False, OrderStatus.REJECTED, message=f"{quote_asset_upper} balance = 0")
             elif self.risk_manager:
                 risk_result = self.risk_manager.calculate_position_size(
                     portfolio_value=portfolio_value, entry_price=plan.entry_price,
@@ -1306,22 +1380,35 @@ class TradeExecutor:
 
         # Rounding
         if plan.side == OrderSide.BUY:
-            amount = float(_quantize_decimal(amount, 2))
+            buy_quote_asset = self._extract_quote_asset(plan.symbol).upper()
+            buy_quote_decimals = self.ASSET_DECIMALS.get(buy_quote_asset, 2)
+            amount = float(_quantize_decimal(amount, buy_quote_decimals))
         else:
             amount = self._round_amount(amount, plan.symbol)
 
         amount_dec = _to_decimal(amount)
-        order_value_thb = amount_dec if plan.side == OrderSide.BUY else (amount_dec * _to_decimal(plan.entry_price))
-        min_order_thb = _to_decimal(getattr(self, "_min_order_thb", 15.0))
+        quote_asset_upper = self._extract_quote_asset(plan.symbol).upper()
+        order_value_quote = amount_dec if plan.side == OrderSide.BUY else (amount_dec * _to_decimal(plan.entry_price))
+        min_order_quote = _to_decimal(getattr(self, "_min_order_thb", 15.0))
         if plan.side == OrderSide.SELL and not plan.close_position:
-            if amount_dec <= 0 or order_value_thb < min_order_thb:
+            if amount_dec <= 0 or order_value_quote < min_order_quote:
                 logger.info("SELL signal but insufficient balance — skipping")
                 return OrderResult(False, OrderStatus.CANCELLED, message="Insufficient balance", ordered_amount=amount)
 
-        if order_value_thb < min_order_thb:
-            logger.error("[Cancel] Order value %.2f THB < minimum %.2f | amount=%.6f, price=%.2f",
-                         float(order_value_thb), float(min_order_thb), amount, plan.entry_price)
-            return OrderResult(False, OrderStatus.REJECTED, message="Order value %.2f THB below minimum" % float(order_value_thb))
+        if order_value_quote < min_order_quote:
+            logger.error(
+                "[Cancel] Order value %.2f %s < minimum %.2f | amount=%.6f, price=%.2f",
+                float(order_value_quote),
+                quote_asset_upper,
+                float(min_order_quote),
+                amount,
+                plan.entry_price,
+            )
+            return OrderResult(
+                False,
+                OrderStatus.REJECTED,
+                message="Order value %.2f %s below minimum" % (float(order_value_quote), quote_asset_upper),
+            )
 
         order = OrderRequest(symbol=plan.symbol, side=plan.side, amount=amount, price=plan.entry_price, order_type=self.order_type)
         result = self.execute_order(order)
@@ -1557,8 +1644,8 @@ class TradeExecutor:
                 return True
                 
             except Exception as e:
-                from api_client import BitkubAPIError
-                if isinstance(e, BitkubAPIError) and getattr(e, "code", 0) == 21:
+                from api_client import BinanceAPIError
+                if isinstance(e, BinanceAPIError) and getattr(e, "code", 0) == 21:
                     logger.info("[OMS] Order %s already filled (Error 21) — cleaning up", order_id)
                     self._oms_cancel_was_error_21 = True
                     self._cleanup_completed_order(order_id)

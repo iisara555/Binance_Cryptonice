@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-os.environ.setdefault("BITKUB_API_KEY", "test-key")
-os.environ.setdefault("BITKUB_API_SECRET", "test-secret")
+os.environ.setdefault("BINANCE_API_KEY", "test-key")
+os.environ.setdefault("BINANCE_API_SECRET", "test-secret")
 
 from balance_monitor import BalanceEvent
 from trading_bot import TradingBotOrchestrator
@@ -131,7 +131,7 @@ def test_handle_balance_event_crypto_deposit_alerts_when_untracked():
 
     alert_message = bot.alert_system.send.call_args.args[1]
     assert "External crypto deposit detected: ETH +0.25000000" in alert_message
-    assert "No tracked THB_ETH position exists" in alert_message
+    assert "No tracked ETHUSDT position exists" in alert_message
     assert "not auto-converted into a managed bot position" in alert_message
 
 
@@ -146,7 +146,7 @@ def test_handle_balance_event_crypto_deposit_bootstraps_active_runtime_pair_into
     bot._set_pause_reason = Mock()
     bot._get_trading_pairs = Mock(return_value=["THB_SOL"])
     bot._bootstrap_held_positions = Mock()
-    bot._find_tracked_position_by_symbol = Mock(side_effect=[None, {
+    bot._find_tracked_position_by_symbol = Mock(side_effect=[None, None, {
         "order_id": "bootstrap_THB_SOL_1",
         "symbol": "THB_SOL",
         "entry_price": 2_750.0,
@@ -436,8 +436,8 @@ def test_bootstrap_held_positions_uses_exchange_order_history_when_local_state_i
                 {"side": "sell", "rate": "30", "amount": "8", "fee": "0", "ts": 3},
             ],
             7.0,
-            200.0 / 15.0,
-            (200.0 / 15.0) * 7.0,
+            120.0 / 7.0,
+            120.0,
         ),
         (
             "THB_DOGE",
@@ -447,8 +447,8 @@ def test_bootstrap_held_positions_uses_exchange_order_history_when_local_state_i
                 {"side": "sell", "rate": "4.0", "amount": "4", "fee": "0", "ts": 3},
             ],
             16.0,
-            3.0,
-            48.0,
+            50.0 / 16.0,
+            50.0,
         ),
     ],
 )
@@ -489,8 +489,8 @@ def test_bootstrap_position_context_uses_weighted_average_trade_history(symbol):
     ctx = TradingBotOrchestrator._resolve_bootstrap_position_context(bot, symbol, 7.0)
 
     assert ctx["source"] == "trade_history"
-    assert ctx["entry_price"] == pytest.approx(200.0 / 15.0)
-    assert ctx["total_entry_cost"] == pytest.approx((200.0 / 15.0) * 7.0)
+    assert ctx["entry_price"] == pytest.approx(120.0 / 7.0)
+    assert ctx["total_entry_cost"] == pytest.approx(120.0)
 
 
 def test_exchange_history_context_uses_default_history_window_limit():
@@ -567,6 +567,40 @@ def test_reconcile_tracked_positions_keeps_position_when_coin_balance_remains():
     assert removed == []
     bot.executor.remove_tracked_position.assert_not_called()
     bot.db.record_held_coin.assert_not_called()
+
+
+def test_reconcile_tracked_positions_bootstraps_missing_held_coin_from_balance_state():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0, "use_dynamic_sl_tp": False}}
+    bot.min_trade_value_thb = 15.0
+    bot.api_client = Mock()
+    bot.api_client.get_ticker.return_value = {"last": 42.7}
+    bot.api_client.get_order_history.return_value = []
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = []
+    bot.db = Mock()
+    bot.db.load_all_positions.return_value = []
+    bot.db.get_trades.return_value = []
+    bot.db.get_trade_state.return_value = None
+    bot._get_trading_pairs = Mock(return_value=["THB_DOT"])
+    bot._state_machine_enabled = False
+
+    with patch("trading_bot.time.sleep"):
+        removed = bot._reconcile_tracked_positions_with_balance_state({
+            "balances": {
+                "DOT": {"available": 3.68279069, "reserved": 0.0, "total": 3.68279069}
+            }
+        })
+
+    assert removed == []
+    bot.executor.register_tracked_position.assert_called_once()
+    _, pos_data = bot.executor.register_tracked_position.call_args.args
+    assert pos_data["symbol"] == "THB_DOT"
+    assert pos_data["amount"] == 3.68279069
+    assert pos_data["filled_amount"] == 3.68279069
+    bot.db.record_held_coin.assert_called_once_with("THB_DOT", 3.68279069)
+    bot.executor.remove_tracked_position.assert_not_called()
+    bot.api_client.get_balances.assert_not_called()
 
 
 def test_scalping_mode_forces_time_exit_after_timeout():

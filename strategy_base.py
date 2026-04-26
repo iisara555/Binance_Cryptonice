@@ -9,6 +9,8 @@ from strategies import (
     MomentumStrategy,
     ScalpingStrategy,
     SniperStrategy,
+    MacheteV8bLite,
+    SimpleScalpPlus,
 )
 from typing import Dict, Any
 from enum import Enum
@@ -18,7 +20,7 @@ __all__ = [
     'StrategyBase', 'Signal', 'StrategyConfig',
     'TrendFollowingStrategy', 'MeanReversionStrategy',
     'BreakoutStrategy', 'MomentumStrategy', 'ScalpingStrategy',
-    'SniperStrategy',
+    'SniperStrategy', 'MacheteV8bLite', 'SimpleScalpPlus',
     'TradingSignal', 'SignalType', 'SignalConfidence', 'MarketCondition', 
     'detect_market_condition'
 ]

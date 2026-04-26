@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 if TYPE_CHECKING:
-    from api_client import BitkubClient
+    from api_client import BinanceThClient
     from trade_executor import TradeExecutor
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class PositionManager:
     
     def __init__(
         self,
-        api_client: BitkubClient,
+        api_client: BinanceThClient,
         trade_executor: TradeExecutor,
         config: Dict[str, Any]
     ):

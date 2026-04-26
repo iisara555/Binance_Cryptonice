@@ -106,16 +106,43 @@ class PositionMonitorHelper:
 
             triggered = None
             current_price = tick.last
+            opened_at = pos.get("timestamp")
 
             if side == OrderSide.BUY:
                 if stop_loss > 0 and current_price <= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price >= take_profit:
+                    if self.bot._is_sl_hold_locked(position_id):
+                        logger.info("[SLHoldGuard] Suppressing WS SL for %s", position_id)
+                    else:
+                        triggered = "SL"
+                if not triggered:
+                    roi_hit, _roi_reason = self.bot._minimal_roi_exit_signal(
+                        symbol=pos_symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        opened_at=opened_at,
+                    )
+                    if roi_hit:
+                        triggered = "MINIMAL_ROI"
+                if not triggered and take_profit > 0 and current_price >= take_profit:
                     triggered = "TP"
             else:
                 if stop_loss > 0 and current_price >= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price <= take_profit:
+                    if self.bot._is_sl_hold_locked(position_id):
+                        logger.info("[SLHoldGuard] Suppressing WS SL for %s", position_id)
+                    else:
+                        triggered = "SL"
+                if not triggered:
+                    roi_hit, _roi_reason = self.bot._minimal_roi_exit_signal(
+                        symbol=pos_symbol,
+                        side=side,
+                        entry_price=entry_price,
+                        current_price=current_price,
+                        opened_at=opened_at,
+                    )
+                    if roi_hit:
+                        triggered = "MINIMAL_ROI"
+                if not triggered and take_profit > 0 and current_price <= take_profit:
                     triggered = "TP"
 
             if not triggered:
@@ -229,7 +256,7 @@ class PositionMonitorHelper:
                 exit_fee = gross_exit * BITKUB_FEE_PCT
                 net_exit = gross_exit - exit_fee
                 total_fees = entry_fee + exit_fee
-                net_pnl = net_exit - entry_cost
+                net_pnl = net_exit - entry_cost - entry_fee
                 net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
                 trigger_label = "Take Profit" if triggered == "TP" else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
 
@@ -268,6 +295,7 @@ class PositionMonitorHelper:
                     now=now,
                 )
                 self.bot._send_alert(msg, to_telegram=True)
+                self.bot._cleanup_sl_hold_entry(position_id)
             else:
                 logger.error(f"[WS-SLTP] Exit failed: {result.message}")
         except Exception as exc:
@@ -327,33 +355,45 @@ class PositionMonitorHelper:
                 continue
 
             triggered = None
-            if self.bot._scalping_mode_enabled:
+            opened_at = _coerce_trade_datetime(pos.get("timestamp"))
+
+            # Exit priority: SL > MinimalROI > regular TP > time-stop.
+            if side == OrderSide.BUY:
+                if stop_loss > 0 and current_price <= stop_loss:
+                    if self.bot._is_sl_hold_locked(position_id):
+                        logger.info("[SLHoldGuard] Suppressing REST SL for %s", position_id)
+                    else:
+                        triggered = "SL"
+            else:
+                if stop_loss > 0 and current_price >= stop_loss:
+                    if self.bot._is_sl_hold_locked(position_id):
+                        logger.info("[SLHoldGuard] Suppressing REST SL for %s", position_id)
+                    else:
+                        triggered = "SL"
+
+            if not triggered:
+                roi_hit, _roi_reason = self.bot._minimal_roi_exit_signal(
+                    symbol=pos_symbol,
+                    side=side,
+                    entry_price=entry_price,
+                    current_price=float(current_price),
+                    opened_at=opened_at,
+                )
+                if roi_hit:
+                    triggered = "MINIMAL_ROI"
+
+            if not triggered and side == OrderSide.BUY and take_profit > 0 and current_price >= take_profit:
+                triggered = "TP"
+            elif not triggered and side != OrderSide.BUY and take_profit > 0 and current_price <= take_profit:
+                triggered = "TP"
+
+            if not triggered and self.bot._scalping_mode_enabled:
                 is_bootstrap = str(position_id).startswith("bootstrap_")
-                opened_at = _coerce_trade_datetime(pos.get("timestamp"))
                 timeout_minutes = getattr(self.bot, "_bootstrap_position_timeout_minutes", None) if is_bootstrap else getattr(self.bot, "_scalping_position_timeout_minutes", None)
                 if opened_at is not None and timeout_minutes and float(timeout_minutes) > 0:
                     hold_seconds = (datetime.now() - opened_at).total_seconds()
                     if hold_seconds >= (float(timeout_minutes) * 60):
                         triggered = "TIME"
-
-            # Grace period: skip SL/TP check for first 60 seconds after entry
-            if not triggered:
-                opened_at = _coerce_trade_datetime(pos.get("timestamp"))
-                if opened_at is not None:
-                    age_seconds = (datetime.now() - opened_at).total_seconds()
-                    if age_seconds < 60:
-                        continue
-
-            if not triggered and side == OrderSide.BUY:
-                if stop_loss > 0 and current_price <= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price >= take_profit:
-                    triggered = "TP"
-            elif not triggered:
-                if stop_loss > 0 and current_price >= stop_loss:
-                    triggered = "SL"
-                elif take_profit > 0 and current_price <= take_profit:
-                    triggered = "TP"
 
             if not triggered:
                 continue
@@ -417,7 +457,7 @@ class PositionMonitorHelper:
                 exit_fee = gross_exit * BITKUB_FEE_PCT
                 net_exit = gross_exit - exit_fee
                 total_fees = entry_fee + exit_fee
-                net_pnl = net_exit - entry_cost
+                net_pnl = net_exit - entry_cost - entry_fee
                 net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
                 trigger_label = "Take Profit" if triggered == "TP" else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
 
@@ -457,5 +497,6 @@ class PositionMonitorHelper:
                     now=now,
                 )
                 self.bot._send_alert(msg, to_telegram=True)
+                self.bot._cleanup_sl_hold_entry(position_id)
             else:
                 logger.error(f"Failed to execute {triggered} exit: {result.message}")

@@ -11,7 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_WHITELIST_JSON = "coin_whitelist.json"
-DEFAULT_QUOTE_ASSET = "THB"
+DEFAULT_QUOTE_ASSET = "USDT"
+LEGACY_QUOTE_ASSETS = {"THB", "USDT"}
 DEFAULT_MIN_QUOTE_BALANCE_THB = 100.0
 DEFAULT_WHITELIST_ASSETS = ("BTC", "DOGE")
 SUPPORTED_WHITELIST_SCHEMA_VERSION = 1
@@ -19,6 +20,7 @@ TOP_LEVEL_SCHEMA_KEYS = {
     "version",
     "quote_asset",
     "min_quote_balance_thb",
+    "min_quote_balance_for_pairs",
     "require_supported_market",
     "include_assets_with_balance",
     "assets",
@@ -56,22 +58,41 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
-def _normalize_asset(value: Any) -> str:
+def _normalize_quote_asset(value: Any) -> str:
+    quote = str(value or DEFAULT_QUOTE_ASSET).strip().upper()
+    return quote or DEFAULT_QUOTE_ASSET
+
+
+def _normalize_asset(value: Any, quote_asset: Optional[str] = None) -> str:
     raw = str(value or "").strip().upper()
     if not raw:
         return ""
-    if raw.startswith(f"{DEFAULT_QUOTE_ASSET}_"):
-        return raw.split("_", 1)[1]
-    if raw.endswith(f"_{DEFAULT_QUOTE_ASSET}"):
-        return raw.rsplit("_", 1)[0]
+    quote_candidates = {DEFAULT_QUOTE_ASSET, _normalize_quote_asset(quote_asset), *LEGACY_QUOTE_ASSETS}
+    for quote in quote_candidates:
+        if raw.startswith(f"{quote}_"):
+            return raw.split("_", 1)[1]
+        if raw.endswith(f"_{quote}"):
+            return raw.rsplit("_", 1)[0]
+        if raw.endswith(quote) and "_" not in raw and len(raw) > len(quote):
+            return raw[: -len(quote)]
     return raw
 
 
-def _normalize_pairs(pairs: Iterable[str]) -> List[str]:
+def _normalize_pair_input(value: Any, quote_asset: str = DEFAULT_QUOTE_ASSET) -> str:
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    asset = _normalize_asset(raw, quote_asset)
+    if not asset or asset == _normalize_quote_asset(quote_asset):
+        return ""
+    return _build_pair(asset, quote_asset)
+
+
+def _normalize_pairs(pairs: Iterable[str], quote_asset: str = DEFAULT_QUOTE_ASSET) -> List[str]:
     normalized: List[str] = []
     seen: set[str] = set()
     for pair in pairs or []:
-        value = str(pair or "").strip().upper()
+        value = _normalize_pair_input(pair, quote_asset)
         if not value or value in seen:
             continue
         seen.add(value)
@@ -80,19 +101,23 @@ def _normalize_pairs(pairs: Iterable[str]) -> List[str]:
 
 
 def _build_pair(asset: str, quote_asset: str = DEFAULT_QUOTE_ASSET) -> str:
-    return f"{quote_asset.upper()}_{_normalize_asset(asset)}"
+    quote = _normalize_quote_asset(quote_asset)
+    base = _normalize_asset(asset, quote)
+    if not base:
+        return ""
+    if quote == "USDT":
+        return f"{base}{quote}"
+    return f"{quote}_{base}"
 
 
-def _extract_supported_thb_pairs(symbol_rows: Iterable[Dict[str, Any]]) -> set[str]:
+def _extract_supported_pairs(symbol_rows: Iterable[Dict[str, Any]], quote_asset: str = DEFAULT_QUOTE_ASSET) -> set[str]:
+    quote = _normalize_quote_asset(quote_asset)
     pairs: set[str] = set()
     for row in symbol_rows or []:
         raw_symbol = str((row or {}).get("symbol") or "").upper()
-        if raw_symbol.endswith(f"_{DEFAULT_QUOTE_ASSET}"):
-            asset = raw_symbol[: -(len(DEFAULT_QUOTE_ASSET) + 1)]
-            if asset:
-                pairs.add(_build_pair(asset))
-        elif raw_symbol.startswith(f"{DEFAULT_QUOTE_ASSET}_"):
-            pairs.add(raw_symbol)
+        pair = _normalize_pair_input(raw_symbol, quote)
+        if pair:
+            pairs.add(pair)
     return pairs
 
 
@@ -120,6 +145,8 @@ class HybridDynamicCoinConfig:
     version: int
     quote_asset: str
     min_quote_balance_thb: float
+    # When set, include supported whitelist pairs if quote_balance >= this (can be < min_quote_balance_thb).
+    min_quote_balance_for_pairs: Optional[float]
     require_supported_market: bool
     include_assets_with_balance: bool
     entries: List[CoinWhitelistEntry]
@@ -203,13 +230,23 @@ class JsonCoinWhitelistRepository:
         for warning in warnings:
             logger.warning("Hybrid coin whitelist schema warning: %s", warning)
 
+        quote_asset = _normalize_quote_asset(raw.get("quote_asset"))
+
+        raw_pair_floor = raw.get("min_quote_balance_for_pairs")
+        min_quote_balance_for_pairs_opt: Optional[float]
+        if raw_pair_floor is None:
+            min_quote_balance_for_pairs_opt = None
+        else:
+            min_quote_balance_for_pairs_opt = max(0.0, _coerce_float(raw_pair_floor, 0.0))
+
         return HybridDynamicCoinConfig(
             version=schema_version,
-            quote_asset=str(raw.get("quote_asset") or DEFAULT_QUOTE_ASSET).upper(),
+            quote_asset=quote_asset,
             min_quote_balance_thb=max(
                 0.0,
                 _coerce_float(raw.get("min_quote_balance_thb"), DEFAULT_MIN_QUOTE_BALANCE_THB),
             ),
+            min_quote_balance_for_pairs=min_quote_balance_for_pairs_opt,
             require_supported_market=_coerce_bool(raw.get("require_supported_market"), True),
             include_assets_with_balance=_coerce_bool(raw.get("include_assets_with_balance"), True),
             entries=entries,
@@ -258,7 +295,7 @@ class JsonCoinWhitelistRepository:
             or raw_entry.get("asset")
             or raw_entry.get("pair")
         )
-        if not symbol or symbol == DEFAULT_QUOTE_ASSET:
+        if not symbol or symbol in LEGACY_QUOTE_ASSETS or symbol == DEFAULT_QUOTE_ASSET:
             warnings.append(f"assets[{index}] ignored: symbol is missing or invalid")
             return None, warnings
 
@@ -294,6 +331,7 @@ class JsonCoinWhitelistRepository:
             version=SUPPORTED_WHITELIST_SCHEMA_VERSION,
             quote_asset=DEFAULT_QUOTE_ASSET,
             min_quote_balance_thb=DEFAULT_MIN_QUOTE_BALANCE_THB,
+            min_quote_balance_for_pairs=None,
             require_supported_market=True,
             include_assets_with_balance=True,
             entries=[CoinWhitelistEntry(symbol=symbol) for symbol in DEFAULT_WHITELIST_ASSETS],
@@ -316,12 +354,18 @@ class HybridDynamicPairResolver:
         config_path: Optional[Path] = None,
         configured_pairs: Optional[Iterable[str]] = None,
         min_quote_balance_thb: Optional[float] = None,
+        min_quote_balance_for_pairs: Optional[float] = None,
         require_supported_market: Optional[bool] = None,
         include_assets_with_balance: Optional[bool] = None,
     ) -> RuntimePairSelection:
         config = self.repository.load(config_path)
         if min_quote_balance_thb is not None:
             config = replace(config, min_quote_balance_thb=max(0.0, float(min_quote_balance_thb)))
+        if min_quote_balance_for_pairs is not None:
+            config = replace(
+                config,
+                min_quote_balance_for_pairs=max(0.0, float(min_quote_balance_for_pairs)),
+            )
         if require_supported_market is not None:
             config = replace(config, require_supported_market=bool(require_supported_market))
         if include_assets_with_balance is not None:
@@ -330,13 +374,13 @@ class HybridDynamicPairResolver:
         supported_pairs: set[str] = set()
         warnings: List[str] = list(config.warnings)
         try:
-            supported_pairs = _extract_supported_thb_pairs(api_client.get_symbols() or [])
+            supported_pairs = _extract_supported_pairs(api_client.get_symbols() or [], config.quote_asset)
         except Exception as exc:
-            warnings.append(f"Failed to fetch Bitkub symbols: {exc}")
+            warnings.append(f"Failed to fetch exchange symbols: {exc}")
 
         balances = api_client.get_balances() or {}
         quote_balance = self._extract_available_balance(balances, config.quote_asset)
-        configured_allow_list = set(_normalize_pairs(configured_pairs or []))
+        configured_allow_list = set(_normalize_pairs(configured_pairs or [], config.quote_asset))
 
         selected_pairs: List[str] = []
         for entry in config.entries:
@@ -351,7 +395,7 @@ class HybridDynamicPairResolver:
                 else config.require_supported_market
             )
             if require_supported_market and supported_pairs and pair not in supported_pairs:
-                warnings.append(f"{pair} skipped: pair is not supported by Bitkub")
+                warnings.append(f"{pair} skipped: pair is not supported by the exchange")
                 continue
 
             if self._is_trade_ready(entry, balances, quote_balance, config):
@@ -388,7 +432,15 @@ class HybridDynamicPairResolver:
         )
         has_asset_balance = include_if_held and asset_balance > entry.min_asset_balance
         has_quote_balance = quote_balance >= required_quote if required_quote > 0 else quote_balance > 0
-        return has_asset_balance or has_quote_balance
+
+        list_floor = config.min_quote_balance_for_pairs
+        if list_floor is None:
+            has_quote_for_pairs = False
+        else:
+            lf = max(0.0, float(list_floor))
+            has_quote_for_pairs = quote_balance >= lf if lf > 0 else quote_balance > 0
+
+        return has_asset_balance or has_quote_balance or has_quote_for_pairs
 
     def _extract_available_balance(self, balances: Dict[str, Any], asset: str) -> float:
         raw = balances.get(asset.upper(), {}) if isinstance(balances, dict) else {}

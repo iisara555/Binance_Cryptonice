@@ -44,6 +44,11 @@ class PortfolioRuntimeHelper:
             return total_balance
         return float(state.get("balance", 0.0) or 0.0)
 
+    def quote_asset(self) -> str:
+        config = getattr(self.bot, "config", {}) or {}
+        hybrid_cfg = (config.get("data", {}) or {}).get("hybrid_dynamic_coin_config", {}) or {}
+        return str(hybrid_cfg.get("quote_asset") or "USDT").upper()
+
     def get_portfolio_mark_price(self, symbol: str) -> float:
         pair = str(symbol or "").upper()
         if not pair:
@@ -83,11 +88,12 @@ class PortfolioRuntimeHelper:
             if asset_total <= 0:
                 continue
 
-            if asset_symbol == "THB":
+            quote = self.quote_asset()
+            if asset_symbol == quote:
                 total_value += asset_total
                 continue
 
-            current_price = self.get_portfolio_mark_price(f"THB_{asset_symbol}")
+            current_price = self.get_portfolio_mark_price(f"{asset_symbol}{quote}")
             if current_price > 0:
                 total_value += asset_total * current_price
 
@@ -128,11 +134,12 @@ class PortfolioRuntimeHelper:
             balance_monitor = getattr(self.bot, "_balance_monitor", None)
             balance_state = balance_monitor.get_state() if balance_monitor else {}
             balances = balance_state.get("balances") or {}
-            thb_payload = balances.get("THB") or {}
-            thb_balance = float(thb_payload.get("total", thb_payload.get("available", 0.0)) or 0.0)
-            total_balance = self.estimate_total_portfolio_balance(balances) or thb_balance
+            quote = self.quote_asset()
+            quote_payload = balances.get(quote) or {}
+            quote_balance = float(quote_payload.get("total", quote_payload.get("available", 0.0)) or 0.0)
+            total_balance = self.estimate_total_portfolio_balance(balances) or quote_balance
             stale_balance_result = {
-                "balance": thb_balance,
+                "balance": quote_balance,
                 "total_balance": total_balance,
                 "positions": self.bot.executor.get_open_orders(),
                 "timestamp": datetime.now(),
@@ -163,30 +170,31 @@ class PortfolioRuntimeHelper:
             response = self.bot.api_client.get_balances()
 
             if isinstance(response, dict):
-                thb_info = response.get("THB", {})
-                thb_balance = float(thb_info.get("available", 0) or 0.0)
-                total_balance = self.estimate_total_portfolio_balance(response) or thb_balance
+                quote = self.quote_asset()
+                quote_info = response.get(quote, {})
+                quote_balance = float(quote_info.get("available", 0) or 0.0)
+                total_balance = self.estimate_total_portfolio_balance(response) or quote_balance
             elif isinstance(response, list):
                 resp2 = self.bot.api_client.get_balance()
                 if isinstance(resp2, dict) and resp2.get("error") == 0:
                     result_data = resp2.get("result", {})
-                    thb_balance = float(result_data.get("THB", 0) or 0.0) if isinstance(result_data, dict) else 0.0
+                    quote_balance = float(result_data.get(self.quote_asset(), 0) or 0.0) if isinstance(result_data, dict) else 0.0
                 else:
-                    thb_balance = 0.0
-                total_balance = thb_balance
+                    quote_balance = 0.0
+                total_balance = quote_balance
             else:
-                thb_balance = 0.0
+                quote_balance = 0.0
                 total_balance = 0.0
 
             result = {
-                "balance": thb_balance,
+                "balance": quote_balance,
                 "total_balance": total_balance,
                 "positions": self.bot.executor.get_open_orders(),
                 "timestamp": datetime.now(),
             }
             return _store_portfolio_cache(result)
         except Exception as exc:
-            logger.error("Error getting portfolio state from Bitkub: %s", exc, exc_info=True)
+            logger.error("Error getting portfolio state from exchange: %s", exc, exc_info=True)
             if stale_balance_result is not None:
                 return _store_portfolio_cache(stale_balance_result)
             return {
@@ -235,7 +243,8 @@ class PortfolioRuntimeHelper:
                     data = response.get("result", [])
                     import pandas as pd
 
-                    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                    columns = pd.Index(["timestamp", "open", "high", "low", "close", "volume"])
+                    df = pd.DataFrame(data, columns=columns)
                     df = df.sort_values("timestamp").reset_index(drop=True)
                     df.attrs["_data_source"] = "api"
                     self.bot._symbol_market_cache[cache_key] = {"data": df, "timestamp": now}
@@ -253,7 +262,8 @@ class PortfolioRuntimeHelper:
 
         import pandas as pd
 
-        df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        columns = pd.Index(["timestamp", "open", "high", "low", "close", "volume"])
+        df = pd.DataFrame(rows, columns=columns)
         df = df.sort_values("timestamp").reset_index(drop=True)
         df.attrs["_data_source"] = "db"
         self.bot._symbol_market_cache[cache_key] = {"data": df, "timestamp": now}

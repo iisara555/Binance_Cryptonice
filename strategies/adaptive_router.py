@@ -232,7 +232,7 @@ class AdaptiveStrategyRouter:
                     elif self.btc_correlation_enabled:
                         self._warn_btc_correlation_issue(
                             f"insufficient:{timeframe}",
-                            "[AdaptiveRouter] BTC correlation unavailable for %s: insufficient THB_BTC history on timeframe %s",
+                            "[AdaptiveRouter] BTC correlation unavailable for %s: insufficient BTCUSDT history on timeframe %s",
                             symbol,
                             timeframe,
                         )
@@ -284,14 +284,14 @@ class AdaptiveStrategyRouter:
             return None
         try:
             candles = self.api_client.get_candle(
-                symbol="THB_BTC",
+                symbol="BTCUSDT",
                 timeframe=str(timeframe or "15m"),
                 limit=max(int(lookback_bars or 2), 2),
             )
             if not isinstance(candles, dict) or candles.get("error") not in (0, None):
                 self._warn_btc_correlation_issue(
                     f"payload:{timeframe}",
-                    "[AdaptiveRouter] BTC correlation unavailable: malformed THB_BTC candle response for timeframe %s",
+                    "[AdaptiveRouter] BTC correlation unavailable: malformed BTCUSDT candle response for timeframe %s",
                     timeframe,
                 )
                 return None
@@ -310,7 +310,7 @@ class AdaptiveStrategyRouter:
             if len(closes) < 2:
                 self._warn_btc_correlation_issue(
                     f"closes:{timeframe}",
-                    "[AdaptiveRouter] BTC correlation unavailable: THB_BTC candle series too short on timeframe %s",
+                    "[AdaptiveRouter] BTC correlation unavailable: BTCUSDT candle series too short on timeframe %s",
                     timeframe,
                 )
                 return None
@@ -318,7 +318,7 @@ class AdaptiveStrategyRouter:
         except Exception as e:
             self._warn_btc_correlation_issue(
                 f"fetch:{timeframe}",
-                "[AdaptiveRouter] BTC correlation unavailable: THB_BTC candle fetch failed on timeframe %s",
+                "[AdaptiveRouter] BTC correlation unavailable: BTCUSDT candle fetch failed on timeframe %s",
                 timeframe,
             )
             return None

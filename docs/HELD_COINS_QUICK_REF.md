@@ -13,6 +13,20 @@
 
 ## What To Check
 
+### Current Whitelist Profile
+
+runtime profile ที่ใช้อยู่ตอนนี้ใน `coin_whitelist.json`:
+
+- `BTC`
+- `ETH`
+- `BNB`
+- `SOL`
+- `XRP`
+- `ADA`
+- `DOGE`
+- `LINK`
+- `MATIC`
+
 ### Config
 
 ```yaml

@@ -47,6 +47,8 @@ class ExecutionRuntimeDeps:
     auth_degraded: bool
     mode: BotMode
     executed_today: MutableSequence[Dict[str, Any]]
+    pre_trade_gate_check: Any = None
+    register_sl_hold_entry: Any = None
 
 
 class ExecutionRuntimeHelper:
@@ -63,10 +65,13 @@ class ExecutionRuntimeHelper:
                 deps.send_alert(deps.format_skip_alert(decision))
             return
 
+        if callable(deps.pre_trade_gate_check) and not deps.pre_trade_gate_check(decision, portfolio):
+            return
+
         rationale = getattr(decision.signal, "trade_rationale", "N/A")
         logger.info(f"[Trade Decision] {rationale}")
         side_thai = "ซื้อ" if decision.plan.side.value == "buy" else "ขาย"
-        logger.info(f"🤖 [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} THB")
+        logger.info(f"🤖 [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} quote")
 
         is_new_entry_buy = decision.plan.side.value == "buy"
         is_new_entry_idle_sell = (
@@ -120,6 +125,8 @@ class ExecutionRuntimeHelper:
 
         result = deps.executor.execute_entry(decision.plan, deps.get_risk_portfolio_value(portfolio))
         if result.success:
+            if callable(deps.register_sl_hold_entry) and result.order_id:
+                deps.register_sl_hold_entry(result.order_id)
             decision.status = "executed"
             deps.executed_today.append({
                 "decision": decision,
@@ -159,6 +166,8 @@ class ExecutionRuntimeHelper:
     def process_semi_auto(deps: ExecutionRuntimeDeps, decision: TradeDecision, portfolio: Dict[str, Any]) -> None:
         if not decision.risk_check.passed:
             return
+        if callable(deps.pre_trade_gate_check) and not deps.pre_trade_gate_check(decision, portfolio):
+            return
 
         with (deps.pending_decisions_lock or _NullLock()):
             deps.pending_decisions.append(decision)
@@ -195,31 +204,49 @@ class ExecutionRuntimeHelper:
             if decision_id < 0 or decision_id >= len(deps.pending_decisions):
                 logger.error(f"Invalid decision_id: {decision_id}")
                 return False
-            decision = deps.pending_decisions[decision_id]
+            # Claim under lock to prevent duplicate concurrent approvals
+            # from executing the same decision.
+            decision = deps.pending_decisions.pop(decision_id)
+
+        restored = False
+
+        def _restore_pending_decision() -> None:
+            nonlocal restored
+            if restored:
+                return
+            with (deps.pending_decisions_lock or _NullLock()):
+                insert_at = min(max(decision_id, 0), len(deps.pending_decisions))
+                deps.pending_decisions.insert(insert_at, decision)
+            restored = True
+
         portfolio = deps.get_portfolio_state()
 
         logger.info(f"Manual approval: executing trade #{decision_id}")
 
+        if callable(deps.pre_trade_gate_check) and not deps.pre_trade_gate_check(decision, portfolio):
+            _restore_pending_decision()
+            return False
+
         if deps.state_machine_enabled:
             if decision.plan.side == OrderSide.BUY:
                 deps.submit_managed_entry(decision, portfolio)
-                with (deps.pending_decisions_lock or _NullLock()):
-                    deps.pending_decisions.pop(decision_id)
                 return True
             if deps.try_submit_managed_signal_sell(decision):
-                with (deps.pending_decisions_lock or _NullLock()):
-                    deps.pending_decisions.pop(decision_id)
                 return True
             if not deps.allow_sell_entries_from_idle:
                 logger.debug(
                     "approve_trade skipped SELL for %s: idle SELL is disabled",
                     decision.plan.symbol,
                 )
+                _restore_pending_decision()
                 return False
 
         result = deps.executor.execute_entry(decision.plan, deps.get_risk_portfolio_value(portfolio))
         if not result.success:
+            _restore_pending_decision()
             return False
+        if callable(deps.register_sl_hold_entry) and result.order_id:
+            deps.register_sl_hold_entry(result.order_id)
 
         decision.status = "executed"
         deps.executed_today.append({
@@ -227,8 +254,6 @@ class ExecutionRuntimeHelper:
             "result": result,
             "timestamp": datetime.now(),
         })
-        with (deps.pending_decisions_lock or _NullLock()):
-            deps.pending_decisions.pop(decision_id)
         return True
 
     @staticmethod

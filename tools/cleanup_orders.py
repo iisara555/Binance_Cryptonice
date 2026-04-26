@@ -80,8 +80,8 @@ def clear_all_positions(dry_run: bool = True):
 
 def fix_btc_limit(dry_run: bool = True):
     """
-    Remove THB_BTC positions with invalid BTC amounts.
-    BTC amounts should be <= 1.0 for THB_BTC pairs.
+    Remove BTC positions with invalid base amounts.
+    BTC amounts should be <= 1.0 for BTC trading pairs.
     """
     conn = sqlite3.connect('crypto_bot.db')
     cursor = conn.cursor()
@@ -89,13 +89,13 @@ def fix_btc_limit(dry_run: bool = True):
     cursor.execute('''
         SELECT id, symbol, amount, side, entry_price
         FROM positions
-        WHERE (symbol = 'THB_BTC' OR symbol = 'BTC_THB')
+        WHERE UPPER(symbol) IN ('BTCUSDT', 'THB_BTC', 'BTC_THB')
         AND CAST(amount AS REAL) > 1.0
     ''')
     invalid = cursor.fetchall()
     
     if not invalid:
-        print('No invalid THB_BTC amounts found.')
+        print('No invalid BTC amounts found.')
         conn.close()
         return
     
@@ -108,7 +108,7 @@ def fix_btc_limit(dry_run: bool = True):
     else:
         cursor.execute('''
             DELETE FROM positions
-            WHERE (symbol = 'THB_BTC' OR symbol = 'BTC_THB')
+            WHERE UPPER(symbol) IN ('BTCUSDT', 'THB_BTC', 'BTC_THB')
             AND CAST(amount AS REAL) > 1.0
         ''')
         conn.commit()
@@ -135,7 +135,7 @@ if __name__ == '__main__':
     # Ghost orders
     subparsers.add_parser('ghosts', help='Remove ghost orders (remaining_amount = 0)')
     subparsers.add_parser('all', help='Clear all positions')
-    subparsers.add_parser('fix-btc', help='Fix invalid THB_BTC amounts > 1.0')
+    subparsers.add_parser('fix-btc', help='Fix invalid BTC position amounts > 1.0')
     subparsers.add_parser('vacuum', help='Optimize database with VACUUM')
     
     # Add execute flag

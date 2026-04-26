@@ -25,7 +25,7 @@ def _build_app(tmp_path, *, auto_detect_held_pairs: bool = False) -> TradingBotA
             "read_only": False,
             "risk": {"max_risk_per_trade_pct": 2.0},
             "data": {
-                "pairs": ["THB_BTC"],
+                "pairs": ["BTCUSDT"],
                 "auto_detect_held_pairs": auto_detect_held_pairs,
                 "hybrid_dynamic_coin_config": {
                     "whitelist_json_path": str(whitelist_path),
@@ -64,15 +64,15 @@ def test_pairs_add_and_remove_updates_pairlist_and_runtime_pairs(tmp_path):
 
     add_result = app.add_runtime_pairs(["btc", "THB_ETH"])
 
-    assert add_result["added_pairs"] == ["THB_BTC", "THB_ETH"]
-    assert add_result["active_pairs"] == ["THB_BTC", "THB_ETH"]
+    assert add_result["added_pairs"] == ["BTCUSDT", "ETHUSDT"]
+    assert add_result["active_pairs"] == ["BTCUSDT", "ETHUSDT"]
     whitelist_path = tmp_path / "coin_whitelist.json"
     assert json.loads(whitelist_path.read_text(encoding="utf-8"))["assets"] == ["BTC", "ETH"]
 
     remove_result = app.remove_runtime_pairs(["btc"])
 
-    assert remove_result["removed_pairs"] == ["THB_BTC"]
-    assert remove_result["active_pairs"] == ["THB_ETH"]
+    assert remove_result["removed_pairs"] == ["BTCUSDT"]
+    assert remove_result["active_pairs"] == ["ETHUSDT"]
     assert json.loads(whitelist_path.read_text(encoding="utf-8"))["assets"] == ["ETH"]
 
 
@@ -92,7 +92,7 @@ def test_submit_manual_market_buy_places_market_order_and_tracks_position(tmp_pa
     result = app.submit_manual_market_buy("btc", 500.0)
 
     order_request = app.executor.execute_order.call_args.args[0]
-    assert order_request.symbol == "THB_BTC"
+    assert order_request.symbol == "BTCUSDT"
     assert order_request.side == OrderSide.BUY
     assert order_request.amount == 500.0
     assert order_request.order_type == "market"
@@ -157,7 +157,7 @@ def test_track_manual_position_registers_real_cost_basis_with_sl_tp(tmp_path):
 
     result = app.track_manual_position("btc", 0.001, 1_500_000.0)
 
-    assert result["symbol"] == "THB_BTC"
+    assert result["symbol"] == "BTCUSDT"
     assert result["entry_price"] == 1_500_000.0
     assert result["total_entry_cost"] == 1500.0
     assert result["stop_loss"] == 1_470_000.0
@@ -189,7 +189,7 @@ def test_submit_manual_market_sell_can_close_active_order_by_id(tmp_path):
     app.executor.get_open_orders.return_value = [
         {
             "order_id": "pos-1",
-            "symbol": "THB_BTC",
+            "symbol": "BTCUSDT",
             "side": OrderSide.BUY,
             "amount": 0.001,
             "remaining_amount": 0.0,
@@ -208,7 +208,7 @@ def test_submit_manual_market_sell_can_close_active_order_by_id(tmp_path):
     result = app.submit_manual_market_sell("pos-1")
 
     order_request = app.executor.execute_order.call_args.args[0]
-    assert order_request.symbol == "THB_BTC"
+    assert order_request.symbol == "BTCUSDT"
     assert order_request.side == OrderSide.SELL
     assert order_request.amount == 0.001
     assert order_request.order_type == "market"
@@ -235,8 +235,8 @@ def test_process_cli_command_supports_runtime_commands(tmp_path):
     pairs_message = app.process_cli_command("pairs add btc doge")
 
     assert "Type 'confirm'" in risk_message
-    assert "THB_BTC" in pairs_message
-    assert "THB_DOGE" in pairs_message
+    assert "BTCUSDT" in pairs_message
+    assert "DOGEUSDT" in pairs_message
 
 
 def test_mode_show_reports_active_mode_and_path(tmp_path):
@@ -736,7 +736,7 @@ def test_signal_alignment_reports_waiting_for_market_data(tmp_path):
         rows = app._build_cli_signal_alignment(["THB_BTC"])
 
         assert rows[0]["action"] == "WAIT"
-        assert rows[0]["status"] == "Waiting: Insufficient data (3/210 bars)"
+        assert rows[0]["status"] == "แท่งไม่พอ 3/210"
     finally:
         _clear_signal_flow()
 
@@ -749,7 +749,7 @@ def test_signal_alignment_reports_waiting_for_first_signal_flow(tmp_path):
         rows = app._build_cli_signal_alignment(["THB_BTC"])
 
         assert rows[0]["action"] == "WAIT"
-        assert rows[0]["status"] == "Waiting for first signal flow"
+        assert rows[0]["status"] == "รอรอบแรก"
     finally:
         _clear_signal_flow()
 

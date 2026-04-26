@@ -72,10 +72,10 @@ def run_preflight(
     env_values = _load_env_file(env_path)
     _check(checks, ".env present", env_path.exists(), f"Expected root env file at {env_path}")
 
-    bitkub_key = _env_value("BITKUB_API_KEY", env_values)
-    bitkub_secret = _env_value("BITKUB_API_SECRET", env_values)
-    _check(checks, "BITKUB_API_KEY configured", not _looks_like_placeholder(bitkub_key), "BITKUB_API_KEY must be set to a real value")
-    _check(checks, "BITKUB_API_SECRET configured", not _looks_like_placeholder(bitkub_secret), "BITKUB_API_SECRET must be set to a real value")
+    binance_key = _env_value("BINANCE_API_KEY", env_values)
+    binance_secret = _env_value("BINANCE_API_SECRET", env_values)
+    _check(checks, "BINANCE_API_KEY configured", not _looks_like_placeholder(binance_key), "BINANCE_API_KEY must be set to a real value")
+    _check(checks, "BINANCE_API_SECRET configured", not _looks_like_placeholder(binance_secret), "BINANCE_API_SECRET must be set to a real value")
 
     bot_config = project_root / "bot_config.yaml"
     _check(checks, "bot_config.yaml present", bot_config.exists(), f"Expected bot config at {bot_config}")

@@ -1,7 +1,20 @@
 # Crypto Trading Bot Configuration
 # =================================
+#
+# Binance Thailand: set BINANCE_API_KEY and BINANCE_API_SECRET in .env (see
+# config.py). Live trading also respects LIVE_TRADING, MIN_ORDER_AMOUNT, etc.
+# The api_keys block below is NOT used for Binance exchange auth; optional
+# telegram_* values can supplement env / notifications.telegram_chat_id.
+# bitkub_* keys are legacy placeholders and are ignored by the Binance runtime.
+#
+# Runtime alignment (see docs/CONFIGURATION_SCHEMA.md — Binance Thailand):
+# - WebSocket: disabled in Binance mode; REST is used for market prices.
+# - balance_monitor: uses Binance client; fiat/crypto history APIs are stubbed
+#   on Binance.th, so deposit/withdraw detection from history is usually quiet.
+# - monitoring reconciliation: exchange-agnostic (via api_client).
+# - rebalance: exchange-agnostic; use USDT in targets if your book is USDT-quoted.
 
-# API Keys (REPLACE WITH YOUR ACTUAL KEYS)
+# API Keys (optional fallbacks; exchange secrets live in .env)
 api_keys:
   binance_api_key: "YOUR_BINANCE_API_KEY"
   binance_secret_key: "YOUR_BINANCE_SECRET_KEY"
@@ -11,15 +24,17 @@ api_keys:
   telegram_chat_id: ""
 
 # Trading Settings
-simulate_only: false                 # false = live trading, true = paper trading only
+# Live orders: simulate_only false + read_only false, and LIVE_TRADING=true in .env
+simulate_only: false                 # true = paper only (no real orders from YAML path)
+read_only: false                     # true = executor skips orders (also BOT_READ_ONLY=true in .env)
 trading:
-  trading_pair: ""                  # Runtime will set this from current Bitkub holdings
+  trading_pair: ""                  # Runtime may set from holdings / whitelist (Binance TH)
   # Multi-pair support: bot will iterate through all pairs in data.pairs
   # trading_pairs list can be added for specific pairs to trade
   interval_seconds: 60               # Main loop interval in seconds
   timeframe: "15m"                    # Locked to 15m for runtime trading loop
   mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
-  min_order_amount: 15.0            # Bitkub minimum order value in THB
+  min_order_amount: 15.0            # Minimum order notional (quote); for *USDT pairs = USDT (see also MIN_ORDER_AMOUNT in .env)
 
 strategy_mode:
   active: "scalping"               # "standard" | "trend_only" | "scalping"
@@ -65,6 +80,55 @@ strategy_mode:
     max_risk_per_trade_pct: 1.0
     position_risk_per_trade_pct: 0.75
     position_size_cap_pct: 15.0
+
+# ── Mode-Specific Indicator Profiles ─────────────────────────────────────
+# กำหนดว่าแต่ละ mode ใช้ strategies ไหนบ้าง
+# และ timeframe / parameter ที่เหมาะสม (อ่านโดย SignalGenerator)
+# NOTE: ส่วนนี้ใช้ "ADD-ON" — ถ้า SignalGenerator ไม่ได้รับ mode จะ fallback
+# ไปใช้ strategies ทุกตัวเหมือนเดิม (backward compatible)
+mode_indicator_profiles:
+
+  scalping:
+    # ใช้ strategies ที่ respond ไวต่อ signal สั้น
+    active_strategies: ["simple_scalp_plus", "scalping", "sniper"]
+    primary_timeframe: "15m"
+    confirm_timeframe: "15m"
+    min_confidence: 0.30
+    min_strategies_agree: 1
+    # SL/TP ต่อ mode (sync กับ strategy_mode.scalping)
+    stop_loss_pct: 1.0
+    take_profit_pct: 3.0
+    # ATR multiplier สำหรับ dynamic SL
+    atr_multiplier: 1.2
+    # Entry: เร็ว ไม่รอ confirmation นาน
+    confirmation_candles: 1
+    min_hold_seconds: 30
+
+  trend_only:
+    # ใช้ strategies ที่เหมาะกับ trending market
+    active_strategies: ["machete_v8b_lite", "trend_following", "breakout"]
+    primary_timeframe: "15m"
+    confirm_timeframe: "1h"
+    min_confidence: 0.35
+    min_strategies_agree: 1
+    stop_loss_pct: 4.5
+    take_profit_pct: 10.0
+    atr_multiplier: 1.8
+    confirmation_candles: 2
+    min_hold_seconds: 300
+
+  standard:
+    # ใช้ทุก strategies เพื่อ diversify
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus", "trend_following", "mean_reversion", "breakout", "scalping"]
+    primary_timeframe: "15m"
+    confirm_timeframe: "1h"
+    min_confidence: 0.35
+    min_strategies_agree: 1
+    stop_loss_pct: 2.0
+    take_profit_pct: 4.0
+    atr_multiplier: 1.5
+    confirmation_candles: 1
+    min_hold_seconds: 60
 
 # Adaptive Strategy Router - Auto Mode Switching
 auto_mode_switch:
@@ -134,6 +198,9 @@ risk:
   atr_multiplier: 2.5                # 2.5x ATR for dynamic SL/TP
   atr_period: 14                     # ATR lookback period
 
+pre_trade_gate:
+  enabled: true                      # Run 10-point gate checks before each order
+
 # Strategies
 strategies:
   enabled:
@@ -156,6 +223,23 @@ strategies:
     take_profit_pct: 3.0             # ค่านี้ sync จาก strategy_mode.scalping
     position_timeout_minutes: 30
     bootstrap_position_timeout_hours: 24
+  machete_v8b_lite:
+    enabled: true
+    adx_threshold: 25.0
+    atr_multiplier: 1.8
+    risk_reward: 2.0
+    min_buy_confidence: 0.50
+  simple_scalp_plus:
+    enabled: true
+    hull_period: 16
+    ema_fast: 9
+    ema_slow: 21
+    rsi_period: 7
+    rsi_buy_min: 48
+    rsi_sell_max: 52
+    volume_threshold: 1.05
+    atr_multiplier: 1.2
+    risk_reward: 1.8
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:
@@ -163,7 +247,7 @@ auto_trader:
   # Auto position sizing
   position_sizing:
     mode: "risk_based"               # "risk_based", "fixed", "kelly"
-    fixed_amount: 100.0               # Fixed amount in THB (if mode=fixed)
+    fixed_amount: 100.0               # Fixed amount in quote currency, e.g. USDT (if mode=fixed)
     risk_per_trade_pct: 1.5          # % of portfolio to risk per trade
     max_position_pct: 10.0           # Maximum position as % of portfolio
   # Auto stop loss / take profit
@@ -194,6 +278,15 @@ notifications:
   notify_ml_signals: false           # Deprecated after AI purge
   notify_position_updates: true      # Notify on SL/TP hits
 
+weekly_review:
+  enabled: true
+  day_of_week: 6                     # Sunday (UTC)
+  hour_utc: 17
+  scheduler_poll_seconds: 60
+  save_to_file: true
+  send_telegram: true
+  file_path: "weekly_reviews/review_{date}.md"
+
 # Execution
 execution:
   order_type: "limit"                # "limit" or "market"
@@ -205,6 +298,24 @@ execution:
   trailing_activation_pct: 3.0       # เริ่ม ratchet trailing stop เมื่อกำไรอย่างน้อย 3.0%
   trailing_stop_pct: 1.5             # ลาก stop loss ตามหลังราคาปัจจุบัน 1.5%
   allow_trailing_stop: true          # อนุญาตให้ระบบประมวลผลการเลื่อนจุดตัดขาดทุนได้
+
+minimal_roi:
+  enabled: true
+  scalping:
+    "0": 0.03
+    "15": 0.015
+    "30": 0.008
+    "60": 0.004
+  standard:
+    "0": 0.04
+    "30": 0.02
+    "60": 0.01
+    "120": 0.004
+  trend_only:
+    "0": 0.08
+    "60": 0.04
+    "120": 0.02
+    "240": 0.01
 
 # Execution State Machine
 # Separate ML entry decisions from order lifecycle and exits.
@@ -228,9 +339,11 @@ data:
   collect_interval_seconds: 60       # Interval for data collector loop
   hybrid_dynamic_coin_config:
     whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON)
-    min_quote_balance_thb: 100.0     # THB available required to open a new BUY on a whitelisted asset
-    require_supported_market: true   # Drop whitelist entries not currently supported by Bitkub
-    include_assets_with_balance: true  # Keep whitelisted coins with real holdings even if THB quote balance is low
+    min_quote_balance_thb: 100.0     # Legacy key name: min quote (USDT for *USDT pairs) before opening a new BUY
+    # Minimum USDT to attach whitelist pairs to runtime (WS, collector, trading_pairs). Can be below min_quote_balance_thb for small accounts.
+    min_quote_balance_for_pairs: 10.0
+    require_supported_market: true   # Drop whitelist entries not on Binance.th exchangeInfo
+    include_assets_with_balance: true  # Keep whitelisted coins with real holdings even if quote (e.g. USDT) balance is low
     hot_reload_enabled: true         # Watch the JSON whitelist and refresh runtime pairs without restart
     reload_interval_seconds: 30      # Polling interval for whitelist change detection
 
@@ -252,7 +365,7 @@ candle_retention:
 portfolio:
   initial_balance: 500.0            # Initial balance (for simulation)
   min_balance_threshold: 100.0      # Minimum balance to continue trading
-  read_only: false                  # If true, no real orders placed (use env var BOT_READ_ONLY for override)
+  read_only: false                  # Mirror top-level read_only; executor reads top-level + BOT_READ_ONLY env
   persist_path: "portfolio_state.json"  # Persist rebalancer state (cooldown survives restart)
 
 # Portfolio Rebalancing
@@ -265,9 +378,9 @@ rebalance:
   # Strategy: "threshold" | "calendar" | "risk" | "combined"
   strategy: "threshold"
   # Environment overrides supported:
-  #   REBALANCE_TARGET_ALLOCATION=THB:20,BTC:50,DOGE:30
+  #   REBALANCE_TARGET_ALLOCATION=USDT:20,BTC:50,DOGE:30
   #   REBALANCE_TARGET_<ASSET>=<percent>
-  #   REBALANCE_CASH_ASSETS=THB,USDT
+  #   REBALANCE_CASH_ASSETS=USDT,THB
   #   REBALANCE_SIDEWAYS_EXPOSURE_FACTOR=0.5
   
   # How often to check for rebalance (every N main loop iterations)
@@ -275,7 +388,7 @@ rebalance:
   cooldown_minutes: 60              # Minimum minutes between rebalance executions (anti-whipsaw)
   trade_count_every: 5              # Trigger a rebalance review after every N successful entries (0 = disabled)
   sideways_regime: true             # Trigger rebalance review when ML/strategy regime becomes sideways
-  cash_assets: ["THB"]             # Cash-like assets that absorb reduced exposure in sideways markets
+  cash_assets: ["USDT"]            # Quote/cash-like assets for Binance TH *USDT books
   sideways_exposure_factor: 0.5     # Keep only 50% of risk-asset exposure when regime is sideways
   
   # Threshold-based rebalancing
@@ -298,29 +411,32 @@ rebalance:
     volatility_threshold_pct: 30     # Rebalance if volatility changes > X%
   
   # Target allocation (must sum to ~100%)
-  # Adjust these to match your portfolio assets and risk tolerance
+  # Adjust keys to match your book (e.g. USDT as cash for *USDT pairs on Binance TH)
   target_allocation:
-    THB: 20.0
+    USDT: 20.0
     BTC: 35.0
     ETH: 20.0
     POL: 15.0
     DOGE: 10.0
   
   # Minimum trade value to execute (avoid tiny trades)
-  min_trade_value: 10.0             # Ignore rebalance orders < 10 THB (Bitkub minimum)
-  estimated_cost_pct: 0.5           # Estimated round-trip cost per rebalance % (Bitkub 0.25% x 2 sides)
+  min_trade_value: 10.0             # Ignore rebalance orders below this notional in quote terms (e.g. USDT)
+  estimated_cost_pct: 0.2           # Estimated Binance TH round-trip fee cost % per rebalance (0.1% x 2)
 
-# Wallet Balance / Deposit / Withdrawal Monitor
+# Wallet Balance / Deposit / Withdrawal Monitor (uses runtime api_client; Binance.th history feeds are stubbed)
 balance_monitor:
-  enabled: true                     # Poll Bitkub balances + wallet history in the background
+  enabled: true                     # Poll balances in the background; history-based deposit/withdraw signals are limited on Binance.th
   poll_interval_seconds: 30         # Main polling interval
   persist_path: "balance_monitor_state.json"  # Seen tx IDs / status cache
   bootstrap_history_on_startup: true  # Mark existing wallet history as seen on first poll to avoid replaying old events after restart
-  thb_min_threshold: 0.0            # Default THB critical threshold (or use THB_MIN_THRESHOLD env)
+  clean_startup_event_tape: true    # Clear stale persisted event tape on startup bootstrap
+  event_tape_max_age_hours: 12      # Event Tape shows only recent balance events within this age
+  quote_asset: "USDT"               # Cash asset monitored for quote-balance alerts
+  quote_min_threshold: 0.0          # Alert when quote balance falls below this; env QUOTE_MIN_THRESHOLD overrides
   coin_min_threshold: 0.0           # Default per-coin critical threshold (or use COIN_MIN_THRESHOLD env)
   coin_min_thresholds: {}           # Optional overrides, e.g. BTC: 0.0005
   # Extra env overrides:
-  #   THB_MIN_THRESHOLD=500
+  #   QUOTE_MIN_THRESHOLD=500
   #   COIN_MIN_THRESHOLD=0.0001
   #   COIN_MIN_THRESHOLDS=BTC:0.0005,ETH:0.01
 
@@ -340,8 +456,8 @@ monitoring:
   # Still-alive logging
   still_alive_interval_minutes: 5   # Log "still alive" every N minutes
 
-  # Reconciliation with Bitkub
-  reconciliation_interval_minutes: 10  # Check bot state vs Bitkub state every N minutes
+  # Reconciliation with the live exchange (via api_client / executor)
+  reconciliation_interval_minutes: 10  # Check bot state vs exchange state every N minutes
 
   # Auto-restart on crash
   auto_restart_on_crash: true       # Enable auto-restart watchdog
@@ -355,9 +471,11 @@ monitoring:
 #                                                                              
 # WebSocket Real-time Prices
 #                                                                              
-# Connect to Bitkub WebSocket (wss://api.bitkub.com/websocket) for live prices.
+# Live prices: Binance Thailand runtime now uses native Binance stream adapter.
+# If websocket backend is unavailable at runtime, pricing falls back to REST.
 websocket:
-  enabled: true                      # Set to false to use REST polling only
+  enabled: true                      # Enable native websocket price path for supported runtime backends
+  startup_retry_interval_seconds: 20 # Retry websocket startup in main loop when state is NOT STARTED
   reconnect_max_delay: 60.0          # Max seconds between reconnect attempts
   reconnect_multiplier: 1.5          # Exponential backoff multiplier
   ping_interval: 20                  # WebSocket ping interval (seconds)

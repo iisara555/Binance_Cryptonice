@@ -26,6 +26,35 @@ def get_latest_signal_flow_snapshot() -> Dict[str, Dict[str, Any]]:
     with _SIGNAL_FLOW_LOCK:
         return copy.deepcopy(_LATEST_SIGNAL_FLOW)
 
+def ensure_signal_flow_record(pair: str, reason: str = "Waiting for first signal cycle") -> Dict[str, Any]:
+    """Ensure a per-pair signal-flow record exists during warmup phases."""
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    normalized_pair = str(pair or "").upper()
+    normalized_reason = str(reason or "").strip() or "Waiting for first signal cycle"
+
+    with _SIGNAL_FLOW_LOCK:
+        record = _LATEST_SIGNAL_FLOW.setdefault(
+            normalized_pair,
+            {
+                "updated_at": ts,
+                "steps": {},
+            },
+        )
+        record["updated_at"] = ts
+        steps = record.setdefault("steps", {})
+        bootstrap = steps.get("Bootstrap")
+        if not isinstance(bootstrap, dict):
+            steps["Bootstrap"] = {
+                "result": "INFO",
+                "reason": normalized_reason,
+                "timestamp": ts,
+            }
+        elif not str(bootstrap.get("reason") or "").strip():
+            bootstrap["reason"] = normalized_reason
+            bootstrap["timestamp"] = ts
+
+        return copy.deepcopy(record)
+
 def _diag(pair: str, step: str, result: str, reason: str = ""):
     """Emit a standardised [SIGNAL_FLOW] diagnostic line."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -60,6 +89,8 @@ from strategies.mean_reversion import MeanReversionStrategy
 from strategies.breakout import BreakoutStrategy
 from strategies.scalping import ScalpingStrategy
 from strategies.sniper import SniperStrategy
+from strategies.machete_v8b_lite import MacheteV8bLite
+from strategies.simple_scalp_plus import SimpleScalpPlus
 from indicators import TechnicalIndicators
 
 # Multi-timeframe imports
@@ -164,6 +195,12 @@ class SignalGenerator:
                 sniper_cfg,
                 indicators=TechnicalIndicators,
             ),
+            "machete_v8b_lite": MacheteV8bLite(
+                self.config.get("machete_v8b_lite", {}),
+            ),
+            "simple_scalp_plus": SimpleScalpPlus(
+                self.config.get("simple_scalp_plus", {}),
+            ),
         }
         self._aggregate_strategy_names = [
             "trend_following",
@@ -210,6 +247,35 @@ class SignalGenerator:
     def set_database(self, db) -> None:
         """Inject the database handle for dynamic strategy performance lookups."""
         self._db = db
+
+    def get_active_strategies_for_mode(self, mode: str) -> List[str]:
+        """Resolve active strategy names from mode profiles with safe fallbacks."""
+        mode_name = str(mode or "standard").strip().lower() or "standard"
+        mode_profiles = dict(self.config.get("mode_indicator_profiles", {}) or {})
+        profile = dict(mode_profiles.get(mode_name, {}) or {})
+        configured = profile.get("active_strategies")
+        if not isinstance(configured, list):
+            configured = None
+        if configured is None:
+            configured = self.config.get("strategies", {}).get("enabled", [])
+        if not isinstance(configured, list):
+            configured = []
+
+        active: List[str] = []
+        seen: set[str] = set()
+        for strategy_name in configured:
+            normalized = str(strategy_name or "").strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            if normalized not in self.strategies:
+                logger.debug("Skipping unknown strategy %s in mode %s", normalized, mode_name)
+                continue
+            seen.add(normalized)
+            active.append(normalized)
+
+        if active:
+            return active
+        return list(self._aggregate_strategy_names)
 
     def _make_mtf_cache_key(self, pair: str, timeframes: List[str], db: Any) -> str:
         raw = f"{str(pair or '').upper()}|{','.join(str(tf) for tf in timeframes)}|{type(db).__name__}:{id(db)}"
@@ -274,10 +340,15 @@ class SignalGenerator:
         # Reset daily count if new day
         self._reset_daily_state()
 
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            logger.debug("generate_signals skipped: empty OHLCV | symbol=%s", symbol)
+            return []
+
         # Build a cache key from symbol + OHLCV hash (SHA-256, 24 chars)
         try:
             tail_data = data[['open', 'high', 'low', 'close', 'volume']].tail(5)
-            data_hash = hashlib.sha256(tail_data.to_json().encode()).hexdigest()[:24]
+            serialized_tail = str(tail_data.to_json() or "")
+            data_hash = hashlib.sha256(serialized_tail.encode("utf-8")).hexdigest()[:24]
         except Exception:
             data_hash = "unknown"
 
@@ -334,8 +405,14 @@ class SignalGenerator:
                     _diag(symbol, f"Strategy:{name}", "REJECT",
                           "generate_signal() returned None (no setup detected)")
             except Exception as e:
-                logger.warning(f"Error generating signal from {name}: {e}")
-                _diag(symbol, f"Strategy:{name}", "REJECT", f"Exception: {e}")
+                logger.warning(
+                    "Signal strategy error | pair=%s strategy=%s %s: %s",
+                    symbol,
+                    name,
+                    type(e).__name__,
+                    e,
+                )
+                _diag(symbol, f"Strategy:{name}", "REJECT", f"{type(e).__name__}: {e}")
 
         _diag(symbol, "SignalCollection", "INFO",
               f"Total raw signals collected: {len(all_signals)} from {len(strategies_to_use)} strategies")
@@ -383,7 +460,21 @@ class SignalGenerator:
         if strategy is None:
             return []
 
-        raw_signal = strategy.generate_signal(data, symbol)
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            logger.debug("generate_sniper_signal skipped: empty OHLCV | symbol=%s", symbol)
+            return []
+
+        try:
+            raw_signal = strategy.generate_signal(data, symbol)
+        except Exception as e:
+            logger.warning(
+                "Signal strategy error | pair=%s strategy=sniper %s: %s",
+                symbol,
+                type(e).__name__,
+                e,
+            )
+            _diag(symbol, "Sniper:Exception", "REJECT", f"{type(e).__name__}: {e}")
+            return []
         diagnostics = getattr(strategy, "get_last_diagnostics", lambda: {})()
         for step in (
             "Sniper:DataCheck",
@@ -721,7 +812,7 @@ class SignalGenerator:
         elif avg_rr < 1.0:
             score += 25
         
-        return float(min(100, max(0, score)))
+        return float(min(100.0, max(0.0, float(score))))
     
     def check_risk(
         self, 

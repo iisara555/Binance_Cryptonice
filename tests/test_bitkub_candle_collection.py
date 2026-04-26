@@ -2,27 +2,26 @@ from concurrent.futures import Future
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import threading
 
-from api_client import BitkubClient
 import data_collector
-from data_collector import BitkubCollector
+from api_client import BinanceThClient
+from data_collector import BinanceThCollector as BitkubCollector
 
 
-def test_bitkub_client_get_candle_uses_tradingview_history_and_normalizes_rows():
-    payload = {
-        "c": [100.0, 101.0],
-        "h": [102.0, 103.0],
-        "l": [99.0, 100.0],
-        "o": [99.5, 100.5],
-        "s": "ok",
-        "t": [1710000000, 1710000060],
-        "v": [12.0, 13.5],
-    }
+def test_binance_client_get_candle_uses_v1_klines_and_normalizes_rows():
+    payload = [
+        [1710000000000, "99.5", "102.0", "99.0", "100.0", "12.0"],
+        [1710000060000, "100.5", "103.0", "100.0", "101.0", "13.5"],
+    ]
 
-    client = BitkubClient(api_key="key", api_secret="secret", base_url="https://example.invalid")
+    client = BinanceThClient(api_key="key", api_secret="secret", base_url="https://example.invalid")
 
-    with patch.object(BitkubClient, "_get_candle_cached", return_value=payload) as cached:
-        response = client.get_candle("THB_BTC", "15", limit=2)
+    with patch("requests.get") as mock_get:
+        mock_response = Mock()
+        mock_response.json.return_value = payload
+        mock_get.return_value = mock_response
+        response = client.get_candle("THB_BTC", "15m", limit=2)
 
     assert response["error"] == 0
     assert response["status"] == "ok"
@@ -30,30 +29,22 @@ def test_bitkub_client_get_candle_uses_tradingview_history_and_normalizes_rows()
         [1710000000, 99.5, 102.0, 99.0, 100.0, 12.0],
         [1710000060, 100.5, 103.0, 100.0, 101.0, 13.5],
     ]
-
-    called_symbol, called_resolution, called_from, called_to, called_url = cached.call_args.args
-    assert called_symbol == "BTC_THB"
-    assert called_resolution == "15"
-    assert called_to >= called_from
-    assert called_url == "https://example.invalid/tradingview/history"
+    assert mock_get.call_args.args[0] == "https://api.binance.th/api/v1/klines"
+    assert mock_get.call_args.kwargs["params"] == {"symbol": "BTCUSDT", "interval": "15m", "limit": 2}
 
 
-def test_bitkub_client_cancel_order_uses_normalized_market_symbol():
-    client = BitkubClient(api_key="key", api_secret="secret", base_url="https://example.invalid")
+def test_binance_client_cancel_order_uses_v1_order_endpoint():
+    client = BinanceThClient(api_key="key", api_secret="secret", base_url="https://example.invalid")
 
-    with patch.object(BitkubClient, "_request", return_value={"error": 0}) as request:
+    with patch.object(BinanceThClient, "_request", return_value={"orderId": "order-123"}) as request:
         response = client.cancel_order("THB_BTC", "order-123", "sell")
 
-    assert response == {"error": 0}
+    assert response["id"] == "order-123"
     request.assert_called_once_with(
-        "POST",
-        "/api/v3/market/cancel-order",
-        authenticated=True,
-        params={
-            "sym": "btc_thb",
-            "id": "order-123",
-            "sd": "sell",
-        },
+        "DELETE",
+        "/api/v1/order",
+        signed=True,
+        params={"symbol": "BTCUSDT", "orderId": "order-123"},
     )
 
 
@@ -62,15 +53,10 @@ def test_bitkub_collector_collect_ohlc_accepts_tradingview_dict_payload():
     collector.db = Mock()
     collector.db.get_latest_price.return_value = None
     collector.db.insert_prices_batch.side_effect = lambda rows: len(rows)
-    collector.get_ohlc = Mock(return_value={
-        "c": [100.0, 101.0],
-        "h": [102.0, 103.0],
-        "l": [99.0, 100.0],
-        "o": [99.5, 100.5],
-        "s": "ok",
-        "t": [1710000000, 1710000060],
-        "v": [12.0, 13.5],
-    })
+    collector.get_ohlc = Mock(return_value=[
+        [1710000000000, "99.5", "102.0", "99.0", "100.0", "12.0"],
+        [1710000060000, "100.5", "103.0", "100.0", "101.0", "13.5"],
+    ])
 
     stored = BitkubCollector.collect_ohlc(collector, "THB_BTC", interval=1, timeframe="1m")
 
@@ -87,15 +73,9 @@ def test_bitkub_collector_collect_ohlc_result_reports_up_to_date_for_existing_cl
     collector.db = Mock()
     collector.db.get_latest_price.return_value = SimpleNamespace(timestamp=datetime(2026, 4, 5, 15, 45, 0))
     closed_candle_ts = int(datetime(2026, 4, 5, 15, 45, 0, tzinfo=timezone.utc).timestamp())
-    collector.get_ohlc = Mock(return_value={
-        "c": [2.9738],
-        "h": [2.9738],
-        "l": [2.9738],
-        "o": [2.9738],
-        "s": "ok",
-        "t": [closed_candle_ts],
-        "v": [33.54294169],
-    })
+    collector.get_ohlc = Mock(return_value=[
+        [closed_candle_ts * 1000, "2.9738", "2.9738", "2.9738", "2.9738", "33.54294169"],
+    ])
 
     detail = BitkubCollector._collect_ohlc_result(collector, "THB_DOGE", interval=15, timeframe="15m")
 
@@ -127,11 +107,12 @@ def test_bitkub_collector_log_result_clarifies_zero_insert_as_up_to_date(caplog)
 def test_bitkub_collector_collect_multi_timeframe_uses_detail_results(monkeypatch):
     collector = BitkubCollector.__new__(BitkubCollector)
 
-    def fake_collect(pair, minutes, timeframe):
+    def fake_collect(pair, interval, timeframe):
+        stored_by_tf = {"1m": 1, "5m": 5, "15m": 15}
         return {
             "pair": pair,
             "timeframe": timeframe,
-            "stored": minutes,
+            "stored": stored_by_tf[timeframe],
             "status": "stored",
             "latest_stored": None,
             "latest_fetched": None,
@@ -166,19 +147,23 @@ def test_bitkub_collector_set_pairs_warms_new_pairs_when_running(monkeypatch):
     collector.pairs = ["THB_BTC"]
     collector.running = True
     collector.multi_timeframe_enabled = True
-    collector._warm_pairs_multi_timeframe = Mock()
+    collector.multi_timeframes = ["1m", "5m"]
+    collector._warm_pairs_backfill = Mock()
 
     BitkubCollector.set_pairs(collector, ["THB_BTC", "THB_SOL"])
 
     assert collector.pairs == ["THB_BTC", "THB_SOL"]
-    collector._warm_pairs_multi_timeframe.assert_called_once_with(["THB_SOL"])
+    collector._warm_pairs_backfill.assert_called_once_with(["THB_SOL"])
 
 
 def test_bitkub_collector_start_primes_multi_timeframe_before_background_thread(monkeypatch):
     collector = BitkubCollector.__new__(BitkubCollector)
     collector.running = False
     collector.multi_timeframe_enabled = True
-    collector._warm_pairs_multi_timeframe = Mock()
+    collector._pairs_lock = threading.Lock()
+    collector.pairs = ["BTCUSDT"]
+    collector.multi_timeframes = ["1m", "5m"]
+    collector._warm_pairs_backfill = Mock()
     collector._collector_loop = Mock()
     collector._thread = None
 
@@ -197,7 +182,7 @@ def test_bitkub_collector_start_primes_multi_timeframe_before_background_thread(
     BitkubCollector.start(collector, blocking=False)
 
     assert collector.running is True
-    collector._warm_pairs_multi_timeframe.assert_called_once_with()
+    collector._warm_pairs_backfill.assert_called_once_with()
     assert started["target"] == collector._collector_loop
     assert started["daemon"] is True
     assert started["started"] is True

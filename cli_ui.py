@@ -22,8 +22,14 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from helpers import format_bitkub_time
+from helpers import format_exchange_time
 from logger_setup import get_shared_console
+
+try:
+    from signal_generator import get_latest_signal_flow_snapshot
+except Exception:  # pragma: no cover - defensive: keep dashboard alive if module fails
+    def get_latest_signal_flow_snapshot() -> Dict[str, Dict[str, Any]]:
+        return {}
 
 
 class _UILogBufferHandler(logging.Handler):
@@ -44,7 +50,8 @@ class _UILogBufferHandler(logging.Handler):
 class CLICommandCenter:
     """Render a live terminal dashboard using Rich."""
 
-    _NOISY_INFO_LOGGERS = {"signal_flow", "bitkub_websocket", "websocket"}
+    _NOISY_INFO_LOGGERS = {"signal_flow", "legacy_bitkub_websocket", "bitkub_websocket", "websocket"}
+    _CASH_ASSETS = {"USDT", "THB"}
     _GREEN = "#10b981"
     _MINT = _GREEN
     _RED = "#ef4444"
@@ -66,6 +73,7 @@ class CLICommandCenter:
         "signal": (_PURPLE, f"bold {_PURPLE}"),
         "signal_hot": (_GREEN, f"bold {_GREEN}"),
         "signal_cold": (_RED, f"bold {_RED}"),
+        "signal_flow": (_CYAN, f"bold {_CYAN}"),
         "events": (_BORDER_DIM, f"bold {_WHITE}"),
         "portfolio": (_EMBER, f"bold {_EMBER}"),
         "portfolio_hot": (_RED, f"bold {_RED}"),
@@ -181,7 +189,7 @@ class CLICommandCenter:
         if not rendered:
             return
 
-        timestamp = format_bitkub_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
+        timestamp = format_exchange_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
         logger_name = str(record.name or "root").split(".")[-1]
         if len(logger_name) > 14:
             logger_name = logger_name[-14:]
@@ -266,6 +274,7 @@ class CLICommandCenter:
                 Layout(self._build_runtime_overview_panel(snapshot), ratio=2, name="overview"),
                 Layout(self._build_positions_table(snapshot, compact=True), ratio=4, name="positions"),
                 Layout(self._build_signal_alignment_panel(snapshot), ratio=4, name="alignment"),
+                Layout(self._build_signal_flow_panel(snapshot, compact=True), ratio=3, name="signal_flow"),
                 Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
                 Layout(self._build_log_stream_panel(snapshot), ratio=2, name="logs"),
             )
@@ -276,13 +285,14 @@ class CLICommandCenter:
                 Layout(name="right", ratio=3),
             )
             layout["left"].split_column(
-                Layout(self._build_runtime_overview_panel(snapshot), ratio=3, name="overview"),
+                Layout(self._build_runtime_overview_panel(snapshot), ratio=4, name="overview"),
                 Layout(self._build_balance_breakdown_panel(snapshot), ratio=4, name="portfolio"),
-                Layout(self._build_recent_events_panel(snapshot), ratio=3, name="events"),
+                Layout(self._build_recent_events_panel(snapshot), ratio=2, name="events"),
             )
             layout["center"].split_column(
                 Layout(self._build_positions_table(snapshot, compact=False), ratio=5, name="positions"),
                 Layout(self._build_signal_alignment_panel(snapshot), ratio=5, name="alignment"),
+                Layout(self._build_signal_flow_panel(snapshot, compact=False), ratio=4, name="signal_flow"),
             )
             layout["right"].split_column(
                 Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
@@ -305,7 +315,7 @@ class CLICommandCenter:
         for line in balance_breakdown:
             allocation_pct = self._extract_allocation_pct(line)
             top_allocation_pct = max(top_allocation_pct, allocation_pct)
-            if str(line or "").upper().startswith("THB "):
+            if self._is_cash_breakdown_line(line):
                 cash_allocation_pct = allocation_pct
 
         values = {
@@ -416,6 +426,115 @@ class CLICommandCenter:
         if preserve_tail:
             return f"...{text[-(max_chars - 3):]}"
         return f"{text[:max_chars - 3]}..."
+
+    @staticmethod
+    def _abbrev_signal_flow_step(step: str) -> str:
+        label = str(step or "").strip()
+        if not label:
+            return "-"
+        mapping = {
+            "Bootstrap": "เริ่ม",
+            "Sniper:DataCheck": "ข้อมูล",
+            "Sniper:MacroTrend": "เทรนด์ใหญ่",
+            "Sniper:MicroTrend": "เทรนด์ย่อย",
+            "Sniper:MACDTrigger": "MACD",
+            "Sniper:ATR": "ATR",
+            "Sniper:ADX": "ADX",
+            "Sniper:Result": "ผลลัพธ์",
+            "Aggregation": "รวมสัญญาณ",
+            "SignalCollection": "เก็บสัญญาณ",
+            "GetBestSignal": "เลือกสัญญาณ",
+            "Aggregate:Input": "นำเข้า",
+            "Sniper:Exception": "ข้อผิดพลาด",
+        }
+        if label in mapping:
+            return mapping[label]
+        if label.startswith("Strategy:"):
+            rest = label.replace("Strategy:", "", 1).strip() or "?"
+            return CLICommandCenter._truncate_inline(rest, 8)
+        if label.startswith("RiskCheck:"):
+            rest = label.replace("RiskCheck:", "", 1).strip() or "?"
+            return CLICommandCenter._truncate_inline(rest, 8)
+        if label.startswith("RiskMgr:"):
+            rest = label.replace("RiskMgr:", "", 1).strip() or "?"
+            return CLICommandCenter._truncate_inline(rest, 8)
+        return CLICommandCenter._truncate_inline(label, 9)
+
+    @staticmethod
+    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 40) -> str:
+        """Short Thai-first labels for CLI Signal Flow (raw diagnostics stay in logs)."""
+        st = str(step or "").strip()
+        rt = str(result or "").upper().strip()
+        s = str(raw or "").strip()
+        if not s:
+            return "โอเค" if rt == "PASS" else "—"
+        low = s.lower()
+
+        m = re.search(r"Insufficient data \((\d+)/(\d+) bars\)", s, re.I)
+        if m:
+            return CLICommandCenter._truncate_inline(f"แท่งไม่พอ {m.group(1)}/{m.group(2)}", max_len)
+
+        if "waiting for first signal cycle" in low or s.strip().lower() == "no diagnostics":
+            return "รอรอบแรก"
+
+        if "cooldown period active" in low:
+            return "พักคูลดาวน์"
+
+        if "daily loss limit" in low:
+            return "จำกัดขาดทุนวันนี้"
+
+        if "empty signal list" in low or "nothing to aggregate" in low:
+            return "ไม่มีสัญญาณให้รวม"
+
+        if "invalid portfolio value" in low:
+            return "มูลค่าพอร์ตผิดปกติ"
+
+        if st == "Sniper:MacroTrend" or st.endswith("MacroTrend"):
+            if rt == "REJECT" or ("buy_ok=false" in low and "sell_ok=false" in low):
+                return "ยังไม่มีทิศ EMA ชัด"
+            return "ทิศ EMA50/200 ชัดแล้ว"
+
+        if st == "Sniper:MicroTrend" or st.endswith("MicroTrend"):
+            if rt == "REJECT":
+                return "ราคาห่างจาก EMA50"
+            return "ราคาเข้าโซน EMA50"
+
+        if st == "Sniper:MACDTrigger" or st.endswith("MACDTrigger"):
+            if rt == "REJECT":
+                return "ยังไม่ตัด MACD"
+            return "มีจุดตัด MACD"
+
+        if st == "Sniper:ATR" or st.endswith("ATR"):
+            mx = re.search(r"ATR=([0-9.eE+-]+)", s)
+            if mx:
+                return CLICommandCenter._truncate_inline(f"ATR ใช้ไม่ได้ ({mx.group(1)})", max_len)
+            return "ATR ผิดปกติ"
+
+        if st == "Sniper:ADX" or ("ADX" in st and "Sniper" in st):
+            mx = re.search(r"ADX=([0-9.]+)", s)
+            if mx:
+                return CLICommandCenter._truncate_inline(f"แรงเทรนด์ ADX≈{mx.group(1)}", max_len)
+
+        if st == "Sniper:Result" or st.endswith("Result"):
+            if rt == "PASS":
+                return "ยืนยันส่งสัญญาณ"
+            return CLICommandCenter._truncate_inline(s, max_len)
+
+        if st.startswith("RiskCheck:"):
+            if rt == "REJECT":
+                tail = CLICommandCenter._truncate_inline(s.replace("\n", " "), max(8, max_len - 10))
+                return CLICommandCenter._truncate_inline(f"เช็กไม่ผ่าน {tail}", max_len)
+            return "ผ่านเช็กความเสี่ยง"
+
+        if st.startswith("RiskMgr:"):
+            return CLICommandCenter._truncate_inline(s, max_len)
+
+        if st.startswith("Strategy:"):
+            if rt == "REJECT":
+                return "กลยุทธ์ไม่จับสัญญาณ"
+            return "กลยุทธ์ผ่าน"
+
+        return CLICommandCenter._truncate_inline(s, max_len)
 
     @staticmethod
     def _level_style(level: str) -> str:
@@ -680,7 +799,7 @@ class CLICommandCenter:
             Text.assemble(
                 ("▸ ", f"bold {self._BLUE}"),
                 ("Cash  ", self._DIM),
-                self._meter_text(available_balance, total_balance, width=16, filled_style=f"bold {self._EMBER}", suffix="THB"),
+                self._meter_text(available_balance, total_balance, width=16, filled_style=f"bold {self._EMBER}", suffix="quote"),
             )
         )
         lines.append(
@@ -726,7 +845,15 @@ class CLICommandCenter:
             Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Market    ", self._DIM), (str(system.get("last_market_update", "-")), self._WHITE)),
             Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Fresh     ", self._DIM), self._freshness_text(system.get("freshness"), system.get("market_age_seconds"))),
             Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Latency   ", self._DIM), self._api_latency_text(system.get("api_latency"))),
-            Text.assemble(("▸ ", f"bold {self._CYAN}"), ("WebSocket ", self._DIM), self._service_health_text(system.get("websocket_health"))),
+            Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("WebSocket ", self._DIM),
+                self._service_health_text(system.get("websocket_health")),
+                (
+                    f"  {self._truncate_inline(system.get('websocket_last_error') or '', 48)}",
+                    self._RED if str(system.get("websocket_last_error") or "").strip() else self._DIM,
+                ),
+            ),
             Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Balance   ", self._DIM), self._service_health_text(system.get("balance_health"))),
             Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Candle    ", self._DIM), (str(system.get("candle_readiness", "-")), self._WHITE)),
             Text.assemble(("  ", ""), ("Waiting   ", self._DIM), (str(system.get("candle_waiting", "-")), self._DIM)),
@@ -784,12 +911,9 @@ class CLICommandCenter:
                 macro = "-" if macro_value.upper() == "N/A" else macro_value[0:1]
                 micro = "-" if micro_value.upper() == "N/A" else micro_value[0:1]
                 trigger = "-" if trigger_value.upper() == "N/A" else trigger_value[0:1]
-                # Shorten symbol: THB_BTC -> BTC
-                symbol = str(row.get("symbol") or "-")
-                if symbol.startswith("THB_"):
-                    symbol = symbol[4:]
+                symbol = self._short_symbol_label(row.get("symbol") or "-")
                 # Truncate status
-                status = str(row.get("status") or row.get("pair_state") or "Ready")[:12]
+                status = str(row.get("status") or row.get("pair_state") or "พร้อม")[:14]
                 trend_style = f"bold {self._GREEN}" if str(row.get("trend") or "").upper() == "UP" else f"bold {self._RED}" if str(row.get("trend") or "").upper() == "DOWN" else f"bold {self._EMBER}"
                 table.add_row(
                     symbol,
@@ -826,13 +950,110 @@ class CLICommandCenter:
 
         return self._panel(Group(*summary_lines, table), title="◎ Signal Radar", theme=self._resolve_signal_theme(rows))
 
+    def _build_signal_flow_panel(self, snapshot: Dict[str, Any], compact: bool = False) -> Panel:
+        """Render Signal Flow Diagnostics from signal_generator._LATEST_SIGNAL_FLOW.
+
+        Compact mode shows only the latest step per pair (mini view).
+        Full mode shows every recorded step per pair (PASS / REJECT / INFO).
+        """
+        try:
+            flow_snapshot = get_latest_signal_flow_snapshot()
+        except Exception as exc:
+            self._safe_stderr_write(f"[cli_ui] signal flow snapshot error: {exc}\n")
+            flow_snapshot = {}
+
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"])
+        table.add_column("คู่", style=f"bold {self._WHITE}", max_width=7, no_wrap=True)
+        table.add_column("ขั้น", style=self._DIM, no_wrap=True, max_width=9)
+        table.add_column("\u2713", justify="center", no_wrap=True, width=2)
+        table.add_column("ทำไม", style=self._DIM, ratio=1, overflow="ellipsis", max_width=44)
+
+        if not isinstance(flow_snapshot, dict) or not flow_snapshot:
+            table.add_row("-", "—", "·", "ยังไม่มีข้อมูล")
+            return self._panel(table, title="◬ SigFlow", theme="signal_flow")
+
+        sorted_pairs = sorted(flow_snapshot.items(), key=lambda kv: str(kv[0] or ""))
+
+        pass_count = 0
+        reject_count = 0
+
+        for pair, flow in sorted_pairs:
+            if not isinstance(flow, dict):
+                continue
+            updated_at = str(flow.get("updated_at") or "-")
+            time_only = updated_at.split(" ", 1)[1] if " " in updated_at else updated_at
+            steps_dict = flow.get("steps") or {}
+            if not isinstance(steps_dict, dict):
+                steps_dict = {}
+            step_items = list(steps_dict.items())
+
+            symbol_label = self._short_symbol_label(pair or "-")
+
+            iter_steps = step_items[-1:] if compact else step_items
+            if not iter_steps:
+                table.add_row(
+                    Text.assemble((symbol_label, f"bold {self._WHITE}"), (" " + time_only, self._DIM)),
+                    "—",
+                    Text("\u00b7", style=self._DIM),
+                    "รอรอบแรก",
+                )
+                continue
+
+            first_row = True
+            for step_name, step_data in iter_steps:
+                if not isinstance(step_data, dict):
+                    continue
+                result_raw = str(step_data.get("result") or "").upper()
+                reason_raw = str(step_data.get("reason") or "")
+                step_key = str(step_name or "")
+                why = self._humanize_signal_flow_reason(step_key, result_raw, reason_raw, max_len=44)
+
+                if result_raw == "PASS":
+                    result_cell = Text("\u2713", style=f"bold {self._GREEN}")
+                    pass_count += 1
+                elif result_raw == "REJECT":
+                    result_cell = Text("\u2717", style=f"bold {self._RED}")
+                    reject_count += 1
+                elif result_raw == "INFO":
+                    result_cell = Text("\u00b7", style=f"bold {self._WHITE}")
+                else:
+                    result_cell = Text("\u00b7", style=self._DIM)
+
+                if first_row:
+                    pair_cell = Text.assemble((symbol_label, f"bold {self._WHITE}"), (" " + time_only, self._DIM))
+                    first_row = False
+                else:
+                    pair_cell = Text("", style=self._DIM)
+
+                table.add_row(
+                    pair_cell,
+                    self._abbrev_signal_flow_step(step_key),
+                    result_cell,
+                    why,
+                )
+
+        view_label = "ย่อ" if compact else "เต็ม"
+        summary_line = Text.assemble(
+            ("\u25b8 ", f"bold {self._CYAN}"),
+            (f"{len(sorted_pairs)}คู่", self._DIM),
+            (" \u2502 ", self._DIM),
+            ("\u2713", f"bold {self._GREEN}"),
+            (str(pass_count), f"bold {self._GREEN}"),
+            (" \u2717", f"bold {self._RED}"),
+            (str(reject_count), f"bold {self._RED}"),
+            (" \u2502 ", self._DIM),
+            (view_label, f"bold {self._WHITE}"),
+        )
+
+        return self._panel(Group(summary_line, table), title="\u25ec SigFlow", theme="signal_flow")
+
     def _build_recent_events_panel(self, snapshot: Dict[str, Any]) -> Panel:
         rows = list(snapshot.get("recent_events") or [])
         if not rows:
             return self._panel(Text("No recent events", style=self._DIM), title="◖ Event Tape", theme="events")
 
         lines: List[Text] = []
-        for row in rows[:5]:
+        for row in rows[:3]:
             event_type = str(row.get("type") or "EVT").upper()
             if event_type == "TRADE":
                 style = f"bold {self._GREEN}"
@@ -841,7 +1062,7 @@ class CLICommandCenter:
             else:
                 style = f"bold {self._EMBER}"
             timestamp = str(row.get("timestamp") or "-")
-            message = self._truncate_inline(str(row.get("message") or "-"), 58)
+            message = self._truncate_inline(str(row.get("message") or "-"), 44)
             lines.append(Text.assemble((f"{timestamp} ", self._DIM), (f"[{event_type}] ", style), (message, self._WHITE)))
 
         return self._panel(Group(*lines), title="◖ Event Tape", theme="events")
@@ -860,7 +1081,7 @@ class CLICommandCenter:
             top_allocation_pct = max((self._extract_allocation_pct(item) for item in breakdown_lines), default=0.0)
             cash_allocation_pct = 0.0
             for item in breakdown_lines:
-                if str(item or "").upper().startswith("THB "):
+                if self._is_cash_breakdown_line(item):
                     cash_allocation_pct = self._extract_allocation_pct(item)
                     break
             summary_lines.append(
@@ -903,7 +1124,7 @@ class CLICommandCenter:
 
         portfolio_theme = self._resolve_portfolio_theme(
             max((self._extract_allocation_pct(item) for item in breakdown_lines), default=0.0),
-            next((self._extract_allocation_pct(item) for item in breakdown_lines if str(item or "").upper().startswith("THB ")), 0.0),
+            next((self._extract_allocation_pct(item) for item in breakdown_lines if self._is_cash_breakdown_line(item)), 0.0),
         )
         if summary_lines:
             return self._panel(Group(*summary_lines, table), title="▣ Portfolio", theme=portfolio_theme)
@@ -944,7 +1165,7 @@ class CLICommandCenter:
             Text.assemble(
                 ("▸ ", f"bold {self._EMBER}"),
                 ("Loss    ", self._DIM),
-                self._meter_text(daily_loss_value, daily_loss_cap, width=16, filled_style=f"bold {self._RED}", suffix="THB"),
+                self._meter_text(daily_loss_value, daily_loss_cap, width=16, filled_style=f"bold {self._RED}", suffix="quote"),
             )
         )
         lines.append(
@@ -1111,6 +1332,26 @@ class CLICommandCenter:
         return Text(normalized.upper() or "-", style=CLICommandCenter._WHITE)
 
     @staticmethod
+    def _is_cash_asset(asset: Any) -> bool:
+        return str(asset or "").strip().upper() in CLICommandCenter._CASH_ASSETS
+
+    @staticmethod
+    def _is_cash_breakdown_line(line: Any) -> bool:
+        asset = str(line or "").split(" ", 1)[0].strip().upper()
+        return CLICommandCenter._is_cash_asset(asset)
+
+    @staticmethod
+    def _short_symbol_label(symbol: Any) -> str:
+        label = str(symbol or "-").strip().upper()
+        if label.startswith("THB_") or label.startswith("USDT_"):
+            return label.split("_", 1)[1] or label
+        if label.endswith("_THB") or label.endswith("_USDT"):
+            return label.rsplit("_", 1)[0] or label
+        if label.endswith("USDT") and "_" not in label and len(label) > 4:
+            return label[:-4] or label
+        return label or "-"
+
+    @staticmethod
     def _balance_breakdown_text(line: Any) -> Text:
         content = str(line or "-")
         if content == "-":
@@ -1119,7 +1360,7 @@ class CLICommandCenter:
         main_part, separator, suffix = content.partition(" (")
         asset = main_part.split(" ", 1)[0].upper()
         allocation_pct = CLICommandCenter._extract_allocation_pct(content)
-        if asset == "THB":
+        if CLICommandCenter._is_cash_asset(asset):
             main_style = f"bold {CLICommandCenter._EMBER}"
         elif allocation_pct >= 50.0:
             main_style = f"bold {CLICommandCenter._GREEN}"
@@ -1319,7 +1560,7 @@ class CLICommandCenter:
         empty_units = max(0, 20 - filled_units)
 
         normalized_asset = str(asset or "").upper()
-        if normalized_asset == "THB":
+        if CLICommandCenter._is_cash_asset(normalized_asset):
             filled_style = f"bold {CLICommandCenter._EMBER}"
         elif normalized_pct >= 50.0:
             filled_style = f"bold {CLICommandCenter._GREEN}"
@@ -1387,6 +1628,15 @@ class CLICommandCenter:
             return Text(raw, style=f"bold {CLICommandCenter._GREEN}")
         if normalized.startswith("STALE") or normalized in {"STOPPED", "DISCONNECTED", "FAILED"}:
             return Text(raw, style=f"bold {CLICommandCenter._RED}")
-        if normalized in {"OFF", "NO DATA", "CONNECTING", "RECONNECTING", "NOT_STARTED"}:
+        if normalized in {
+            "OFF",
+            "NO DATA",
+            "CONNECTING",
+            "RECONNECTING",
+            "NOT_STARTED",
+            "NO_PAIRS",
+            "NO_BACKEND",
+            "DISABLED",
+        }:
             return Text(raw, style=f"bold {CLICommandCenter._EMBER}")
         return Text(raw, style=CLICommandCenter._WHITE)

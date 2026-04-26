@@ -1034,14 +1034,15 @@ class Database:
         with self._write_lock:
             return self._with_retry(_do_upsert)
 
-    def delete_positions_thb_btc_amount_over_limit(self, limit: float = 1.0) -> int:
-        """Remove THB_BTC rows with implausible base size (wrong unit). Any side."""
+    def delete_invalid_btc_amount_positions(self, limit: float = 1.0) -> int:
+        """Remove BTC rows with implausible base size (wrong unit). Any side."""
+        btc_symbols = ("BTCUSDT", "THB_BTC", "BTC_THB")
 
         def _do_delete() -> int:
             session = self.get_session()
             try:
                 q = session.query(Position).filter(
-                    func.upper(Position.symbol).in_(("THB_BTC", "BTC_THB")),
+                    func.upper(Position.symbol).in_(btc_symbols),
                     Position.amount > limit,
                 )
                 n = q.delete(synchronize_session=False)
@@ -1049,7 +1050,7 @@ class Database:
                 return int(n or 0)
             except Exception as e:
                 session.rollback()
-                _logger.error("Failed to delete invalid THB_BTC amount positions: %s", e)
+                _logger.error("Failed to delete invalid BTC amount positions: %s", e)
                 raise
             finally:
                 session.close()

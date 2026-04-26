@@ -428,8 +428,8 @@ class TestRiskManagement:
 # API CLIENT TESTS
 # ============================================================================
 
-class TestBitkubAPIClient:
-    """Tests for Bitkub API client."""
+class TestBinanceThAPIClient:
+    """Tests for Binance Thailand API client."""
     
     def test_no_trailing_zeros(self):
         """Test _no_trailing_zeros utility."""
@@ -443,54 +443,54 @@ class TestBitkubAPIClient:
     @patch('requests.get')
     def test_get_ticker(self, mock_get, mock_api_client):
         """Test ticker retrieval."""
-        from api_client import BitkubClient
+        from api_client import BinanceThClient
         
         mock_response = Mock()
-        mock_response.json.return_value = [{
-            'symbol': 'btc_thb',
-            'last': 100000,
-            'highestBid': 99900,
-            'lowestAsk': 100100,
-            'percentChange': 2.5,
-            'high_24_hr': 102000,
-            'low_24_hr': 98000,
-        }]
+        mock_response.json.return_value = {
+            'symbol': 'BTCUSDT',
+            'lastPrice': 100000,
+            'bidPrice': 99900,
+            'askPrice': 100100,
+            'priceChangePercent': 2.5,
+            'highPrice': 102000,
+            'lowPrice': 98000,
+        }
         mock_get.return_value = mock_response
         
-        client = BitkubClient()
+        client = BinanceThClient()
         ticker = client.get_ticker('THB_BTC')
         
         assert ticker['last'] == 100000
-        assert 'highestBid' in ticker
+        assert ticker['highest_bid'] == 99900
 
     def test_get_order_history_normalizes_symbol(self):
-        """Order history must use Bitkub's base_quote symbol format."""
-        from api_client import BitkubClient
+        """Order history must use Binance Thailand v1 account endpoint."""
+        from api_client import BinanceThClient
 
-        client = BitkubClient()
+        client = BinanceThClient()
         client._request = Mock(return_value=[])
 
         client.get_order_history('THB_BTC', limit=50)
 
         client._request.assert_called_once_with(
             'GET',
-            '/api/v3/market/my-order-history',
-            authenticated=True,
-            query_params={'sym': 'btc_thb', 'lmt': 50},
+            '/api/v1/allOrders',
+            signed=True,
+            params={'symbol': 'BTCUSDT', 'limit': 50},
         )
 
     def test_get_open_orders_preserves_checked_symbol_when_sym_missing(self):
         """Open-order rows should keep the requested symbol for reconcile fallback."""
-        from api_client import BitkubClient
+        from api_client import BinanceThClient
 
-        client = BitkubClient()
+        client = BinanceThClient()
         client._request = Mock(return_value=[
             {
-                'id': 'ghost-1',
-                'sym': None,
-                'side': 'sell',
-                'amount': '6.80588833',
-                'rate': '2.9979',
+                'orderId': 'ghost-1',
+                'symbol': None,
+                'side': 'SELL',
+                'origQty': '6.80588833',
+                'price': '2.9979',
             }
         ])
 
@@ -498,12 +498,12 @@ class TestBitkubAPIClient:
 
         client._request.assert_called_once_with(
             'GET',
-            '/api/v3/market/my-open-orders',
-            authenticated=True,
-            query_params={'sym': 'doge_thb'},
+            '/api/v1/openOrders',
+            signed=True,
+            params={'symbol': 'DOGEUSDT'},
         )
         assert rows[0]['_checked_symbol'] == 'THB_DOGE'
-        assert rows[0]['sym'] is None
+        assert rows[0]['_raw']['symbol'] is None
     
     def test_circuit_breaker_initial_state(self):
         """Test circuit breaker starts in CLOSED state."""

@@ -13,14 +13,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from dotenv import load_dotenv
 load_dotenv()
 
-from api_client import BitkubClient
+from api_client import BinanceThClient
 
 
 def check_all_orders():
     """Check open orders for all tracked pairs."""
-    client = BitkubClient()
+    client = BinanceThClient()
     
-    pairs = ['THB_BTC', 'THB_DOGE', 'THB_ETH', 'THB_XRP']
+    pairs = ['BTCUSDT', 'DOGEUSDT', 'ETHUSDT', 'XRPUSDT']
     
     for pair in pairs:
         print(f'\n--- {pair} ---')
@@ -38,7 +38,7 @@ def check_all_orders():
 
 def check_order(pair: str):
     """Check open orders for a specific pair."""
-    client = BitkubClient()
+    client = BinanceThClient()
     orders = client.get_open_orders(pair)
     print(f'Open orders for {pair}:')
     if not orders:
@@ -52,7 +52,7 @@ def check_order(pair: str):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Check open orders')
-    parser.add_argument('--pair', '-p', default='THB_BTC', help='Trading pair (default: THB_BTC)')
+    parser.add_argument('--pair', '-p', default='BTCUSDT', help='Trading pair (default: BTCUSDT)')
     parser.add_argument('--all', '-a', action='store_true', help='Check all pairs')
     args = parser.parse_args()
     

@@ -34,8 +34,7 @@ def _to_float(value: Decimal) -> float:
 
 # ─── Decimal Places per Asset ─────────────────────────────────────────────
 
-# This maps asset symbols to their decimal precision on Bitkub.
-# Values come from Bitkub API's 'decimals' field in /api/v3/market/assets
+# Decimal display precision by asset.
 ASSET_DECIMALS = {
     "THB": 2,    # Thai Baht: 2 decimal places
     "BTC": 8,    # Bitcoin: 8 decimal places
@@ -61,7 +60,7 @@ def format_amount(amount: float, symbol: str) -> str:
     
     Args:
         amount: The numeric amount to format
-        symbol: The asset symbol (e.g., 'BTC', 'THB', 'XRP')
+        symbol: The asset symbol (e.g., 'BTC', 'USDT', 'XRP')
         
     Returns:
         Formatted string with appropriate decimal places
@@ -146,8 +145,8 @@ class TradeRecord:
     quantity: float
     realized_pnl: float            # Gross P&L before fees
     realized_pnl_pct: float        # Gross P&L percentage
-    entry_fee: float = 0.0         # Fee paid on entry (THB)
-    exit_fee: float = 0.0          # Fee paid on exit (THB)
+    entry_fee: float = 0.0         # Fee paid on entry in quote currency
+    exit_fee: float = 0.0          # Fee paid on exit in quote currency
     net_pnl: float = 0.0          # Net P&L after fees
     exit_reason: str = ""          # "stop_loss", "take_profit", "manual", etc.
     opened_at: str = ""
@@ -194,9 +193,11 @@ class PortfolioManager:
         self,
         initial_balance: float = 1000.0,
         persist_path: Optional[str] = None,
+        quote_asset: str = "USDT",
     ):
         self.initial_balance = _to_float(_to_decimal(initial_balance))
         self.current_balance = _to_float(_to_decimal(initial_balance))
+        self.quote_asset = str(quote_asset or "USDT").upper()
         self.positions: dict[str, Position] = {}   # symbol -> Position
         self.trade_history: list[TradeRecord] = []
         self.daily_snapshots: list[DailySnapshot] = []
@@ -267,13 +268,13 @@ class PortfolioManager:
         if side == "long":
             self.current_balance = _to_float(_to_decimal(self.current_balance) - entry_value_dec)
         
-        # Extract base asset for formatting (e.g., "THB_BTC" -> "BTC")
+        # Extract base asset for formatting (e.g., "BTCUSDT" -> "BTC")
         base_asset = extract_base_asset(symbol)
         qty_formatted = format_quantity_for_display(quantity, base_asset)
         
         logger.info(
             f"Opened position: {symbol} {side} qty={qty_formatted} {base_asset} "
-            f"entry={entry_price:.2f} THB"
+            f"entry={entry_price:.2f} {self.quote_asset}"
         )
         self._save()
         return pos
@@ -292,8 +293,8 @@ class PortfolioManager:
             symbol: Trading pair symbol
             exit_price: Price at which position was closed
             reason: Reason for closing (stop_loss, take_profit, manual)
-            entry_fee: Fee paid when opening position (THB)
-            exit_fee: Fee paid when closing position (THB)
+            entry_fee: Fee paid when opening position in quote currency
+            exit_fee: Fee paid when closing position in quote currency
         """
         pos = self.positions.pop(symbol, None)
         if pos is None:
@@ -349,9 +350,9 @@ class PortfolioManager:
         
         logger.info(
             f"Closed position: {symbol} {pos.side} qty={qty_formatted} {base_asset} "
-            f"reason={reason} realized_pnl={_to_float(realized_dec):.2f} THB "
-            f"({pos.unrealized_pnl_pct:.2f}%) fees={entry_fee:.2f}+{exit_fee:.2f} THB "
-            f"net_pnl={_to_float(net_pnl_dec):.2f} THB"
+            f"reason={reason} realized_pnl={_to_float(realized_dec):.2f} {self.quote_asset} "
+            f"({pos.unrealized_pnl_pct:.2f}%) fees={entry_fee:.2f}+{exit_fee:.2f} {self.quote_asset} "
+            f"net_pnl={_to_float(net_pnl_dec):.2f} {self.quote_asset}"
         )
         self._save()
         return record
@@ -474,22 +475,22 @@ class PortfolioManager:
         return {
             "initial_balance": self.initial_balance,
             "current_balance": self.current_balance,  # Keep raw for calculations
-            "current_balance_formatted": format_amount(self.current_balance, "THB"),
+            "current_balance_formatted": format_amount(self.current_balance, self.quote_asset),
             "total_portfolio_value": total_value,
-            "total_portfolio_value_formatted": format_amount(total_value, "THB"),
+            "total_portfolio_value_formatted": format_amount(total_value, self.quote_asset),
             "total_unrealized_pnl": unrealized,
-            "total_unrealized_pnl_formatted": format_amount(unrealized, "THB"),
+            "total_unrealized_pnl_formatted": format_amount(unrealized, self.quote_asset),
             "total_realized_pnl": realized,
-            "total_realized_pnl_formatted": format_amount(realized, "THB"),
+            "total_realized_pnl_formatted": format_amount(realized, self.quote_asset),
             "total_pnl": total_pnl,
-            "total_pnl_formatted": format_amount(total_pnl, "THB"),
+            "total_pnl_formatted": format_amount(total_pnl, self.quote_asset),
             "total_pnl_pct": total_pnl_pct,
             "open_positions_count": len(self.positions),
             "open_positions": formatted_positions,
             "trade_history_count": len(self.trade_history),
             "win_rate_pct": self.win_rate(),
             "daily_pnl": self.daily_pnl(),
-            "daily_pnl_formatted": format_amount(self.daily_pnl(), "THB"),
+            "daily_pnl_formatted": format_amount(self.daily_pnl(), self.quote_asset),
             "daily_pnl_pct": self.daily_pnl_pct(),
             "today_trades": self._today_trades,
             "today_wins": self._today_wins,
@@ -505,6 +506,7 @@ class PortfolioManager:
         data = {
             "initial_balance": self.initial_balance,
             "current_balance": self.current_balance,
+            "quote_asset": self.quote_asset,
             "positions": {s: p.to_dict() for s, p in self.positions.items()},
             "trade_history": [t.to_dict() for t in self.trade_history],
             "daily_snapshots": [s.to_dict() for s in self.daily_snapshots],
@@ -520,6 +522,7 @@ class PortfolioManager:
                 data = json.load(f)
             self.initial_balance = data.get("initial_balance", self.initial_balance)
             self.current_balance = data.get("current_balance", self.current_balance)
+            self.quote_asset = str(data.get("quote_asset", self.quote_asset) or self.quote_asset).upper()
             self.positions = {
                 s: Position.from_dict(p) for s, p in data.get("positions", {}).items()
             }

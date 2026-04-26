@@ -42,8 +42,8 @@ def setup_logging():
 @pytest.fixture(scope="function")
 def mock_env_vars(monkeypatch):
     """Set up mock environment variables for testing."""
-    monkeypatch.setenv("BITKUB_API_KEY", "test_api_key")
-    monkeypatch.setenv("BITKUB_API_SECRET", "test_api_secret")
+    monkeypatch.setenv("BINANCE_API_KEY", "test_api_key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "test_api_secret")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test_token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "test_chat_id")
 

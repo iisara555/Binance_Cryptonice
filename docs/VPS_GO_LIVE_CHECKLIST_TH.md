@@ -4,7 +4,7 @@
 
 ## ก่อน start service
 
-- ยืนยันว่า VPS public IP ถูกเพิ่มใน Bitkub API allowlist แล้ว
+- ยืนยันว่า Binance Thailand API key/secret ถูกต้องและ permission ตรงกับการใช้งานจริง
 - ยืนยันว่า `.env` ถูกสร้างจาก `.env.example` และใส่ key จริงครบแล้ว
 - ยืนยันว่า `LIVE_TRADING` เป็นค่าที่คุณตั้งใจจริง
 - ยืนยันว่า `bot_config.yaml` ใช้ค่าที่ต้องการจริง โดยเฉพาะ `trading.mode`, `rebalance`, `monitoring`
@@ -45,4 +45,4 @@ curl http://127.0.0.1:8080/health
 
 - อย่าเปิด `LIVE_TRADING=true`
 - ใช้ `BOT_READ_ONLY=true` หรือเริ่มด้วยโหมดทดสอบก่อน
-- ถ้า bot health เป็น `degraded` ให้แก้ allowlist หรือ private API ก่อน
+- ถ้า bot health เป็น `degraded` ให้แก้ credentials, permissions หรือ private API ก่อน

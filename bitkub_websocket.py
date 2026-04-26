@@ -25,6 +25,8 @@ except ImportError:
     websocket = None  # type: ignore[assignment]
     logging.error("websocket-client not installed. Please run: pip install websocket-client")
 
+WEBSOCKET_RUNTIME_OK: bool = bool(websocket)
+
 logger = logging.getLogger(__name__)
 
 

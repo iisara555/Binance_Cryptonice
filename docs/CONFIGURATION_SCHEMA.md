@@ -16,6 +16,7 @@ Full documented configuration reference for the current standalone runtime.
 9.  [Portfolio Rebalancing](#portfolio-rebalancing)
 10. [Backtesting Validation](#backtesting-validation)
 11. [Full Example Configuration](#full-example-configuration)
+12. [Binance Thailand alignment (`bot_config.yaml`)](#binance-thailand-alignment-bot_configyaml)
 
 ---
 
@@ -156,7 +157,7 @@ rebalance:
   strategy: "threshold"
   check_interval: 5
   target_allocation:
-    THB: 20.0
+    USDT: 20.0
     BTC: 40.0
     ETH: 40.0
 ```
@@ -217,13 +218,29 @@ rebalance:
   enabled: true
   strategy: "threshold"
   target_allocation:
-    THB: 20.0
+    USDT: 20.0
     BTC: 40.0
     ETH: 40.0
 
 backtesting:
   require_validation_before_live: false
 ```
+
+---
+
+## Binance Thailand alignment (`bot_config.yaml`)
+
+These notes summarize how the **current** Python runtime uses `bot_config.yaml` when the exchange is **Binance Thailand** (`api.binance.th`, `BinanceThClient` in `config.py`).
+
+| YAML area | Actual runtime behavior |
+|-----------|-------------------------|
+| **Live orders** | **`.env` `LIVE_TRADING=true`** (`config.py`) is required to arm real exchange orders. YAML `simulate_only: false` and `read_only: false` must align; unset `BOT_STARTUP_TEST_MODE`; keep `BOT_READ_ONLY` / `SIMULATE_ONLY` off. See `.env.example`. |
+| `api_keys.binance_*` / `bitkub_*` | **Binance credentials are not read from YAML.** Use `.env`: `BINANCE_API_KEY`, `BINANCE_API_SECRET`. Optional: `telegram_bot_token` / `telegram_chat_id` here or in `.env` / `notifications`. Legacy `bitkub_*` entries are unused. |
+| `websocket` | Enables runtime WebSocket pricing when a supported backend is available (native Binance stream in Binance mode). If unavailable, runtime falls back to REST pricing. |
+| `balance_monitor` | Uses whatever `api_client` the bot was constructed with (`BinanceThClient`). Balances refresh; **fiat/crypto deposit/withdraw history** calls are **stubbed empty** on Binance.th (`api_client.py`), so history-driven deposit/withdraw events usually do not fire. |
+| `monitoring` / reconciliation | `monitoring.py` reconciles via `api_client` + executor — **not** Bitkub-specific. |
+| `rebalance` | `portfolio_rebalancer.py` is exchange-agnostic; set `cash_assets` / `target_allocation` keys to match your **quote** asset (e.g. **USDT** for `*USDT` pairs). |
+| `data.hybrid_dynamic_coin_config.min_quote_balance_thb` | **Legacy key name** (`_thb`); value is treated as a **minimum quote balance** threshold — for USDT pairs interpret as **USDT**. |
 
 ---
 

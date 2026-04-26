@@ -4,7 +4,7 @@ import logging
 import time
 from collections import Counter
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from helpers import extract_base_asset, normalize_side_value
 from state_management import TradeLifecycleState
@@ -63,16 +63,21 @@ class StartupRuntimeHelper:
                 backfilled,
             )
 
-    def bootstrap_held_positions(self) -> None:
-        tracked_pairs = [pair.upper() for pair in self.bot._get_trading_pairs()]
+    def bootstrap_held_positions(
+        self,
+        balances: Optional[Dict[str, Any]] = None,
+        target_pairs: Optional[List[str]] = None,
+    ) -> List[str]:
+        tracked_pairs = [pair.upper() for pair in (target_pairs or self.bot._get_trading_pairs())]
         if not tracked_pairs:
-            return
+            return []
 
-        try:
-            balances = self.bot.api_client.get_balances()
-        except Exception as exc:
-            logger.warning("[Bootstrap Positions] Cannot fetch balances: %s", exc)
-            return
+        if balances is None:
+            try:
+                balances = self.bot.api_client.get_balances()
+            except Exception as exc:
+                logger.warning("[Bootstrap Positions] Cannot fetch balances: %s", exc)
+                return []
 
         tracked_symbols = {
             str(order.get("symbol", "")).upper()
@@ -115,7 +120,7 @@ class StartupRuntimeHelper:
             position_value = total_qty * entry_price
             if position_value < self.bot.min_trade_value_thb:
                 logger.debug(
-                    "[Bootstrap Positions] Skipping %s: value %.2f THB < min %.2f THB",
+                    "[Bootstrap Positions] Skipping %s: value %.2f quote < min %.2f quote",
                     pair,
                     position_value,
                     self.bot.min_trade_value_thb,
@@ -175,6 +180,8 @@ class StartupRuntimeHelper:
                 len(registered),
                 "\n  ".join(registered),
             )
+
+        return registered
 
     def reconcile_pending_trade_states(self, remote_order_ids: set[str]) -> set[str]:
         handled_order_ids: set[str] = set()
@@ -267,7 +274,7 @@ class StartupRuntimeHelper:
 
     def reconcile_on_startup(self) -> None:
         logger.info("╔══════════════════════════════════════════════════════╗")
-        logger.info("║  🔍 RECONCILIATION: Querying Bitkub for true state  ║")
+        logger.info("║  🔍 RECONCILIATION: Querying exchange for true state ║")
         logger.info("╚══════════════════════════════════════════════════════╝")
 
         reconciled_count = 0
@@ -294,7 +301,7 @@ class StartupRuntimeHelper:
                 except Exception as exc:
                     logger.warning("[Reconcile] Failed to get open orders for %s: %s", sym, exc, exc_info=True)
 
-            logger.info("[Reconcile] Bitkub reported %d open order(s)", len(all_remote_orders))
+            logger.info("[Reconcile] Exchange reported %d open order(s)", len(all_remote_orders))
 
             remote_order_ids = set()
             for order in all_remote_orders:
@@ -307,10 +314,11 @@ class StartupRuntimeHelper:
                 side_enum = OrderSide.BUY if typ in ("bid", "buy") else OrderSide.SELL
 
                 raw_sym = str(order.get("sym") or "")
-                if "_" in raw_sym:
-                    local_sym = f"THB_{extract_base_asset(raw_sym)}"
+                raw_sym_upper = str(raw_sym or "").upper()
+                if raw_sym_upper.endswith("_THB"):
+                    local_sym = f"THB_{extract_base_asset(raw_sym_upper)}"
                 else:
-                    local_sym = str(order.get("_checked_symbol") or self.bot.trading_pair).upper()
+                    local_sym = str(raw_sym_upper or order.get("_checked_symbol") or self.bot.trading_pair).upper()
 
                 entry_price = float(order.get("rate") or order.get("rat", 0) or 0.0)
                 amount = float(order.get("amount") or order.get("amt", 0) or 0.0)
@@ -341,7 +349,7 @@ class StartupRuntimeHelper:
                 side_value = ghost.get("side")
                 side_str = normalize_side_value(side_value)
                 amount = float(ghost.get("amount", 0.0) or 0.0)
-                if local_sym in ("THB_BTC", "BTC_THB") and side_str == "sell" and amount > 1.0:
+                if local_sym in ("BTCUSDT", "THB_BTC", "BTC_THB") and side_str == "sell" and amount > 1.0:
                     skipped_ghost_counts[(local_sym, side_str)] += 1
                     logger.warning(
                         "[Reconcile] Skipping ghost order %s — amount=%.8f looks wrong for %s sell order (expected BTC < 1.0)",
@@ -371,7 +379,7 @@ class StartupRuntimeHelper:
 
                 oid = ghost["order_id"]
                 logger.warning(
-                    f"👻 [Ghost Order] {oid} found on Bitkub but NOT in local DB! "
+                    f"👻 [Ghost Order] {oid} found on exchange but NOT in local DB! "
                     f"Adding to tracking: {ghost['side'].value.upper()} {ghost['symbol']} "
                     f"{ghost['amount']:.8f} @ {ghost['entry_price']:,.2f}"
                 )
@@ -422,7 +430,7 @@ class StartupRuntimeHelper:
 
             if vanished_ids:
                 logger.info(
-                    "[Reconcile] %d local order(s) not on Bitkub — checking if they were filled while bot was down",
+                    "[Reconcile] %d local order(s) not on exchange — checking if they were filled while bot was down",
                     len(vanished_ids),
                 )
 
@@ -502,7 +510,7 @@ class StartupRuntimeHelper:
                                     logger.warning("[Reconcile] Failed to delete DB position %s after fill: %s", missing_oid, exc)
                         elif self.bot._history_status_is_cancelled(matched):
                             logger.info(
-                                "🗑️ [Reconcile] Order %s was CANCELLED on Bitkub. Removing from local tracking",
+                                "🗑️ [Reconcile] Order %s was CANCELLED on exchange. Removing from local tracking",
                                 missing_oid,
                             )
                             with self.bot.executor._orders_lock:
@@ -522,7 +530,7 @@ class StartupRuntimeHelper:
                             continue
 
                         logger.warning(
-                            "[Reconcile] Order %s not found in Bitkub or history. Removing from local tracking (likely stale)",
+                            "[Reconcile] Order %s not found on exchange or history. Removing from local tracking (likely stale)",
                             missing_oid,
                         )
                         with self.bot.executor._orders_lock:
