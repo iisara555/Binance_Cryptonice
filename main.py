@@ -3078,8 +3078,18 @@ class TradingBotApp:
             logger.info("Bot health HTTP server disabled (monitoring.health_check_port <= 0)")
             return
 
+        # Default loopback only — binding 0.0.0.0 exposes /health to the entire
+        # internet on VPS unless a host firewall restricts the port. Use
+        # monitoring.health_check_host: "0.0.0.0" only behind a trusted LB/proxy.
+        health_host = str(monitoring_config.get("health_check_host") or "").strip() or "127.0.0.1"
+        if health_host == "0.0.0.0":
+            logger.warning(
+                "monitoring.health_check_host is 0.0.0.0 — /health is reachable on all "
+                "interfaces; prefer 127.0.0.1 with SSH tunnel, or restrict the port with UFW"
+            )
+
         self.health_server = BotHealthServer(
-            host="0.0.0.0",
+            host=health_host,
             port=health_port,
             path=health_path,
             status_provider=self.get_health_status,

@@ -167,11 +167,13 @@ notifications:
 ```yaml
 monitoring:
   enabled: true
+  health_check_host: "127.0.0.1"
   health_check_port: 8080
   health_check_path: "/health"
 ```
 
-นี่คือ health endpoint ที่ preflight และ service monitors ใช้ตรวจ runtime
+นี่คือ health endpoint ที่ preflight และ service monitors ใช้ตรวจ runtime  
+`health_check_host` ค่าเริ่มต้นควรเป็น `127.0.0.1` เพื่อไม่เปิดพอร์ต health สู่สาธารณะบน VPS
 
 ---
 
@@ -237,6 +239,7 @@ notifications:
 
 monitoring:
   enabled: true
+  health_check_host: "127.0.0.1"
   health_check_port: 8080
   health_check_path: "/health"
 

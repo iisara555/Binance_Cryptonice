@@ -478,6 +478,9 @@ monitoring:
   enabled: true                     # Enable monitoring service
 
   # Health check HTTP server (for load balancer / uptime monitors)
+  # Bind to loopback by default so the port is not exposed on the public internet.
+  # Use "0.0.0.0" only behind a trusted reverse proxy / LB and host firewall.
+  health_check_host: "127.0.0.1"     # Listen address (127.0.0.1 = localhost only)
   health_check_port: 8080           # Port for /health endpoint (set to 0 to disable)
   health_check_path: "/health"       # Endpoint path
 
