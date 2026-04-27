@@ -5,8 +5,9 @@ param(
     [string]$RemoteServiceName = "crypto-bot-tmux",
     [string]$BotHealthUrl = "http://127.0.0.1:8080/health",
     [string]$ProjectRoot = "",
-    [int]$HealthCheckAttempts = 20,
-    [int]$HealthCheckIntervalSeconds = 2,
+    # Defaults tuned for slow post-merge cold starts (health after systemd/tmux + Python init).
+    [int]$HealthCheckAttempts = 45,
+    [int]$HealthCheckIntervalSeconds = 3,
     [switch]$SkipHealthCheck
 )
 
