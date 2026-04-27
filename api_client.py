@@ -363,6 +363,15 @@ class BinanceThClient:
     BASE_URL: str = "https://api.binance.th"
     TIMEOUT: float = 30.0
 
+    # Number of consecutive signed-call auth errors (-2014/-2015/-1022) tolerated
+    # before they are escalated to BinanceAuthException (which the trading loop
+    # treats as a fatal/graceful-shutdown signal). A small N tolerates Binance.th
+    # IP-whitelist propagation: right after the user adds an IP, a fraction of
+    # signed requests can still hit gateway nodes whose cache hasn't refreshed
+    # and return -2015 even though the key/IP/permissions are correct. Any
+    # successful signed response resets the counter to 0.
+    AUTH_FATAL_CONSECUTIVE_THRESHOLD: int = 5
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -410,6 +419,13 @@ class BinanceThClient:
 
         # Suppress fatal-auth shutdown side effects during opt-in startup probes.
         self._fatal_auth_suppression_context: str = ""
+
+        # Tolerate transient signed-call auth errors (-2014/-2015/-1022) that
+        # Binance.th gateways occasionally return while a freshly added IP
+        # whitelist propagates. We only raise BinanceAuthException after this
+        # many *consecutive* auth failures with no intervening signed success.
+        self._consecutive_auth_failures: int = 0
+        self.auth_fatal_threshold: int = int(self.AUTH_FATAL_CONSECUTIVE_THRESHOLD)
 
         # --- NEW: SPEC_01 --- exchangeInfo cache (per Binance symbol).
         self._exchange_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -750,12 +766,22 @@ class BinanceThClient:
                     msg = _binance_error_message(code_int, data.get("msg"))
                     raise BinanceAPIError(code_int, msg, raw=data)
 
+            if signed and self._consecutive_auth_failures:
+                logger.info(
+                    "Signed call recovered on %s after %d transient auth error(s) — "
+                    "resetting auth-failure counter.",
+                    path, self._consecutive_auth_failures,
+                )
+            self._consecutive_auth_failures = 0
             self._cb.record_success()
             return data
 
         except BinanceAPIError as e:
-            # Auth errors → fatal (suppression-aware)
-            if e.code in (-2014, -2015) or (signed and isinstance(e.code, int) and e.code in {-1022}):
+            is_auth_error = (
+                e.code in (-2014, -2015)
+                or (signed and isinstance(e.code, int) and e.code in {-1022})
+            )
+            if is_auth_error:
                 if self._fatal_auth_suppression_context:
                     logger.warning(
                         "Binance auth error %s on %s during %s — caller will downgrade to "
@@ -764,16 +790,34 @@ class BinanceThClient:
                     )
                     raise
 
+                self._consecutive_auth_failures += 1
+                threshold = max(
+                    1,
+                    int(getattr(self, "auth_fatal_threshold", self.AUTH_FATAL_CONSECUTIVE_THRESHOLD)),
+                )
+
+                if self._consecutive_auth_failures < threshold:
+                    logger.warning(
+                        "Transient Binance auth error %s on %s "
+                        "(consecutive %d/%d, likely IP-whitelist propagation). "
+                        "Caller may retry; circuit breaker NOT tripped.",
+                        e.code, path,
+                        self._consecutive_auth_failures, threshold,
+                    )
+                    raise
+
                 current_ip = get_public_ip() or "unknown"
                 logger.critical(
-                    "🚨 FATAL: Binance auth error %s on %s. "
+                    "🚨 FATAL: Binance auth error %s on %s after %d consecutive failures. "
                     "Current IP: %s | Message: %s | Raw: %s",
-                    e.code, path, current_ip, e.message, e.raw,
+                    e.code, path, self._consecutive_auth_failures,
+                    current_ip, e.message, e.raw,
                 )
                 self._cb.record_failure(f"FATAL Auth Error {e.code} on {path}")
                 raise BinanceAuthException(
                     e.code,
-                    f"🚨 FATAL: Binance.th auth error {e.code} ({e.message}). "
+                    f"🚨 FATAL: Binance.th auth error {e.code} ({e.message}) after "
+                    f"{self._consecutive_auth_failures} consecutive failures. "
                     f"Verify API key/secret and permissions, then restart.",
                     raw=e.raw,
                 )
