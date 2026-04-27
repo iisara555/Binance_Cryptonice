@@ -61,6 +61,7 @@ from dynamic_coin_config import (
     JsonCoinWhitelistRepository,
     resolve_whitelist_path,
 )
+from symbol_registry import set_whitelist_json_path
 from logger_setup import setup_logging as configure_application_logging
 from logger_setup import get_shared_console
 from health_server import BotHealthServer
@@ -239,6 +240,8 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
         risk_cfg["stop_loss_pct"] = float(trend_mode.get("stop_loss_pct", risk_cfg.get("stop_loss_pct", 4.5)))
         risk_cfg["take_profit_pct"] = float(trend_mode.get("take_profit_pct", risk_cfg.get("take_profit_pct", 10.0)))
         risk_cfg["cool_down_minutes"] = float(trend_mode.get("min_time_between_trades_minutes", risk_cfg.get("cool_down_minutes", 5)) or 5)
+        # Align bootstrap / manual % SL/TP with strategy_mode.trend_only (see risk_management.resolve_effective_sl_tp_percentages).
+        risk_cfg["sl_tp_percent_source_when_dynamic"] = "risk_config"
 
         state_cfg["confirmations_required"] = int(trend_mode.get("confirmations_required", state_cfg.get("confirmations_required", 1)) or 1)
         state_cfg["confirmation_window_seconds"] = int(trend_mode.get("confirmation_window_seconds", state_cfg.get("confirmation_window_seconds", 180)) or 180)
@@ -268,6 +271,8 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
 
     risk_cfg["stop_loss_pct"] = float(scalping_mode.get("stop_loss_pct", 0.75))
     risk_cfg["take_profit_pct"] = float(scalping_mode.get("take_profit_pct", 1.75))
+    # Align bootstrap / manual % SL/TP with strategy_mode.scalping (see risk_management.resolve_effective_sl_tp_percentages).
+    risk_cfg["sl_tp_percent_source_when_dynamic"] = "risk_config"
     risk_cfg["max_daily_trades"] = int(scalping_mode.get("max_trades_per_day", risk_cfg.get("max_daily_trades", 50)) or 50)
     risk_cfg["max_position_per_trade_pct"] = float(scalping_mode.get("max_position_per_trade_pct", risk_cfg.get("max_position_per_trade_pct", 20.0)))
     risk_cfg["max_risk_per_trade_pct"] = float(scalping_mode.get("max_risk_per_trade_pct", risk_cfg.get("max_risk_per_trade_pct", 2.0)))
@@ -3115,7 +3120,11 @@ class TradingBotApp:
             logger.error("มีข้อผิดพลาดร้ายแรงเกี่ยวกับคอนฟิก — ปฏิเสธการเริ่มต้นระบบ")
             return False
         logger.info("ตรวจสอบ Config ผ่านเรียบร้อย")
-        
+
+        set_whitelist_json_path(
+            _get_hybrid_dynamic_coin_settings(self.config.get("data") or {}).get("whitelist_json_path")
+        )
+
         # 1. Initialize API Client
         self.api_client = BinanceThClient(
             api_key=BINANCE.api_key,
@@ -3123,6 +3132,39 @@ class TradingBotApp:
             base_url=BINANCE.base_url
         )
         logger.info("API Client initialized")
+
+        # AUDIT FIX: explicit exchange-connection health check using the public
+        # /api/v1/time endpoint (no signing → does not depend on key validity).
+        # If the host is unreachable we fail fast instead of silently sliding
+        # into "degraded mode" on the first signed call.
+        try:
+            import requests as _hc_requests  # lazy import to avoid top-level coupling
+            hc_url = f"{BINANCE.base_url.rstrip('/')}/api/v1/time"
+            hc_resp = _hc_requests.get(hc_url, timeout=5)
+            hc_resp.raise_for_status()
+            hc_payload = hc_resp.json()
+            server_ms = int(hc_payload.get("serverTime", 0)) if isinstance(hc_payload, dict) else int(hc_payload)
+            local_ms = int(time.time() * 1000)
+            skew_ms = abs(server_ms - local_ms)
+            if server_ms <= 0:
+                raise RuntimeError(f"Unexpected serverTime payload from {hc_url}: {hc_payload!r}")
+            logger.info(
+                "Exchange health check OK: %s reachable, clock skew %dms",
+                BINANCE.base_url,
+                skew_ms,
+            )
+            if skew_ms > 5000:
+                logger.warning(
+                    "Clock skew %dms exceeds Binance recvWindow safety margin — signed requests may fail until system clock is synced",
+                    skew_ms,
+                )
+        except Exception as exc:
+            logger.error(
+                "Exchange health check FAILED against %s (%s). Refusing to start: live trading without a confirmed exchange connection is unsafe.",
+                BINANCE.base_url,
+                exc,
+            )
+            return False
 
         data_config = self.config.setdefault("data", {})
         configured_pairs = data_config.get("pairs") or []
@@ -3182,7 +3224,42 @@ class TradingBotApp:
                 logger.info(f"คู่เหรียญที่เทรดจาก config: {' add '.join(resolved_pairs)}")
             else:
                 logger.warning("Config ไม่มีคู่เหรียญที่ใช้งานอยู่ — bot จะเริ่มแบบไม่มีคู่เหรียญ active")
-        
+
+        pairs_for_runtime = list(data_config.get("pairs") or [])
+        for warn in self.api_client.validate_symbol_exchange_info(pairs_for_runtime):
+            logger.warning("Exchange symbol validation: %s", warn)
+
+        pair_filters_cfg = dict(data_config.get("pair_filters") or {})
+        try:
+            min_quote_vol = float(pair_filters_cfg.get("min_quote_volume_24h", 0) or 0)
+        except (TypeError, ValueError):
+            min_quote_vol = 0.0
+        if min_quote_vol > 0 and pairs_for_runtime:
+            from trading.pair_filters import filter_pairs_by_min_quote_volume
+
+            filtered_pairs, vol_warnings = filter_pairs_by_min_quote_volume(
+                self.api_client, pairs_for_runtime, min_quote_vol
+            )
+            for vw in vol_warnings:
+                logger.warning("%s", vw)
+            if filtered_pairs != pairs_for_runtime:
+                data_config["pairs"] = filtered_pairs
+                if filtered_pairs:
+                    self.config["trading_pair"] = filtered_pairs[0]
+                    self.config.setdefault("trading", {})["trading_pair"] = filtered_pairs[0]
+                    logger.info(
+                        "Pair volume filter (min_quote_volume_24h=%.2f): %s",
+                        min_quote_vol,
+                        " add ".join(filtered_pairs),
+                    )
+                else:
+                    self.config["trading_pair"] = ""
+                    self.config.setdefault("trading", {})["trading_pair"] = ""
+                    logger.warning(
+                        "Pair volume filter removed all pairs (min_quote_volume_24h=%.2f)",
+                        min_quote_vol,
+                    )
+
         # 2. Initialize Risk Manager
         risk_config = self.config.get("risk", {})
         risk_params = RiskConfig(
@@ -3333,42 +3410,103 @@ class TradingBotApp:
         logger.info("คอมโพเนนต์ทั้งหมดเริ่มต้นสำเร็จพร้อมใช้งาน")
         return True
     
+    def _resolve_active_strategies(self) -> list[str]:
+        """Return the strategies that the active mode profile will actually use."""
+        mode = str(getattr(self, "_current_strategy_mode", "standard") or "standard").lower()
+        profiles = self.config.get("mode_indicator_profiles") or {}
+        profile = profiles.get(mode) or {}
+        active = profile.get("active_strategies")
+        if active:
+            return [str(s) for s in active]
+        enabled = (self.config.get("strategies") or {}).get("enabled") or []
+        return [str(s) for s in enabled]
+
     def start(self, register_signal_handlers: bool = True):
-        """Start all components."""
-        logger.info("กำลังเริ่มระบบ Crypto Trading Bot...")
+        """Start all components with a clean, phase-based CLI readout."""
+        from cli_layout import StartupReporter, SuppressRepeatStateFilter
+
         self._shutdown_event.clear()
         self._app_started_at = time.time()
         collector = self.collector
         bot = self.bot
         if collector is None or bot is None:
             raise RuntimeError("TradingBotApp.start() called before initialize() completed")
-        
-        # Start data collector (background thread)
-        collector.start()
-        logger.info("ระบบเก็บข้อมูล Data Collector เริ่มต้นสำเร็จ (ทำงานเบื้องหลัง)")
-        
-        # Small delay to let collector get initial data
-        time.sleep(2)
-        
-        # Start trading bot (main loop)
+
+        reporter = StartupReporter(logger=logger)
+
+        # Suppress every-iteration state-based logs on the console handlers.
+        # File handlers (StructuredFormatter / JSON) are left untouched.
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(
+                handler, logging.FileHandler
+            ):
+                if not any(isinstance(f, SuppressRepeatStateFilter) for f in handler.filters):
+                    handler.addFilter(SuppressRepeatStateFilter(ttl_seconds=300.0))
+
+        reporter.banner("CRYPTO TRADING BOT  —  Binance.th", version="2026.04.27")
+
+        with reporter.phase("Initialization"):
+            mode = str(self.config.get("trading", {}).get("mode", "semi_auto")).lower()
+            pairs = list(self.config.get("data", {}).get("pairs") or [])
+            interval = int(self.config.get("data", {}).get("collect_interval_seconds", 60))
+            reporter.step("config", "bot_config.yaml validated")
+            reporter.step("exchange", "api.binance.th reachable", detail="health-check OK")
+            reporter.step("mode", mode, detail=f"poll {interval}s")
+            reporter.step("pairs", f"{len(pairs)} active", detail=", ".join(pairs[:6]) or "none")
+            collector.start()
+            reporter.step("collector", "started", detail="background thread")
+
+        with reporter.phase("Backfill"):
+            warmup_tfs = ["15m", "1h"]
+            mtf_cfg = self.config.get("multi_timeframe") or {}
+            if mtf_cfg.get("enabled"):
+                configured = mtf_cfg.get("timeframes") or warmup_tfs
+                warmup_tfs = [tf for tf in configured if tf in ("5m", "15m", "1h", "4h")] or warmup_tfs
+            reporter.step("timeframes", ", ".join(warmup_tfs))
+            t0 = time.monotonic()
+            try:
+                stats = collector.backfill_all_sync(timeframes=warmup_tfs)
+                total_rows = (
+                    sum(sum(tf_stats.values()) for tf_stats in stats.values()) if stats else 0
+                )
+                elapsed = time.monotonic() - t0
+                reporter.result(
+                    f"{total_rows:,} bars added across {len(warmup_tfs)} timeframe(s) in {elapsed:.1f}s"
+                )
+            except Exception as exc:
+                reporter.result(f"backfill failed: {exc}", ok=False)
+                logger.error("Pre-loop backfill failed", exc_info=True)
+
+        with reporter.phase("Strategy registration"):
+            active = self._resolve_active_strategies()
+            descriptions = {
+                "sniper": "ADX-gated dual-EMA + MACD",
+                "machete_v8b_lite": "multi-indicator confluence (5/7)",
+                "simple_scalp_plus": "Hull/EMA/VWAP/RSI scalper",
+                "trend_following": "SMA20/50 crossover + ADX>20",
+                "mean_reversion": "Bollinger band re-entry",
+                "breakout": "Donchian 20-bar breakout",
+                "momentum": "RSI threshold crossover",
+                "scalping": "fast EMA + RSI scalper",
+            }
+            for name in active:
+                reporter.strategy(name, descriptions.get(name, "—"))
+            if not active:
+                reporter.warning("no strategies enabled — bot will idle")
+
         bot.start()
-        logger.info("Trading Bot เริ่มต้นสำเร็จ (main loop)")
-
         self._start_health_server()
-
         self._start_pair_hot_reload()
         self._start_weekly_review_scheduler()
-        
-        # Setup signal handlers only for standalone/main-thread execution.
+
         if register_signal_handlers:
             setup_signal_handlers(bot, collector, self.telegram_handler)
-        
-        logger.info("=" * 50)
-        logger.info("✨ CRYPTO TRADING BOT กำลังทำงาน (RUNNING) ✨")
-        logger.info(f"โหมดการทำงาน (Mode): {self.config.get('trading', {}).get('mode', 'semi_auto').upper()}")
-        pairs = list(self.config.get('data', {}).get('pairs') or [])
-        logger.info(f"คู่เหรียญที่เทรด (Pair): {' add '.join(pairs) if pairs else 'ไม่มี'}")
-        logger.info("กด Ctrl+C เพื่อหยุดระบบ")
+
+        reporter.running(
+            mode=str(self.config.get("trading", {}).get("mode", "semi_auto")).upper(),
+            pairs=len(list(self.config.get("data", {}).get("pairs") or [])),
+            poll=f"{int(self.config.get('data', {}).get('collect_interval_seconds', 60))}s",
+        )
         logger.info("=" * 50)
         self._emit_terminal_status()
     

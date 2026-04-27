@@ -3,12 +3,16 @@
 #
 # Binance Thailand: set BINANCE_API_KEY and BINANCE_API_SECRET in .env (see
 # config.py). Live trading also respects LIVE_TRADING, MIN_ORDER_AMOUNT, etc.
+# WebSocket (Binance.th): default is wss://www.binance.th/gstream per API docs (not stream.binance.th).
+# Optional .env overrides:
+#   BINANCE_WS_URL=wss://www.binance.th/nstream   # if your symbols are SITE type (see exchangeInfo)
+#   BINANCE_WS_URL=wss://stream.binance.com:9443/stream   # global mirror if TH host blocked
 # The api_keys block below is NOT used for Binance exchange auth; optional
 # telegram_* values can supplement env / notifications.telegram_chat_id.
 # bitkub_* keys are legacy placeholders and are ignored by the Binance runtime.
 #
 # Runtime alignment (see docs/CONFIGURATION_SCHEMA.md — Binance Thailand):
-# - WebSocket: disabled in Binance mode; REST is used for market prices.
+# - WebSocket: native Binance.th stream (binance_websocket) when installed; REST fallback if WS unavailable.
 # - balance_monitor: uses Binance client; fiat/crypto history APIs are stubbed
 #   on Binance.th, so deposit/withdraw detection from history is usually quiet.
 # - monitoring reconciliation: exchange-agnostic (via api_client).
@@ -73,13 +77,13 @@ strategy_mode:
     take_profit_pct: 3.0             # ← ค่าที่ใช้จริง (scalping mode signal TP)  net R:R≈1.67
     position_timeout_minutes: 30
     bootstrap_position_timeout_hours: 24  # bootstrap/held coins use best-effort real acquisition time
-    max_trades_per_day: 50
-    min_time_between_trades_minutes: 2
+    max_trades_per_day: 8                 # AUDIT FIX: was 50 — overtrading was the dominant loss driver
+    min_time_between_trades_minutes: 15   # AUDIT FIX: was 2 — give signals room to settle, prevent thrashing
     monitor_check_interval_seconds: 5
-    max_position_per_trade_pct: 15.0
-    max_risk_per_trade_pct: 1.0
-    position_risk_per_trade_pct: 0.75
-    position_size_cap_pct: 15.0
+    max_position_per_trade_pct: 10.0      # AUDIT FIX: tightened from 15%
+    max_risk_per_trade_pct: 0.5           # AUDIT FIX: was 1.0 — half-Kelly until live track record stabilises
+    position_risk_per_trade_pct: 0.5
+    position_size_cap_pct: 10.0
 
 # ── Mode-Specific Indicator Profiles ─────────────────────────────────────
 # กำหนดว่าแต่ละ mode ใช้ strategies ไหนบ้าง
@@ -89,27 +93,26 @@ strategy_mode:
 mode_indicator_profiles:
 
   scalping:
-    # ใช้ strategies ที่ respond ไวต่อ signal สั้น
-    active_strategies: ["simple_scalp_plus", "scalping", "sniper"]
+    # AUDIT FIX: dropped legacy "scalping" strategy — its always-on signaling was
+    # the single biggest loss source. Keeping the rebuilt SimpleScalpPlus + Sniper.
+    active_strategies: ["simple_scalp_plus", "sniper"]
     primary_timeframe: "15m"
     confirm_timeframe: "15m"
-    min_confidence: 0.30
+    min_confidence: 0.40                  # AUDIT FIX: was 0.30 — require stronger conviction
     min_strategies_agree: 1
     # SL/TP ต่อ mode (sync กับ strategy_mode.scalping)
     stop_loss_pct: 1.0
     take_profit_pct: 3.0
-    # ATR multiplier สำหรับ dynamic SL
-    atr_multiplier: 1.2
-    # Entry: เร็ว ไม่รอ confirmation นาน
+    atr_multiplier: 1.5                   # AUDIT FIX: was 1.2 — wider SL to survive normal noise
     confirmation_candles: 1
     min_hold_seconds: 30
 
   trend_only:
-    # ใช้ strategies ที่เหมาะกับ trending market
-    active_strategies: ["machete_v8b_lite", "trend_following", "breakout"]
+    # AUDIT FIX: dropped legacy trend_following / breakout from default profile.
+    active_strategies: ["machete_v8b_lite", "sniper"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
-    min_confidence: 0.35
+    min_confidence: 0.40                  # AUDIT FIX: was 0.35
     min_strategies_agree: 1
     stop_loss_pct: 4.5
     take_profit_pct: 10.0
@@ -118,11 +121,11 @@ mode_indicator_profiles:
     min_hold_seconds: 300
 
   standard:
-    # ใช้ทุก strategies เพื่อ diversify
-    active_strategies: ["machete_v8b_lite", "simple_scalp_plus", "trend_following", "mean_reversion", "breakout", "scalping"]
+    # AUDIT FIX: dropped 4 legacy strategies that historically pyramided into trends.
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus", "sniper"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
-    min_confidence: 0.35
+    min_confidence: 0.40                  # AUDIT FIX: was 0.35
     min_strategies_agree: 1
     stop_loss_pct: 2.0
     take_profit_pct: 4.0
@@ -132,7 +135,9 @@ mode_indicator_profiles:
 
 # Adaptive Strategy Router - Auto Mode Switching
 auto_mode_switch:
-  enabled: true                       # Set to true to enable auto mode switching
+  enabled: false                      # AUDIT FIX: disabled until the bot has 30+ days of live PnL data
+                                      # to validate the regime detector. Auto-switching while strategies
+                                      # are still being tuned just adds noise to attribution.
   check_interval_seconds: 300         # Check market every 5 minutes
   min_switch_interval_seconds: 1800   # Min 30 minutes between mode switches (hysteresis)
   persistence_threshold: 3            # Mode recommendation must persist 3 checks before switching
@@ -171,7 +176,7 @@ multi_timeframe:
   # Higher timeframes for trend bias
   higher_timeframes: ["1h", "4h", "1d"]
   # Risk parameters based on ATR
-  atr_multiplier: 1.0               # ADJUSTED v2.1 - loosened for signal generation
+  atr_multiplier: 1.5               # AUDIT FIX: was 1.0 — too tight, caused noise stop-outs
   stop_loss_pct: 2.0                 # Fallback SL if no ATR (%)
   take_profit_pct: 4.0               # Fallback TP if no ATR (%)  net R:R≈1.75
   # Timeframe weights for signal aggregation
@@ -186,29 +191,49 @@ multi_timeframe:
   signal_source: "strategy"
 
 # Risk Management
+# --- SL/TP: three runtime paths (not one single knob) ---
+# 1) Strategy price levels: e.g. ScalpingStrategy uses strategies.scalping stop_loss_pct / take_profit_pct
+#    on the signal (synced from strategy_mode.scalping when active — see main._apply_strategy_mode_profile).
+# 2) ATR plan: when aggregated signal has no SL/TP prices, ExecutionPlan uses RiskManager.calc_sl_tp_from_atr
+#    with MODE_ATR_PROFILES / risk.atr_multiplier (not the same as the % numbers in strategy_mode).
+# 3) Percent fallback: bootstrap held positions & manual CLI track use resolve_effective_sl_tp_percentages().
+#    With use_dynamic_sl_tp true, sl_tp_percent_source_when_dynamic chooses:
+#      volatility = table by pair class (DEFAULT_SL_TP); risk_config = use risk.stop_loss_pct / take_profit_pct below.
+#    main.py sets sl_tp_percent_source_when_dynamic=risk_config automatically for strategy_mode scalping / trend_only.
 risk:
-  max_risk_per_trade_pct: 1.0        # 1% risk per trade
-  max_daily_loss_pct: 5.0            # 5% max daily loss
+  max_risk_per_trade_pct: 0.5        # AUDIT FIX: was 1.0 — half-Kelly until live edge is proven
+  max_daily_loss_pct: 3.0            # AUDIT FIX: was 5.0 — circuit breaker triggers earlier
   max_position_per_trade_pct: 10.0   # Max 10% of portfolio per trade
-  max_open_positions: 6              # Maximum open positions (adjust based on active pairs)
-  max_daily_trades: 50               # Maximum trades per day
-  # NOTE: SL/TP ถูกกำหนดใน strategy_mode.scalping / trend_only (ไม่ใช่ที่นี่)
-  cool_down_minutes: 5               # Cooldown between trades
-  use_dynamic_sl_tp: true            # Enable pair-specific SL/TP percentages
-  atr_multiplier: 2.5                # 2.5x ATR for dynamic SL/TP
+  max_open_positions: 4              # AUDIT FIX: was 6 — fewer concurrent risks while tuning
+  max_daily_trades: 15               # AUDIT FIX: was 50 — keep trade frequency disciplined
+  # Optional explicit % SL/TP for path (3); also overwritten by strategy_mode when scalping/trend_only is active.
+  stop_loss_pct: -4.5               # Used when use_dynamic_sl_tp false, or when sl_tp_percent_source_when_dynamic is risk_config
+  take_profit_pct: 10.0
+  cool_down_minutes: 15              # AUDIT FIX: was 5 — give markets a beat between entries
+  use_dynamic_sl_tp: true            # When true + sl_tp_percent_source_when_dynamic=volatility → table % for path (3)
+  sl_tp_percent_source_when_dynamic: volatility  # volatility | risk_config (main sets risk_config for scalping/trend_only)
+  atr_multiplier: 2.5                # 2.5x ATR for dynamic SL/TP (path 2 and RiskManager.calc_sl_tp_from_atr fallback)
   atr_period: 14                     # ATR lookback period
+  # AUDIT FIX: enable per-pair loss-streak protection so we stop bleeding into the same losing pair.
+  protections:
+    max_consecutive_losses_per_pair: 3   # block new BUYs on a symbol after 3 consecutive losses
+    pair_loss_cooldown_minutes: 120      # cooldown after streak triggers (was 60)
 
 pre_trade_gate:
-  enabled: true                      # Run 10-point gate checks before each order
+  enabled: true                      # Run gate checks before each order (includes optional pair-loss streak if configured above)
 
 # Strategies
+# AUDIT FIX: legacy "trend_following" / "mean_reversion" / "breakout" / "scalping"
+# strategies have been rebuilt to fire only on the actual crossover bar (no more
+# pyramiding). They are still loaded by SignalGenerator but excluded from the
+# default trusted set because they have no live track record yet. Re-add them
+# here only after a 2-week paper trade window confirms behaviour.
 strategies:
   enabled:
-    - "trend_following"
-    - "mean_reversion"
-    - "breakout"
-    - "scalping"
-  min_confidence: 0.35               # Minimum confidence to act (lowered from 0.40)
+    - "machete_v8b_lite"
+    - "simple_scalp_plus"
+    - "sniper"
+  min_confidence: 0.40               # AUDIT FIX: was 0.35 — require stronger conviction
   min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
   scalping:
     fast_ema: 9
@@ -253,7 +278,7 @@ auto_trader:
   # Auto stop loss / take profit
   stop_loss:
     mode: "atr"                      # "atr", "fixed_pct", "trailing"
-    atr_multiplier: 1.0              # ADJUSTED v2.1 - loosened for signal generation
+    atr_multiplier: 1.5              # AUDIT FIX: was 1.0 — 1.0x ATR was getting stopped out by noise
     fixed_pct: 5.0                   # Fixed % for SL (if mode=fixed)
   take_profit:
     mode: "risk_reward"              # "atr", "fixed_pct", "risk_reward"
@@ -338,7 +363,7 @@ data:
     held_coins_only: false           # Allow BUY entries on new whitelist coins; set true to trade only coins already held
   collect_interval_seconds: 60       # Interval for data collector loop
   hybrid_dynamic_coin_config:
-    whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON)
+    whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON); also drives symbol_registry THB_* → *USDT map
     min_quote_balance_thb: 100.0     # Legacy key name: min quote (USDT for *USDT pairs) before opening a new BUY
     # Minimum USDT to attach whitelist pairs to runtime (WS, collector, trading_pairs). Can be below min_quote_balance_thb for small accounts.
     min_quote_balance_for_pairs: 10.0
@@ -346,6 +371,9 @@ data:
     include_assets_with_balance: true  # Keep whitelisted coins with real holdings even if quote (e.g. USDT) balance is low
     hot_reload_enabled: true         # Watch the JSON whitelist and refresh runtime pairs without restart
     reload_interval_seconds: 30      # Polling interval for whitelist change detection
+  # Optional: drop low-liquidity pairs after startup (24h quote volume). 0 = disabled (see trading/pair_filters.py).
+  pair_filters:
+    min_quote_volume_24h: 0          # e.g. 500000 — require at least this USDT (quote) volume in last 24h
 
 # Candle retention / database cleanup
 candle_retention:

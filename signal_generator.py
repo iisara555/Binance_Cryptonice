@@ -202,11 +202,15 @@ class SignalGenerator:
                 self.config.get("simple_scalp_plus", {}),
             ),
         }
+        # Trusted strategies for default aggregation. The legacy "trend_following",
+        # "mean_reversion", "breakout", and "scalping" entries are NOT included by
+        # default — historically they fired continuously while a condition held
+        # (the root cause of the 5.3% win rate). They are still loaded above so
+        # that mode profiles in bot_config.yaml can opt them in explicitly.
         self._aggregate_strategy_names = [
-            "trend_following",
-            "mean_reversion",
-            "breakout",
-            "scalping",
+            "sniper",
+            "machete_v8b_lite",
+            "simple_scalp_plus",
         ]
         
         # Risk parameters

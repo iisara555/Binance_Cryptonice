@@ -10,7 +10,7 @@ import logging
 import threading
 from pathlib import Path
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
 from config import MIN_RISK_REWARD_RATIO
@@ -163,14 +163,36 @@ def resolve_effective_sl_tp_percentages(
     """
     Resolve effective SL/TP percentages for a symbol.
 
-    When dynamic SL/TP is enabled, pair-specific defaults are the source of
-    truth for bootstrap/manual positions that do not have an ATR-derived stop.
-    Otherwise, fall back to configured global percentages.
+    When ``use_dynamic_sl_tp`` is true (default), behavior is controlled by
+    ``sl_tp_percent_source_when_dynamic``:
+
+    - ``volatility`` (default): use pair volatility table (``DEFAULT_SL_TP`` /
+      ``VOLATILITY_CLASS``) — ignores numeric ``stop_loss_pct`` / ``take_profit_pct``
+      on the dict for this resolution path (backward compatible).
+    - ``risk_config``: use ``stop_loss_pct`` / ``take_profit_pct`` from the
+      supplied ``risk_config`` (e.g. values synced from ``strategy_mode`` in
+      ``main._apply_strategy_mode_profile``) so bootstrap / manual SL/TP align
+      with active strategy percentages.
+
+    When dynamic SL/TP is disabled, configured global percentages are always used.
     """
     default_sl_pct, default_tp_pct = get_default_sl_tp(symbol)
     cfg = dict(risk_config or {})
+    source = str(cfg.get("sl_tp_percent_source_when_dynamic") or "volatility").strip().lower()
 
     if bool(cfg.get("use_dynamic_sl_tp", True)):
+        if source == "risk_config":
+            try:
+                stop_loss_pct = float(cfg.get("stop_loss_pct", default_sl_pct) or default_sl_pct)
+            except (TypeError, ValueError):
+                stop_loss_pct = float(default_sl_pct)
+            try:
+                take_profit_pct = float(cfg.get("take_profit_pct", default_tp_pct) or default_tp_pct)
+            except (TypeError, ValueError):
+                take_profit_pct = float(default_tp_pct)
+            stop_loss_pct = -abs(stop_loss_pct) if stop_loss_pct else float(default_sl_pct)
+            take_profit_pct = abs(take_profit_pct) if take_profit_pct else float(default_tp_pct)
+            return float(stop_loss_pct), float(take_profit_pct)
         return float(default_sl_pct), float(default_tp_pct)
 
     try:
@@ -1217,6 +1239,7 @@ class PreTradeGate:
         mode: str,
         config: Dict[str, Any],
         risk_manager: "RiskManager",
+        pair_loss_guard: Optional[Any] = None,
     ) -> GateCheckResult:
         """Run all gate checks and return an aggregated :class:`GateCheckResult`.
 
@@ -1338,6 +1361,20 @@ class PreTradeGate:
             "passed": drawdown_pct < max_dd,
             "reason": f"drawdown={drawdown_pct:.1f}% max={max_dd:.1f}%",
         })
+
+        # ── 11. Optional per-pair consecutive-loss cooldown ─────────
+        if pair_loss_guard is not None:
+            blocked = bool(pair_loss_guard.is_blocked(str(symbol or "")))
+            reason = (
+                pair_loss_guard.block_reason(str(symbol or ""))
+                if blocked and callable(getattr(pair_loss_guard, "block_reason", None))
+                else ("pair cooldown active" if blocked else "OK")
+            )
+            checks.append({
+                "name": "Pair loss streak cooldown",
+                "passed": not blocked,
+                "reason": reason or ("OK" if not blocked else "blocked"),
+            })
 
         # ── Aggregate ──────────────────────────────────────────────
         failed = [c["name"] for c in checks if not c["passed"]]

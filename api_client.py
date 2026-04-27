@@ -36,6 +36,7 @@ from urllib.parse import urlencode
 import requests
 
 from config import BINANCE, TRADING
+from symbol_registry import get_symbol_map
 
 logger = logging.getLogger(__name__)
 
@@ -96,21 +97,6 @@ def _binance_error_message(code: Any, fallback: Optional[str] = None) -> str:
     fallback_text = str(fallback or "").strip()
     return fallback_text or "Unknown error"
 
-
-# --- NEW: SPEC_01 --- Symbol mapping from internal THB_* form to Binance.th.
-SYMBOL_MAP: Dict[str, str] = {
-    "THB_BTC":  "BTCUSDT",
-    "THB_ETH":  "ETHUSDT",
-    "THB_BNB":  "BNBUSDT",
-    "THB_DOGE": "DOGEUSDT",
-    "THB_XRP":  "XRPUSDT",
-    "THB_SOL":  "SOLUSDT",
-    "THB_ADA":  "ADAUSDT",
-    "THB_DOT":  "DOTUSDT",
-    "THB_LINK": "LINKUSDT",
-    "THB_MATIC": "POLUSDT",  # Binance.th migration: legacy MATIC mapped to POL
-    "THB_POL":  "POLUSDT",
-}
 
 # --- NEW: SPEC_01 --- Internal "1m"/"15m" already matches Binance interval
 # format; this map only normalises the legacy TradingView-style numeric
@@ -334,6 +320,26 @@ def _format_decimal(value: float, precision: int = 8) -> str:
     return s or "0"
 
 
+def _decimal_places_from_step(step: float) -> int:
+    """Infer a safe string precision from LOT_SIZE stepSize or PRICE_FILTER tickSize."""
+    if step is None or step <= 0:
+        return 8
+    d = Decimal(str(step))
+    if d.is_zero():
+        return 8
+    exp = d.as_tuple().exponent
+    if exp >= 0:
+        return 0
+    return min(16, -exp)
+
+
+def _quantize_down(value: float, decimals: int) -> float:
+    if decimals < 0:
+        decimals = 0
+    q = Decimal("1") if decimals == 0 else Decimal("1").scaleb(-decimals)
+    return float(Decimal(str(float(value))).quantize(q, rounding=ROUND_DOWN))
+
+
 def _no_trailing_zeros(value: float) -> float:
     """Compatibility helper for legacy tests/callers; prefer ``_format_decimal``."""
     return float(_format_decimal(float(value), precision=8))
@@ -457,8 +463,9 @@ class BinanceThClient:
             return self.symbol
         sym = str(symbol).strip()
         upper = sym.upper()
-        if upper in SYMBOL_MAP:
-            return SYMBOL_MAP[upper]
+        symbol_map = get_symbol_map()
+        if upper in symbol_map:
+            return symbol_map[upper]
 
         # Already a Binance-style symbol
         if upper.endswith("USDT") and "_" not in upper:
@@ -471,8 +478,8 @@ class BinanceThClient:
                 left, right = parts
                 base = right if left in {"THB", "USDT", "USD"} else left
                 key = f"THB_{base}"
-                if key in SYMBOL_MAP:
-                    return SYMBOL_MAP[key]
+                if key in symbol_map:
+                    return symbol_map[key]
                 return f"{base}USDT"
         return upper
 
@@ -512,6 +519,8 @@ class BinanceThClient:
             "tickSize": 0.000001,
             "minQty":   0.0,
             "minNotional": 0.0,
+            "baseAssetPrecision": 8,
+            "quoteAssetPrecision": 8,
             "_fallback": True,
         }
         try:
@@ -523,6 +532,18 @@ class BinanceThClient:
             data = r.json() if r.status_code == 200 else {}
             symbols = data.get("symbols") if isinstance(data, dict) else None
             entry = symbols[0] if symbols else None
+            if entry:
+                try:
+                    filters["baseAssetPrecision"] = int(entry.get("baseAssetPrecision") or 8)
+                except (TypeError, ValueError):
+                    filters["baseAssetPrecision"] = 8
+                try:
+                    qp = entry.get("quoteAssetPrecision")
+                    if qp is None:
+                        qp = entry.get("quotePrecision")
+                    filters["quoteAssetPrecision"] = int(qp or 8)
+                except (TypeError, ValueError):
+                    filters["quoteAssetPrecision"] = 8
             if entry and isinstance(entry.get("filters"), list):
                 for f in entry["filters"]:
                     ftype = f.get("filterType")
@@ -582,6 +603,54 @@ class BinanceThClient:
                 f"Price {price} rounds to 0 under PRICE_FILTER tickSize {tick} for {binance_symbol}",
             )
         return rounded
+
+    def _format_qty_string(self, binance_symbol: str, qty: float) -> str:
+        """String quantity for API params using LOT_SIZE-derived precision."""
+        f = self._get_symbol_filters(binance_symbol)
+        step = float(f.get("stepSize") or 0.0)
+        if step > 0:
+            prec = _decimal_places_from_step(step)
+        else:
+            try:
+                prec = int(f.get("baseAssetPrecision") or 8)
+            except (TypeError, ValueError):
+                prec = 8
+        return _format_decimal(float(qty), precision=min(16, max(0, prec)))
+
+    def _format_price_string(self, binance_symbol: str, price: float) -> str:
+        """String price for API params using PRICE_FILTER tick precision."""
+        f = self._get_symbol_filters(binance_symbol)
+        tick = float(f.get("tickSize") or 0.0)
+        prec = _decimal_places_from_step(tick) if tick > 0 else 8
+        return _format_decimal(float(price), precision=min(16, max(0, prec)))
+
+    def _format_quote_order_qty_string(self, binance_symbol: str, quote_amount: float) -> str:
+        """MARKET BUY quoteOrderQty using quote asset precision from exchangeInfo."""
+        f = self._get_symbol_filters(binance_symbol)
+        try:
+            qp = int(f.get("quoteAssetPrecision") or 8)
+        except (TypeError, ValueError):
+            qp = 8
+        qp = min(16, max(0, qp))
+        rounded = _quantize_down(float(quote_amount), qp)
+        return _format_decimal(rounded, precision=qp)
+
+    def validate_symbol_exchange_info(self, symbols: List[str]) -> List[str]:
+        """Warm exchangeInfo filters for each unique Binance symbol; return human-readable warnings."""
+        warnings: List[str] = []
+        seen: set[str] = set()
+        for sym in symbols or []:
+            raw = str(sym or "").strip()
+            if not raw:
+                continue
+            bs = self._to_binance_symbol(raw)
+            if not bs or bs in seen:
+                continue
+            seen.add(bs)
+            f = self._get_symbol_filters(bs)
+            if f.get("_fallback"):
+                warnings.append(f"{raw} ({bs}): exchangeInfo filters unavailable")
+        return warnings
 
     # ── Core request ───────────────────────────────────────────────────────
 
@@ -1011,10 +1080,15 @@ class BinanceThClient:
         if ot == "market":
             if is_buy:
                 # BUY semantic: amount = quote-currency to spend at market.
-                quote_qty = round(float(amount), 8)
+                f = self._get_symbol_filters(binance_symbol)
+                try:
+                    qp = int(f.get("quoteAssetPrecision") or 8)
+                except (TypeError, ValueError):
+                    qp = 8
+                qp = min(16, max(0, qp))
+                quote_qty = _quantize_down(float(amount), qp)
                 if quote_qty <= 0:
                     raise BinanceAPIError(-1100, "MARKET BUY requires amount > 0")
-                f = self._get_symbol_filters(binance_symbol)
                 min_notional = float(f.get("minNotional") or 0.0)
                 if min_notional > 0 and quote_qty < min_notional:
                     raise BinanceAPIError(
@@ -1022,13 +1096,13 @@ class BinanceThClient:
                         f"MARKET BUY notional {quote_qty} below minNotional {min_notional}",
                     )
                 params["type"] = "MARKET"
-                params["quoteOrderQty"] = _format_decimal(quote_qty, precision=8)
+                params["quoteOrderQty"] = self._format_quote_order_qty_string(binance_symbol, quote_qty)
             else:
                 qty = self._round_quantity(binance_symbol, float(amount))
                 if qty <= 0:
                     raise BinanceAPIError(-1100, "MARKET SELL requires amount > 0")
                 params["type"] = "MARKET"
-                params["quantity"] = _format_decimal(qty, precision=8)
+                params["quantity"] = self._format_qty_string(binance_symbol, qty)
         else:
             if rate is None or float(rate) <= 0:
                 raise BinanceAPIError(-1100, "LIMIT order requires a positive rate")
@@ -1049,8 +1123,8 @@ class BinanceThClient:
                     f"LIMIT {side} notional {notional} below minNotional {min_notional}",
                 )
             params["type"]     = "LIMIT_MAKER" if post_only else "LIMIT"
-            params["quantity"] = _format_decimal(qty, precision=8)
-            params["price"]    = _format_decimal(price, precision=8)
+            params["quantity"] = self._format_qty_string(binance_symbol, qty)
+            params["price"]    = self._format_price_string(binance_symbol, price)
             if not post_only:
                 params["timeInForce"] = "GTC"
 

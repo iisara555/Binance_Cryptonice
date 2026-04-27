@@ -176,6 +176,12 @@ class ManagedLifecycleHelper:
             trigger=snapshot.trigger,
             notes=f"price_source={price_source};net_pnl_pct={net_pnl_pct:+.2f}%",
         )
+        guard = getattr(self.bot, "_pair_loss_guard", None)
+        if guard is not None and hasattr(guard, "record_closed_pnl"):
+            try:
+                guard.record_closed_pnl(str(snapshot.symbol), float(net_pnl))
+            except Exception as exc:
+                logger.debug("Pair loss streak guard record skipped: %s", exc)
         risk_manager = getattr(self.bot, "risk_manager", None)
         if risk_manager is not None:
             record_trade_activity = getattr(risk_manager, "record_trade_activity", None)

@@ -124,38 +124,76 @@ class TestTrendFollowingStrategy:
 
 
 class TestMomentumStrategy:
-    """Tests for MomentumStrategy."""
-    
-    def test_analyze_oversold_rsi(self, sample_price_data):
-        """Test BUY signal when RSI < 30 (oversold)."""
+    """Tests for MomentumStrategy.
+
+    The momentum strategy fires only on RSI threshold crossovers (not while RSI
+    stays below 30 / above 70). These tests lock in that behaviour — the legacy
+    "always-on" version was the dominant cause of the historical 5.3% win rate.
+    """
+
+    def test_analyze_oversold_recovery_emits_buy(self, sample_price_data):
+        """RSI bouncing back ABOVE 30 from below should emit BUY on the bounce bar only."""
         from strategies.momentum import MomentumStrategy
-        
+
         strategy = MomentumStrategy()
-        
-        # Create deeply oversold data
+
+        # 99 bars of decline (drives RSI to ~0 = deeply oversold), then a
+        # single bounce bar that pushes RSI back above 30. This is the
+        # exact "cross-back" event the strategy is designed to trade.
+        n = len(sample_price_data)
+        decline = np.linspace(150000, 50000, n - 1)
+        recovery = np.concatenate([decline, [60000.0]])
         data = sample_price_data.copy()
-        # Strong downward trend
+        data['close'] = recovery
+
+        signal = strategy.analyze(data)
+
+        assert signal.action == 'BUY'
+        assert 0.55 <= signal.confidence <= 1.0
+        assert signal.metadata['entry_reason'] == 'rsi_oversold_recovery'
+        # Sanity: prev bar was oversold, current bar crossed above 30.
+        assert signal.metadata['rsi_prev'] <= 30.0
+        assert signal.metadata['rsi'] > 30.0
+
+    def test_analyze_persistent_oversold_emits_hold(self, sample_price_data):
+        """Sustained oversold without recovery must NOT keep firing BUY."""
+        from strategies.momentum import MomentumStrategy
+
+        strategy = MomentumStrategy()
+
+        data = sample_price_data.copy()
         data['close'] = np.linspace(150000, 50000, len(data))
-        
+
         signal = strategy.analyze(data)
-        
-        assert signal.action in ['BUY', 'SELL', 'HOLD']
-        assert signal.confidence >= 0.5
-    
-    def test_analyze_overbought_rsi(self, sample_price_data):
-        """Test SELL signal when RSI > 70 (overbought)."""
+
+        # Pre-fix behaviour: BUY confidence ≥0.5. Post-fix: HOLD because RSI is
+        # still falling — no cross back above 30.
+        assert signal.action == 'HOLD'
+        assert signal.confidence == 0.0
+
+    def test_analyze_overbought_rollover_emits_sell(self, sample_price_data):
+        """RSI rolling back BELOW 70 from above should emit SELL on the rollover bar."""
         from strategies.momentum import MomentumStrategy
-        
+
         strategy = MomentumStrategy()
-        
-        # Create deeply overbought data
+
+        # Build a scenario where prev_rsi >= 70 and cur_rsi < 70. We need a
+        # rolling window that includes at least one tiny loss bar (otherwise
+        # RSI is mathematically NaN on a perfectly monotonic rise).
+        n = len(sample_price_data)
+        rise = np.linspace(50000, 150000, n - 1).tolist()
+        for idx in (80, 85, 90):
+            rise[idx] = rise[idx] - 5000.0  # small dips → defined RSI ~73
+        rollover = np.array(rise + [130000.0])
         data = sample_price_data.copy()
-        # Strong upward trend
-        data['close'] = np.linspace(50000, 150000, len(data))
-        
+        data['close'] = rollover
+
         signal = strategy.analyze(data)
-        
-        assert signal.action in ['BUY', 'SELL', 'HOLD']
+
+        assert signal.action == 'SELL'
+        assert signal.metadata['entry_reason'] == 'rsi_overbought_rollover'
+        assert signal.metadata['rsi_prev'] >= 70.0
+        assert signal.metadata['rsi'] < 70.0
 
 
 class TestMeanReversionStrategy:
@@ -417,6 +455,23 @@ class TestRiskManagement:
                 'use_dynamic_sl_tp': False,
                 'stop_loss_pct': 1.0,
                 'take_profit_pct': 2.5,
+            },
+        )
+
+        assert sl_pct == -1.0
+        assert tp_pct == 2.5
+
+    def test_resolve_effective_sl_tp_percentages_risk_config_source_under_dynamic(self):
+        """With use_dynamic_sl_tp true, risk_config source uses stop_loss_pct / take_profit_pct from dict."""
+        from risk_management import resolve_effective_sl_tp_percentages
+
+        sl_pct, tp_pct = resolve_effective_sl_tp_percentages(
+            "THB_BTC",
+            {
+                "use_dynamic_sl_tp": True,
+                "sl_tp_percent_source_when_dynamic": "risk_config",
+                "stop_loss_pct": 1.0,
+                "take_profit_pct": 2.5,
             },
         )
 

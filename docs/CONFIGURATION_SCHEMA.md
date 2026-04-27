@@ -63,6 +63,23 @@ risk:
 
 สำคัญที่สุดสำหรับ live safety คือ daily loss limit, max position per trade, max open positions, และ cooldown
 
+### Stop-loss / take-profit: three runtime paths
+
+These are **not** a single unified percentage in all code paths:
+
+| Path | Where | What drives levels |
+|------|--------|-------------------|
+| **1. Strategy levels** | Strategies such as `ScalpingStrategy` | `strategies.<name>.stop_loss_pct` / `take_profit_pct` on the signal (for scalping, `main._apply_strategy_mode_profile` syncs from `strategy_mode.scalping`). |
+| **2. ATR plan** | `trading/signal_runtime.py` when the aggregated signal has no absolute SL/TP | `RiskManager.calc_sl_tp_from_atr` — ATR distance × multiplier from `MODE_ATR_PROFILES` (per active mode) or `risk.atr_multiplier`. **Not** the same numbers as path 1 percentages. |
+| **3. Percent fallback** | Bootstrap held positions, manual CLI track (`resolve_effective_sl_tp_percentages`) | If `use_dynamic_sl_tp` is true: `sl_tp_percent_source_when_dynamic` — `volatility` uses `DEFAULT_SL_TP` by pair class; `risk_config` uses `risk.stop_loss_pct` / `risk.take_profit_pct`. `main._apply_strategy_mode_profile` sets `risk_config` for `strategy_mode` **scalping** and **trend_only** so path 3 matches those mode percentages. Standard mode keeps default `volatility` unless you override in YAML. |
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `use_dynamic_sl_tp` | boolean | `true` | When true, path 3 uses `sl_tp_percent_source_when_dynamic` (below); when false, path 3 always uses `stop_loss_pct` / `take_profit_pct`. |
+| `sl_tp_percent_source_when_dynamic` | string | `volatility` | `volatility` \| `risk_config`. See path 3 above. |
+| `stop_loss_pct` | float | (varies) | Loss side % (stored negative after resolve); used for path 3 when applicable. |
+| `take_profit_pct` | float | (varies) | Profit side % for path 3 when applicable. |
+
 ---
 
 ## Strategies Configuration

@@ -112,9 +112,21 @@ def get_current_price(
             ticker_getter = getattr(ws_client, "get_latest_ticker", None)
             tick = ticker_getter(symbol) if callable(ticker_getter) else None
             if tick is None:
-                # Backward-compatible legacy module lookup for older WS clients.
-                from bitkub_websocket import get_latest_ticker
-                tick = get_latest_ticker(symbol)
+                # Backward-compatible module lookup for older WS clients.
+                # Prefer the Binance.th websocket adapter; if it's unavailable
+                # OR doesn't have the symbol cached, fall back to the legacy
+                # Bitkub adapter so existing callers and tests keep working.
+                try:
+                    from binance_websocket import get_latest_ticker as _bn_get  # type: ignore
+                    tick = _bn_get(symbol)
+                except Exception:
+                    tick = None
+                if tick is None:
+                    try:
+                        from bitkub_websocket import get_latest_ticker as _bk_get  # type: ignore
+                        tick = _bk_get(symbol)
+                    except Exception:
+                        tick = None
             if tick and getattr(tick, "last", 0) > 0:
                 tick_age = _time.time() - getattr(tick, "timestamp", 0.0)
                 if tick_age <= _WS_TICK_MAX_AGE_SECONDS:

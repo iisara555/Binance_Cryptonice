@@ -116,7 +116,7 @@ class TestM3TrailingStopAtomicity:
         order_info = self._order_with_profit(entry, current)
         ex._open_orders["ts-ord-1"] = dict(order_info)
         with patch(
-            "bitkub_websocket.get_latest_ticker",
+            "binance_websocket.get_latest_ticker",
             return_value=Mock(last=current, symbol="THB_BTC"),
         ):
             ex._apply_trailing_stop(order_info)
@@ -160,7 +160,7 @@ class TestM3TrailingStopAtomicity:
         ex._open_orders["ts-ord-1"]["stop_loss"] = original_sl
 
         with patch(
-            "bitkub_websocket.get_latest_ticker",
+            "binance_websocket.get_latest_ticker",
             return_value=Mock(last=current, symbol="THB_BTC"),
         ):
             order_info = dict(ex._open_orders["ts-ord-1"])

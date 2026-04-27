@@ -45,6 +45,7 @@ from trading.position_monitor import PositionMonitorHelper
 from trading.signal_runtime import ExecutionPlanDeps, MultiTimeframeRuntimeDeps, SignalRuntimeDeps, SignalRuntimeHelper
 from trading.startup_runtime import StartupRuntimeHelper
 from trading.status_runtime import StatusRuntimeHelper
+from trading.spot_protections import build_pair_loss_streak_guard
 
 # Import shared enums from modular trading package
 from trading.orchestrator import BotMode, SignalSource, TradeDecision
@@ -200,6 +201,7 @@ class TradingBotOrchestrator:
         gate_cfg = dict(config.get("pre_trade_gate", {}) or {})
         self._pre_trade_gate_enabled = bool(gate_cfg.get("enabled", True))
         self._pre_trade_gate = PreTradeGate()
+        self._pair_loss_guard = build_pair_loss_streak_guard(config)
         self._sl_hold_guard = SLHoldGuard()
         roi_cfg = config.get("minimal_roi")
         if not isinstance(roi_cfg, dict):
@@ -1498,7 +1500,13 @@ class TradingBotOrchestrator:
         return True
 
     def _ensure_websocket_started(self) -> None:
-        if not (self._ws_enabled and self._ws_import_ok and self.trading_pairs):
+        # Use getattr so unit tests and partial construction (e.g. __new__ without __init__) do not
+        # raise AttributeError and mask real control flow in _main_loop.
+        ws_enabled = bool(getattr(self, "_ws_enabled", False))
+        ws_import_ok = bool(getattr(self, "_ws_import_ok", False))
+        pairs = getattr(self, "trading_pairs", None)
+        trading_pairs = list(pairs) if pairs else []
+        if not (ws_enabled and ws_import_ok and trading_pairs):
             return
         ws_client = getattr(self, "_ws_client", None)
         if ws_client is not None:
@@ -1513,7 +1521,8 @@ class TradingBotOrchestrator:
             if state_text in {"connecting", "reconnecting", "connected"}:
                 return
         now_ts = time.time()
-        if (now_ts - float(getattr(self, "_last_ws_start_attempt_at", 0.0) or 0.0)) < self._ws_start_retry_interval_seconds:
+        retry_s = float(getattr(self, "_ws_start_retry_interval_seconds", 20.0) or 20.0)
+        if (now_ts - float(getattr(self, "_last_ws_start_attempt_at", 0.0) or 0.0)) < retry_s:
             return
         try:
             self._start_or_refresh_websocket(list(self.trading_pairs), reason="retry")
@@ -2041,6 +2050,7 @@ class TradingBotOrchestrator:
             mode=str(getattr(self, "_active_strategy_mode", "standard") or "standard"),
             config=self.config,
             risk_manager=self.risk_manager,
+            pair_loss_guard=getattr(self, "_pair_loss_guard", None),
         )
         if result.passed:
             return True
