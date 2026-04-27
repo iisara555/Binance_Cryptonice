@@ -25,7 +25,7 @@ runtime profile ที่ใช้อยู่ตอนนี้ใน `coin_whi
 - `ADA`
 - `DOGE`
 - `LINK`
-- `MATIC`
+- `POL`
 
 ### Config
 

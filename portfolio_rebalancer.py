@@ -15,7 +15,7 @@ import logging
 import json
 import os
 import sqlite3
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -542,7 +542,7 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
 
     def _is_due(self) -> Tuple[bool, str]:
         """Check if scheduled rebalance is due."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         today = now.date()
         
         if self.frequency == "daily":
@@ -617,7 +617,7 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
                 orders.append(order)
         
         # Update last rebalance time
-        self._last_rebalance = datetime.utcnow()
+        self._last_rebalance = datetime.now(timezone.utc)
         
         return orders
 

@@ -107,7 +107,9 @@ default profile ปัจจุบัน:
 - `ADA`
 - `DOGE`
 - `LINK`
-- `MATIC`
+- `POL`
+
+รายการ bullet ด้านบนสะท้อนไฟล์ [`coin_whitelist.json`](coin_whitelist.json) — แก้ whitelist หลักที่ไฟล์นั้น
 
 ดูตัวอย่างไฟล์แบบเต็มและคำอธิบายเพิ่มเติมได้ที่ [docs/MANUAL_THAI.md](docs/MANUAL_THAI.md)
 

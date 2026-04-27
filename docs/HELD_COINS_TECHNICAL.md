@@ -38,7 +38,7 @@ current whitelist profile:
 - `ADA`
 - `DOGE`
 - `LINK`
-- `MATIC`
+- `POL`
 
 จุด config ที่เกี่ยวข้อง:
 

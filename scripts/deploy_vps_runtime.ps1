@@ -5,6 +5,8 @@ param(
     [string]$RemoteServiceName = "crypto-bot-tmux",
     [string]$BotHealthUrl = "http://127.0.0.1:8080/health",
     [string]$ProjectRoot = "",
+    [int]$HealthCheckAttempts = 20,
+    [int]$HealthCheckIntervalSeconds = 2,
     [switch]$SkipHealthCheck
 )
 
@@ -200,6 +202,8 @@ function New-RemoteValidateAndRestartScript {
         [Parameter(Mandatory = $true)][string]$ServiceName,
         [Parameter(Mandatory = $true)][string]$HealthUrl,
         [Parameter(Mandatory = $true)][int]$SkipHealth,
+        [Parameter(Mandatory = $true)][int]$HealthAttempts,
+        [Parameter(Mandatory = $true)][int]$HealthSleepSeconds,
         [Parameter(Mandatory = $true)][string[]]$RelativePaths
     )
 
@@ -211,6 +215,8 @@ service_user='__REMOTE_SERVICE_USER__'
 service_name='__REMOTE_SERVICE_NAME__'
 health_url='__BOT_HEALTH_URL__'
 skip_health='__SKIP_HEALTH__'
+health_attempts='__HEALTH_ATTEMPTS__'
+health_sleep='__HEALTH_SLEEP_SECONDS__'
 
 resolve_python_bin() {
     for candidate in \
@@ -250,18 +256,20 @@ systemctl status "$service_name" --no-pager -l
 tmux list-sessions
 
 if [ "$skip_health" = "0" ]; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    attempt=1
+    while [ "$attempt" -le "$health_attempts" ]; do
         if curl -fsS "$health_url"; then
             exit 0
         fi
-        sleep 2
+        attempt=$((attempt + 1))
+        sleep "$health_sleep"
     done
     echo "Health check failed: $health_url" >&2
     exit 1
 fi
 '@
 
-    return $script.Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__REMOTE_SERVICE_USER__', $ServiceUser).Replace('__REMOTE_SERVICE_NAME__', $ServiceName).Replace('__BOT_HEALTH_URL__', $HealthUrl).Replace('__SKIP_HEALTH__', [string]$SkipHealth).Replace('__PYTHON_FILES__', ($pythonFiles -join ' '))
+    return $script.Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__REMOTE_SERVICE_USER__', $ServiceUser).Replace('__REMOTE_SERVICE_NAME__', $ServiceName).Replace('__BOT_HEALTH_URL__', $HealthUrl).Replace('__SKIP_HEALTH__', [string]$SkipHealth).Replace('__HEALTH_ATTEMPTS__', [string]$HealthAttempts).Replace('__HEALTH_SLEEP_SECONDS__', [string]$HealthSleepSeconds).Replace('__PYTHON_FILES__', ($pythonFiles -join ' '))
 }
 
 Assert-CommandExists -Name 'ssh'
@@ -303,7 +311,7 @@ foreach ($relativePath in $runtimeFiles) {
 }
 
 Write-Step "Validating Python files and restarting service"
-$validateAndRestartScript = New-RemoteValidateAndRestartScript -ProjectRoot $RemoteProjectRoot -ServiceUser $remoteServiceUser -ServiceName $RemoteServiceName -HealthUrl $BotHealthUrl -SkipHealth ([int]$SkipHealthCheck.IsPresent) -RelativePaths $runtimeFiles
+$validateAndRestartScript = New-RemoteValidateAndRestartScript -ProjectRoot $RemoteProjectRoot -ServiceUser $remoteServiceUser -ServiceName $RemoteServiceName -HealthUrl $BotHealthUrl -SkipHealth ([int]$SkipHealthCheck.IsPresent) -HealthAttempts $HealthCheckAttempts -HealthSleepSeconds $HealthCheckIntervalSeconds -RelativePaths $runtimeFiles
 Invoke-SshScript -Target $SshTarget -ScriptBody $validateAndRestartScript
 
 Write-Step "Creating post-deploy snapshot on VPS"

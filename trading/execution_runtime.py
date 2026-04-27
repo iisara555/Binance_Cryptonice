@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, MutableSequence
 
 from risk_management import check_pair_correlation
@@ -134,7 +134,7 @@ class ExecutionRuntimeHelper:
                 "timestamp": datetime.now(),
             })
             try:
-                ts = datetime.utcnow()
+                ts = datetime.now(timezone.utc)
                 deps.database.insert_order(
                     pair=decision.plan.symbol,
                     side=decision.plan.side.value,

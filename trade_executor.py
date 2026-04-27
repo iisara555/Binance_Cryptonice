@@ -10,7 +10,7 @@ import logging
 import threading
 import hashlib
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,6 +19,14 @@ from state_management import normalize_buy_quantity
 from risk_management import precise_add, precise_multiply, precise_divide
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_utc(dt: datetime) -> datetime:
+    """Normalize datetimes for arithmetic (naive treated as UTC)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 
 # Binance Thailand fee model: 0.2% round trip = 0.1% per side.
 BINANCE_TH_ROUND_TRIP_FEE = 0.002
@@ -651,8 +659,9 @@ class TradeExecutor:
                     if self._is_oms_processing(order_id):
                         continue
 
-                    order_time = order_info.get("timestamp", datetime.now())
-                    elapsed = (datetime.now() - order_time).total_seconds()
+                    order_time = order_info.get("timestamp") or datetime.now(timezone.utc)
+                    order_time = _coerce_utc(order_time)
+                    elapsed = (datetime.now(timezone.utc) - order_time).total_seconds()
 
                     if order_info.get("filled", False):
                         self._apply_trailing_stop(order_info)
@@ -1304,7 +1313,8 @@ class TradeExecutor:
                 return OrderResult(False, OrderStatus.REJECTED, message="R:R Enforcer: %s" % rr_check.reason)
 
         if plan.signal_timestamp:
-            age_seconds = (datetime.now() - plan.signal_timestamp).total_seconds()
+            sig_ts = _coerce_utc(plan.signal_timestamp)
+            age_seconds = (datetime.now(timezone.utc) - sig_ts).total_seconds()
             if age_seconds > 300:
                 logger.warning("[SignalExpiry] Signal too old: %.0fs — rejecting", age_seconds)
                 return OrderResult(False, OrderStatus.REJECTED, message="Signal expired (%.0fs old, max 300s)" % age_seconds)

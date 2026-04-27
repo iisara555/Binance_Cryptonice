@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -41,7 +41,7 @@ def test_has_ever_held_remains_true_after_position_closed(temp_db):
 
 def test_cleanup_price_history_by_timeframe_prunes_each_timeframe_independently(temp_db):
     db = Database(temp_db)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     db.insert_price("THB_BTC", now - timedelta(days=10), 100, 101, 99, 100, 10, timeframe="1m")
     db.insert_price("THB_BTC", now - timedelta(days=5), 100, 101, 99, 100, 10, timeframe="1m")
@@ -68,7 +68,7 @@ def test_cleanup_price_history_by_timeframe_prunes_each_timeframe_independently(
 
 def test_cleanup_price_history_by_timeframe_ignores_invalid_policy_values(temp_db):
     db = Database(temp_db)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     db.insert_price("THB_ETH", now - timedelta(days=3), 100, 101, 99, 100, 10, timeframe="1m")
 
@@ -95,7 +95,7 @@ def test_sqlite_connection_uses_temp_store_memory(temp_db):
 
 def test_get_candles_returns_cached_copy_until_price_write_invalidates(temp_db):
     db = Database(temp_db)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     db.insert_price("THB_BTC", now, 100, 101, 99, 100, 10, timeframe="1m")
     first = db.get_candles("THB_BTC", interval="1m")

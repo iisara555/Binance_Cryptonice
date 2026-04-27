@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from state_management import TradeLifecycleState, TradeStateSnapshot, normalize_buy_quantity
@@ -86,7 +86,7 @@ class ManagedLifecycleHelper:
             "buy",
             filled_amount,
             filled_price,
-            timestamp=snapshot.opened_at or datetime.utcnow(),
+            timestamp=snapshot.opened_at or datetime.now(timezone.utc),
         )
 
     def report_completed_exit(

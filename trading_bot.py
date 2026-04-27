@@ -20,7 +20,7 @@ import sys
 import time
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional, Dict, Any, List
 
 from alerts import AlertSystem, AlertLevel, format_fatal_auth_alert  # Unified alert system
@@ -1831,7 +1831,7 @@ class TradingBotOrchestrator:
     ) -> None:
         if not getattr(self, "db", None) or quantity <= 0 or price <= 0:
             return
-        logged_at = timestamp or datetime.utcnow()
+        logged_at = timestamp or datetime.now(timezone.utc)
         try:
             self.db.insert_order(
                 pair=symbol,

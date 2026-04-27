@@ -1265,7 +1265,7 @@ class TestFullIntegrationFlow:
             'confirmation_window_seconds': 180,
         })
 
-        ts = datetime.utcnow()
+        ts = datetime.now(timezone.utc)
         approved, reason = manager.confirm_entry_signal('THB_BTC', 'buy', 0.5, True, ts)
         assert approved is False
         assert '1/2' in reason
@@ -1286,7 +1286,7 @@ class TestFullIntegrationFlow:
             'confirmation_window_seconds': 180,
         })
 
-        ts = datetime.utcnow()
+        ts = datetime.now(timezone.utc)
         manager.block_new_entries_after_exit('THB_BTC', duration_seconds=300, trigger='TIME', blocked_at=ts)
 
         approved, reason = manager.confirm_entry_signal('THB_BTC', 'buy', 0.6, True, ts + timedelta(seconds=30))
@@ -1365,7 +1365,7 @@ class TestFullIntegrationFlow:
         bot.executor = executor
         bot._state_manager = TradeStateManager(db, {'enabled': True})
 
-        opened_at = datetime.utcnow() - timedelta(minutes=5)
+        opened_at = datetime.now(timezone.utc) - timedelta(minutes=5)
         bot._state_manager.sync_in_position_states([{
             'order_id': 'buy-123',
             'symbol': 'THB_BTC',
@@ -1448,7 +1448,7 @@ class TestFullIntegrationFlow:
             signal_source='strategy',
             trigger='TP',
             notes='price_source=order',
-            opened_at=datetime.utcnow() - timedelta(minutes=3),
+            opened_at=datetime.now(timezone.utc) - timedelta(minutes=3),
         )
 
         bot._report_completed_exit(snapshot, exit_price=11111.11, price_source='order')
@@ -1513,7 +1513,7 @@ class TestFullIntegrationFlow:
             signal_source='strategy',
             trigger='TIME',
             notes='price_source=order',
-            opened_at=datetime.utcnow() - timedelta(hours=25),
+            opened_at=datetime.now(timezone.utc) - timedelta(hours=25),
         )
 
         bot._report_completed_exit(snapshot, exit_price=8.1, price_source='order')
@@ -1528,7 +1528,7 @@ class TestFullIntegrationFlow:
         db = Mock()
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.db = db
-        ts = datetime.utcnow()
+        ts = datetime.now(timezone.utc)
 
         TradingBotOrchestrator._log_filled_order(
             bot,
@@ -1735,7 +1735,7 @@ class TestFullIntegrationFlow:
         bot.executor = executor
         bot._state_manager = TradeStateManager(db, {'enabled': True})
 
-        opened_at = datetime.utcnow() - timedelta(minutes=5)
+        opened_at = datetime.now(timezone.utc) - timedelta(minutes=5)
         bot._state_manager.sync_in_position_states([{
             'order_id': 'buy-123',
             'symbol': 'THB_BTC',
@@ -1908,7 +1908,7 @@ class TestFullIntegrationFlow:
             def delete_trade_state(self, symbol):
                 return self.rows.pop(symbol, None) is not None
 
-        opened_at = datetime.utcnow() - timedelta(minutes=5)
+        opened_at = datetime.now(timezone.utc) - timedelta(minutes=5)
         db = FakeStateDB([
             {
                 'symbol': 'BTCUSDT',

@@ -115,6 +115,8 @@ strategies:
   min_strategies_agree: 2
 ```
 
+**Which strategy modules run per pair:** The runtime resolves the enabled strategy *names* in `signal_generator.get_active_strategies_for_mode()`, which prefers `mode_indicator_profiles.<active_mode>.active_strategies` (with YAML fallbacks). The `strategy_mode` block selects the active *mode* and syncs risk/timeframe/percent-style thresholds (for example scalping SL/TP); it does not replace `mode_indicator_profiles.*.active_strategies` as the source of truth for the signal loop’s strategy list.
+
 `strategy_mode.scalping.position_timeout_minutes` ใช้กับ scalp entries ที่บอทเปิดเอง ส่วน `strategy_mode.scalping.bootstrap_position_timeout_hours` ใช้กับ bootstrap-held positions ที่ถูก import ตอน startup โดยจะพยายามใช้อายุถือจริงจาก persisted position, trade state, หรือ exchange history ก่อน fallback ไปที่เวลาที่เริ่ม manage ในรันนี้
 
 TIME exits ยังผ่าน voluntary-exit profit gate เดิม (`execution.enforce_min_profit_gate_for_voluntary_exit` และ `execution.min_voluntary_exit_net_profit_pct`) ดังนั้น position ที่อายุเกินกำหนดแต่กำไรสุทธิต่ำกว่า threshold จะยังไม่ถูกบังคับปิด
@@ -130,6 +132,8 @@ multi_timeframe:
   enabled: true
   require_htf_confirmation: true
 ```
+
+`multi_timeframe.required_candles_for_readiness` (default 35) gates **per-timeframe SQLite row counts** for MTF “candle readiness”. The **Sniper** strategy still needs roughly **210+** bars on the primary series (`strategies/sniper.py`); those are independent checks, so the UI can show readiness while Sniper columns stay unset until enough primary history exists.
 
 ให้ปรับ threshold และ logic ผ่าน `strategies.*` และ `multi_timeframe.*` ใน `bot_config.yaml`
 
@@ -271,7 +275,7 @@ These notes summarize how the **current** Python runtime uses `bot_config.yaml` 
 | `monitoring` / reconciliation                           | `monitoring.py` reconciles via `api_client` + executor — **not** Bitkub-specific.                                                                                                                                                                                                                                     |
 | `rebalance`                                             | `portfolio_rebalancer.py` is exchange-agnostic; set `cash_assets` / `target_allocation` keys to match your **quote** asset (e.g. **USDT** for `*USDT` pairs).                                                                                                                                                         |
 | `data.hybrid_dynamic_coin_config.min_quote_balance_thb` | **Legacy key name** (`_thb`); value is treated as a **minimum quote balance** threshold — for USDT pairs interpret as **USDT**.                                                                                                                                                                                       |
-| `multi_timeframe.required_candles_for_readiness`        | Integer (default **35**, clamped **5–2000**). Each **gated** timeframe for a pair must have at least this many rows in `prices` before MTF readiness marks the pair `ready` (`trading/status_runtime.py` + `trading_bot._filter_pairs_by_candle_readiness`). Lower = faster startup, higher = more indicator history. |
+| `multi_timeframe.required_candles_for_readiness`        | Integer (default **35**, clamped **5–2000**). Each **gated** timeframe for a pair must have at least this many rows in `prices` before MTF readiness marks the pair `ready` (`trading/status_runtime.py` + `trading_bot._filter_pairs_by_candle_readiness`). Lower = faster startup, higher = more indicator history. **Separate from Sniper:** `strategies/sniper.py` expects on the order of **≥210** bars on the primary/main dataframe; the bot can report MTF candle readiness while Sniper alignment still shows placeholders until that longer history exists. |
 
 
 ---
