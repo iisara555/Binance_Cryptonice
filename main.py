@@ -3315,11 +3315,12 @@ class TradingBotApp:
         
         # 3. Initialize Signal Generator
         strategies_config = self.config.get("strategies", {})
+        risk_section = dict(self.config.get("risk", {}) or {})
         self.signal_generator = SignalGenerator({
             "min_confidence": strategies_config.get("min_confidence", 0.5),
             "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
-            "max_open_positions": risk_config.get("max_open_positions", 3),
-            "max_daily_trades": risk_config.get("max_daily_trades", 10),
+            "max_open_positions": risk_section.get("max_open_positions", 3),
+            "max_daily_trades": risk_section.get("max_daily_trades", 10),
             "strategies": {
                 "enabled": list(strategies_config.get("enabled") or []),
             },
