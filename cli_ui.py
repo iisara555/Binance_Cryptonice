@@ -81,6 +81,8 @@ class CLICommandCenter:
         "risk": (_EMBER, f"bold {_EMBER}"),
         "footer": (_BORDER_DIM, f"bold {_WHITE}"),
     }
+    # SigFlow block: max chars for "Why" (table column uses max_width slightly above this).
+    _SIGFLOW_WHY_MAX_LEN = 44
 
     def __init__(
         self,
@@ -492,8 +494,8 @@ class CLICommandCenter:
         return CLICommandCenter._truncate_inline(label, 9)
 
     @staticmethod
-    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 20) -> str:
-        """Ultra-short English for one-row-per-pair SigFlow (details stay in logs)."""
+    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 44) -> str:
+        """Short English for one-row-per-pair SigFlow; longer tail still truncated at max_len."""
         st = str(step or "").strip()
         rt = str(result or "").upper().strip()
         s = str(raw or "").strip()
@@ -1008,7 +1010,14 @@ class CLICommandCenter:
         table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
         table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
         table.add_column("\u2713", justify="center", no_wrap=True, width=2)
-        table.add_column("Why", style=self._DIM, ratio=1, overflow="ellipsis", max_width=22)
+        table.add_column(
+            "Why",
+            style=self._DIM,
+            ratio=2,
+            overflow="ellipsis",
+            min_width=28,
+            max_width=52,
+        )
 
         if not isinstance(flow_snapshot, dict) or not flow_snapshot:
             table.add_row("-", "—", "·", "no data")
@@ -1050,7 +1059,9 @@ class CLICommandCenter:
             result_raw = str(step_data.get("result") or "").upper()
             reason_raw = str(step_data.get("reason") or "")
             step_key = str(step_name or "")
-            why = self._humanize_signal_flow_reason(step_key, result_raw, reason_raw, max_len=22)
+            why = self._humanize_signal_flow_reason(
+                step_key, result_raw, reason_raw, max_len=CLICommandCenter._SIGFLOW_WHY_MAX_LEN
+            )
 
             if result_raw == "PASS":
                 result_cell = Text("\u2713", style=f"bold {self._GREEN}")
