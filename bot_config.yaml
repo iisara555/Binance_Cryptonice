@@ -172,6 +172,16 @@ multi_timeframe:
   # Timeframes to analyze (in order of priority for storage/collection)
   # NOTE: higher_timeframes MUST be a subset of this list so data is actually collected
   timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]
+  # Optional: subset for startup backfill only (defaults to all ``timeframes`` above).
+  # startup_backfill_timeframes: ["5m", "15m", "1h"]
+  # Backfill depth: pages older klines until at least this many rows exist (>= required_candles_for_readiness).
+  # backfill_target_bars: 120
+  # Klines per REST request when backfilling (50–1000; Binance max 1000).
+  # backfill_kline_limit_per_request: 1000
+  # Walk history with repeated /klines calls before ``max_backfill_days`` (safety cap).
+  # paged_backfill_enabled: true
+  # max_backfill_days: 365   # or per-TF map, e.g. { "1m": 14, "1d": 730 }
+  # backfill_max_pages: 200
   # Minimum timeframe alignment for trade (0.0-1.0)
   alignment_threshold: 0.4
   # Require higher timeframe (1h+) confirmation before trade

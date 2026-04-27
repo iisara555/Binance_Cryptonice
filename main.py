@@ -42,7 +42,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Import project modules
 from config import BINANCE, TRADING, validate_config
 from api_client import BinanceThClient, BinanceAPIError
-from data_collector import BinanceThCollector
+from data_collector import BinanceThCollector, resolve_startup_backfill_timeframes
 from signal_generator import (
     SignalGenerator,
     ensure_signal_flow_record,
@@ -3485,11 +3485,11 @@ class TradingBotApp:
             reporter.step("collector", "started", detail="background thread")
 
         with reporter.phase("Backfill"):
-            warmup_tfs = ["15m", "1h"]
             mtf_cfg = self.config.get("multi_timeframe") or {}
-            if mtf_cfg.get("enabled"):
-                configured = mtf_cfg.get("timeframes") or warmup_tfs
-                warmup_tfs = [tf for tf in configured if tf in ("5m", "15m", "1h", "4h")] or warmup_tfs
+            warmup_tfs = resolve_startup_backfill_timeframes(
+                mtf_cfg,
+                collector_timeframes=list(collector.multi_timeframes),
+            )
             reporter.step("timeframes", ", ".join(warmup_tfs))
             t0 = time.monotonic()
             try:

@@ -527,6 +527,28 @@ class Database:
         finally:
             session.close()
 
+    def get_earliest_price(self, pair: str, timeframe: str) -> Optional[Price]:
+        """Oldest stored candle for a pair and timeframe (used for paged backfill)."""
+        session = self.get_session()
+        try:
+            query = session.query(Price).filter(Price.pair == pair)
+            if timeframe:
+                query = query.filter(Price.timeframe == timeframe)
+            return query.order_by(Price.timestamp.asc()).first()
+        finally:
+            session.close()
+
+    def count_price_rows(self, pair: str, timeframe: str) -> int:
+        """Count OHLC rows for a pair and timeframe."""
+        session = self.get_session()
+        try:
+            q = session.query(func.count(Price.id)).filter(Price.pair == pair)
+            if timeframe:
+                q = q.filter(Price.timeframe == timeframe)
+            return int(q.scalar() or 0)
+        finally:
+            session.close()
+
     def get_price_history(self, pair: str,
                           start_time: datetime = None,
                           end_time: datetime = None,
