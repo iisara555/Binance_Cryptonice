@@ -294,7 +294,7 @@ class CLICommandCenter:
 
         layout = Layout(name="root")
         layout.split_column(
-            Layout(self._build_header(snapshot), size=3, name="header"),
+            Layout(self._build_header(snapshot), size=2, name="header"),
             Layout(name="body"),
             Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
         )
@@ -380,7 +380,7 @@ class CLICommandCenter:
             border_style=border_style,
             title_align="left",
             box=box.ROUNDED,
-            padding=(0, 1),
+            padding=(0, 0),
         )
 
     def _get_filtered_log_rows(self, min_level: str) -> List[Dict[str, str]]:
@@ -423,7 +423,9 @@ class CLICommandCenter:
 
     @staticmethod
     def _footer_content_budget(footer_mode: str) -> int:
-        return 7
+        """Inner renderable rows inside the footer panel (no chat/command UI)."""
+        _ = footer_mode
+        return 2
 
     def _resolve_footer_size(self, term_width: int, term_height: int, footer_mode: str) -> int:
         normalized_mode = str(footer_mode or "compact").lower()
@@ -437,9 +439,9 @@ class CLICommandCenter:
         min_content_rows = self._footer_content_budget(normalized_mode)
         min_panel_rows = min_content_rows + 2  # top/bottom panel borders
         if normalized_mode == "verbose":
-            target_size = max(8, min(11, safe_height // 3))
+            target_size = max(min_panel_rows, min(6, safe_height // 5))
         else:
-            target_size = max(6, min(8, safe_height // 4))
+            target_size = max(min_panel_rows, min(5, safe_height // 6))
 
         resolved = max(min_panel_rows, target_size)
         self._footer_size_cache[cache_key] = resolved
@@ -686,8 +688,8 @@ class CLICommandCenter:
         return f"bold {CLICommandCenter._WHITE}"
 
     def _build_positions_table(self, snapshot: Dict[str, Any], compact: bool = False) -> Panel:
-        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"])
-        table.add_column("Symbol", style=f"bold {self._WHITE}", no_wrap=True)
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table.add_column("Symbol", style=self._WHITE, no_wrap=True)
         table.add_column("Side", justify="center", no_wrap=True)
         table.add_column("Entry", justify="right", style=self._DIM)
         table.add_column("Current", justify="right")
@@ -907,11 +909,12 @@ class CLICommandCenter:
         return self._panel(grid, title="⚙ System Bus", theme="system")
 
     def _build_signal_alignment_panel(self, snapshot: Dict[str, Any]) -> Panel:
-        term_w, _term_h = self._layout_term_dimensions(self.console)
+        term_w, term_h = self._layout_term_dimensions(self.console)
         show_wait_col = term_w >= 120
+        max_pair_rows = max(12, min(22, max(8, term_h - 14)))
 
-        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"])
-        table.add_column("Pair", style=f"bold {self._WHITE}", no_wrap=True)
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table.add_column("Pair", style=self._WHITE, no_wrap=True)
         table.add_column("TF", justify="center", no_wrap=True, style=self._DIM)
         if show_wait_col:
             table.add_column("Wait", no_wrap=True, style=self._DIM)
@@ -940,7 +943,7 @@ class CLICommandCenter:
             else:
                 table.add_row("-", "-", "-", "-", "-", "No pairs")
         else:
-            for row in rows[:12]:
+            for row in rows[:max_pair_rows]:
                 action = str(row.get("action") or "HOLD").upper()
                 if action == "BUY":
                     action_text = Text("▲ BUY", style=f"bold {self._GREEN}")
@@ -1001,8 +1004,8 @@ class CLICommandCenter:
             self._safe_stderr_write(f"[cli_ui] signal flow snapshot error: {exc}\n")
             flow_snapshot = {}
 
-        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"])
-        table.add_column("Pair", style=f"bold {self._WHITE}", max_width=8, no_wrap=True)
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
         table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
         table.add_column("\u2713", justify="center", no_wrap=True, width=2)
         table.add_column("Why", style=self._DIM, ratio=1, overflow="ellipsis", max_width=22)
@@ -1027,7 +1030,7 @@ class CLICommandCenter:
             step_items = list(steps_dict.items())
 
             symbol_label = self._short_symbol_label(pair or "-")
-            pair_cell = Text.assemble((symbol_label, f"bold {self._WHITE}"), (" " + time_only, self._DIM))
+            pair_cell = Text.assemble((symbol_label, self._WHITE), (" " + time_only, self._DIM))
 
             # One row per pair: latest recorded step only (dict order = insertion order).
             iter_steps = step_items[-1:] if step_items else []
@@ -1105,8 +1108,8 @@ class CLICommandCenter:
         system = snapshot.get("system", {})
         breakdown_lines = list(system.get("balance_breakdown") or [])
 
-        table = Table(expand=True, show_header=False)
-        table.add_column("Holding", style="bold white")
+        table = Table(expand=True, show_header=False, padding=(0, 0), pad_edge=False)
+        table.add_column("Holding", style="white")
         table.add_column("Allocation", justify="right")
 
         summary_lines: List[Text] = []
@@ -1232,20 +1235,20 @@ class CLICommandCenter:
         return self._panel(Group(*lines), title="⚠ Risk Rails", theme="risk")
 
     def _build_footer(self, snapshot: Dict[str, Any]) -> Panel:
+        """Compact status strip: wide pair list + meta; optional pending (no in-panel chat/input)."""
         chat = snapshot.get("chat", {}) or {}
         ui_cfg = dict(snapshot.get("ui") or {})
-        history = list(chat.get("history") or [])
         pending = chat.get("pending_confirmation") or {}
-        suggestions = list(chat.get("suggestions") or [])
         footer_mode = str(ui_cfg.get("footer_mode") or "compact").lower()
         log_filter = str(ui_cfg.get("log_level_filter") or "INFO").upper()
-        term_width = self.console.width if self.console else 120
-        text_budget = max(28, int(term_width) - 26)
-        pairs_budget = max(18, min(40, text_budget // 2))
-        footer_budget = self._footer_content_budget(footer_mode)
+        term_width, _term_h = self._layout_term_dimensions(self.console)
+        text_budget = max(36, int(term_width) - 10)
+        # Leave room for mode | time | log | footer tag after the pair list.
+        reserved_suffix = 46
+        pairs_budget = max(32, int(term_width) - reserved_suffix)
 
         meta = Text.assemble(
-            ("\u25b8 ", f"bold {self._CYAN}"),
+            ("\u25b8 ", self._CYAN),
             (self._truncate_inline(snapshot.get("pairs", "NONE"), pairs_budget), self._DIM),
             ("  \u2502  ", self._DIM),
             (snapshot.get("mode", "-"), self._mode_style(snapshot.get("mode", "-"))),
@@ -1257,84 +1260,30 @@ class CLICommandCenter:
             ("  \u2502  ", self._DIM),
             (footer_mode, self._DIM),
         )
-
         lines: List[Text] = [meta]
-        status_text = str(chat.get("status") or snapshot.get("commands_hint") or "help")
-        if pending:
-            status_text = f"{status_text} | Pending confirm"
-        status_text = f"[{str(snapshot.get('strategy_mode') or 'standard').lower()}] {status_text}"
-        lines.append(
-            Text.assemble(
-                ("STATUS ", f"bold {self._WHITE}"),
-                (self._truncate_inline(status_text, text_budget), self._WHITE),
-            )
-        )
-
-        context_lines: List[Text] = []
 
         if pending:
-            pending_line = Text.assemble(
-                ("Pending: ", f"bold {self._EMBER}"),
-                (self._truncate_inline(pending.get("summary") or pending.get("command_text") or "-", text_budget), self._EMBER),
-            )
-            context_lines.append(pending_line)
-        elif footer_mode == "verbose":
-            context_lines.append(Text("Pending: -", style=self._DIM))
-
-        rendered_history: List[Text] = []
-        if history:
-            history_limit = 2
-            for item in history[-history_limit:]:
-                role = str(item.get("role") or "bot").lower()
-                label = "You" if role == "user" else "Bot"
-                style = f"bold {self._WHITE}"
-                rendered_history.append(
-                    Text.assemble(
-                        (f"{label}: ", style),
-                        (self._truncate_inline(item.get("message") or "-", text_budget), self._WHITE),
-                    )
-                )
-        else:
-            rendered_history.append(Text("Bot: Type command + Enter", style=self._WHITE))
-
-        context_lines.extend(rendered_history)
-
-        suggestion_limit = 5 if footer_mode == "verbose" else 3
-        if suggestions:
-            compact_suggestions = [str(item) for item in suggestions[:suggestion_limit]]
-            context_lines.append(
+            lines.append(
                 Text.assemble(
-                    ("Suggestions: ", "bold white"),
-                    (self._truncate_inline(" | ".join(compact_suggestions), text_budget), self._DIM),
+                    ("Pending: ", self._EMBER),
+                    (
+                        self._truncate_inline(
+                            pending.get("summary") or pending.get("command_text") or "-",
+                            text_budget,
+                        ),
+                        self._EMBER,
+                    ),
                 )
             )
         elif footer_mode == "verbose":
-            context_lines.append(Text("Suggestions: -", style=self._DIM))
+            st = str(snapshot.get("strategy_mode") or "standard").lower()
+            hint = str(chat.get("status") or snapshot.get("commands_hint") or "help | status")
+            lines.append(Text.assemble((f"[{st}] ", self._DIM), (self._truncate_inline(hint, text_budget), self._DIM)))
+        else:
+            hint = str(snapshot.get("commands_hint") or "help | status")
+            lines.append(Text(self._truncate_inline(hint, text_budget), style=self._DIM))
 
-        body_slots = max(1, footer_budget - 3)
-        if len(context_lines) > body_slots:
-            if footer_mode == "verbose" and context_lines:
-                preserved_head = [context_lines[0]]
-                remaining_slots = max(0, body_slots - 1)
-                preserved_tail = context_lines[-remaining_slots:] if remaining_slots else []
-                context_lines = preserved_head + preserved_tail
-            elif pending and context_lines:
-                context_lines = [context_lines[0]]
-            else:
-                context_lines = context_lines[-body_slots:]
-
-        while len(context_lines) < body_slots:
-            context_lines.append(Text(" ", style=self._DIM))
-
-        lines.extend(context_lines[:body_slots])
-
-        lines.append(
-            Text.assemble(
-                ("Input> ", f"bold {self._EMBER}"),
-                (self._truncate_inline(str(chat.get("input") or "") + "_", text_budget, preserve_tail=True), self._EMBER),
-            )
-        )
-        return self._panel(Group(*lines), title="❯ Command", theme="footer")
+        return self._panel(Group(*lines), title="Status", theme="footer")
 
     @staticmethod
     def _fmt_price(value: Any) -> str:

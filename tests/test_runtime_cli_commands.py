@@ -723,8 +723,8 @@ def test_footer_size_handles_zero_terminal_height(tmp_path):
     compact_size = command_center._resolve_footer_size(80, 0, "compact")
     verbose_size = command_center._resolve_footer_size(80, 0, "verbose")
 
-    assert compact_size >= 9
-    assert verbose_size >= 9
+    assert compact_size >= 4
+    assert verbose_size >= 4
 
 
 def test_signal_alignment_reports_waiting_for_market_data(tmp_path):

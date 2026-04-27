@@ -2665,7 +2665,7 @@ class TestCliUi:
         assert "[\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501]  97.6%" in rendered
         assert "[\u2501\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500]   2.4%" in rendered
 
-    def test_footer_renders_command_chat_panel(self):
+    def test_footer_renders_status_strip(self):
         app = Mock()
         app.get_cli_snapshot.return_value = {
             "bot_name": "Test Bot",
@@ -2676,7 +2676,9 @@ class TestCliUi:
             "pairs": "BTCUSDT",
             "strategies": "trend_following",
             "commands_hint": "Type in footer chat",
+            "strategy_mode": "standard",
             "updated_at": "12:34:56",
+            "ui": {"footer_mode": "compact", "log_level_filter": "INFO"},
             "chat": {
                 "status": "Typing...",
                 "pending_confirmation": {
@@ -2706,12 +2708,14 @@ class TestCliUi:
         console.print(panel)
         rendered = console.export_text()
 
-        assert "Command" in rendered
+        assert "Status" in rendered
+        assert "BTCUSDT" in rendered
+        assert "LIVE" in rendered
         assert "Pending: Confirm market BUY BTCUSDT with 500.00 USDT" in rendered
-        assert "You: risk show" in rendered
-        assert "Bot: Runtime risk: 2.00% per trade (MEDIUM)" in rendered
-        assert "Suggestions: confirm | cancel" in rendered
-        assert "Input> pairs add BTC" in rendered
+        assert "You:" not in rendered
+        assert "Bot:" not in rendered
+        assert "Suggestions:" not in rendered
+        assert "Input>" not in rendered
 
     def test_log_buffer_uses_bitkub_time(self):
         app = Mock()
