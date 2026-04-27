@@ -166,6 +166,9 @@ btc_correlation:
 # Multi-Timeframe Analysis Settings
 multi_timeframe:
   enabled: true                      # Enable multi-timeframe analysis
+  # Minimum OHLC rows per *gated* timeframe in SQLite before a pair is tradable
+  # (MTF candle readiness). Clamped to [5, 2000]. Default if omitted: 35.
+  required_candles_for_readiness: 35
   # Timeframes to analyze (in order of priority for storage/collection)
   # NOTE: higher_timeframes MUST be a subset of this list so data is actually collected
   timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]

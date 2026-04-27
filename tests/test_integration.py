@@ -845,6 +845,38 @@ class TestFullIntegrationFlow:
         assert portfolio['positions'] == [{'symbol': 'BTCUSDT'}]
         assert bot._portfolio_cache['data']['balance'] == pytest.approx(500.0)
 
+    def test_get_portfolio_state_lightweight_reuses_mtm_cache_after_portfolio_ttl_expires(self):
+        """Live dashboard: portfolio cache expires every ~10s but mark-to-quote should not REST N times."""
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._auth_degraded = False
+        bot._lightweight_mtm_cache = None
+        bot._portfolio_cache = {"data": None, "timestamp": 0.0}
+        bot._cache_ttl = {"portfolio": 10}
+        bot._ws_client = None
+        bot.api_client = Mock()
+        bot.executor = Mock()
+        bot.executor.get_open_orders.return_value = []
+        bot._balance_monitor = Mock()
+        bot._balance_monitor.poll_interval_seconds = 30
+        same_state = {
+            "updated_at": datetime.now().isoformat(),
+            "balances": {
+                "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0},
+                "BTC": {"available": 0.001, "reserved": 0.0, "total": 0.001},
+            },
+        }
+        bot._balance_monitor.get_state.return_value = same_state
+        bot.api_client.get_ticker.return_value = {"last": 45_000.0}
+
+        p1 = TradingBotOrchestrator._get_portfolio_state(bot, allow_refresh=False)
+        assert p1["total_balance"] == pytest.approx(545.0)
+        assert bot.api_client.get_ticker.call_count == 1
+
+        bot._portfolio_cache = {"data": p1, "timestamp": time.time() - 30.0}
+        p2 = TradingBotOrchestrator._get_portfolio_state(bot, allow_refresh=False)
+        assert p2["total_balance"] == pytest.approx(545.0)
+        assert bot.api_client.get_ticker.call_count == 1
+
     def test_filter_pairs_by_candle_readiness_keeps_only_ready_pairs(self):
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.mtf_enabled = True
@@ -894,6 +926,36 @@ class TestFullIntegrationFlow:
         assert status['pairs'][1]['waiting_summary'] == '1m:25, 5m:15'
         assert status['pairs'][1]['timeframes'][0]['waiting_candles'] == 25
         assert status['pairs'][1]['timeframes'][1]['waiting_candles'] == 15
+
+    def test_build_multi_timeframe_status_respects_required_candles_for_readiness_config(self):
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot.mtf_enabled = True
+        bot.mtf_timeframes = ['1m', '5m']
+        bot.timeframe = '5m'
+        bot._mtf_confirmation_required = False
+        bot._last_mtf_status = {}
+        bot.trading_pairs = ['THB_BTC']
+        bot.multi_timeframe_config = {'required_candles_for_readiness': 20}
+        bot._status_runtime_helper = None
+
+        cursor = Mock()
+        cursor.fetchone.side_effect = [
+            (10, '2026-04-13 12:00:00'),
+            (10, '2026-04-13 12:00:00'),
+        ]
+        conn = Mock()
+        conn.cursor.return_value = cursor
+        db = Mock()
+        db.get_connection.return_value = conn
+        bot.db = db
+
+        status = TradingBotOrchestrator._build_multi_timeframe_status(bot)
+
+        assert status['required_candles'] == 20
+        assert status['pairs'][0]['ready'] is False
+        assert status['pairs'][0]['waiting_candles'] == 20
+        assert status['pairs'][0]['timeframes'][0]['waiting_candles'] == 10
+        assert status['pairs'][0]['timeframes'][1]['waiting_candles'] == 10
 
     def test_run_iteration_skips_pairs_without_candle_readiness(self):
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
@@ -2734,7 +2796,7 @@ class TestCliUi:
 
     def test_signal_alignment_panel_renders_pair_runtime_context(self):
         app = Mock()
-        command_center = CLICommandCenter(app)
+        command_center = CLICommandCenter(app, console=Console(record=True, width=140, height=40))
 
         panel = command_center._build_signal_alignment_panel(
             {
@@ -2750,7 +2812,7 @@ class TestCliUi:
                         "trend": "BUY",
                         "trigger_side": "NONE",
                         "action": "WAIT",
-                        "status": "แท่งไม่พอ 3/210",
+                        "status": "Insufficient bars 3/210",
                     }
                 ]
             }
@@ -2764,6 +2826,36 @@ class TestCliUi:
         assert "4/6" in rendered
         assert "1m:8, 5m:2" in rendered
         assert "BTC" in rendered
+
+    def test_signal_alignment_panel_hides_wait_column_on_narrow_console(self):
+        app = Mock()
+        command_center = CLICommandCenter(app, console=Console(record=True, width=100, height=40))
+
+        panel = command_center._build_signal_alignment_panel(
+            {
+                "signal_alignment": [
+                    {
+                        "symbol": "THB_BTC",
+                        "tf_ready": "4/6",
+                        "wait_detail": "1m:8, 5m:2",
+                        "macro": "PASS",
+                        "micro": "PASS",
+                        "trigger": "HOLD",
+                        "trend": "MIXED",
+                        "action": "HOLD",
+                        "status": "Ready",
+                    }
+                ]
+            }
+        )
+        console = Console(record=True, width=100)
+        console.print(panel)
+        rendered = console.export_text()
+
+        assert "TF" in rendered
+        assert "Wait" not in rendered
+        assert "1m:8, 5m:2" not in rendered
+        assert "4/6" in rendered
 
 
 def test_format_bitkub_time_normalizes_to_thailand_timezone():

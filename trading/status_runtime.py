@@ -351,14 +351,17 @@ class StatusRuntimeHelper:
         return None
 
     def get_status(self, lightweight: bool = False) -> Dict[str, Any]:
+        t_all = time.perf_counter()
         paused, pause_reason = self.bot._is_paused()
         trading_pairs = getattr(self.bot, "trading_pairs", [])
         trading_pair = getattr(self.bot, "trading_pair", "")
         portfolio_state_getter = getattr(self.bot, "_get_portfolio_state", lambda *args, **kwargs: {})
+        t_pf0 = time.perf_counter()
         try:
             portfolio_state = portfolio_state_getter(allow_refresh=not lightweight) or {}
         except TypeError:
             portfolio_state = portfolio_state_getter() or {}
+        portfolio_ms = (time.perf_counter() - t_pf0) * 1000.0
         risk_manager = getattr(self.bot, "risk_manager", None)
 
         ws_client = getattr(self.bot, "_ws_client", None)
@@ -500,6 +503,25 @@ class StatusRuntimeHelper:
 
         pending_override = self._instance_override("_safe_pending_count")
         pending_count = pending_override() if pending_override is not None else self.safe_pending_count()
+
+        status_total_ms = (time.perf_counter() - t_all) * 1000.0
+        if status_total_ms >= 500.0:
+            non_quote_balance_rows = sum(
+                1
+                for a, p in balances.items()
+                if str(a or "").upper() != quote_asset
+                and self._coerce_float((p or {}).get("total"), 0.0) > 0
+            )
+            logger.warning(
+                "[STATUS PERF] lightweight=%s total_ms=%.1f portfolio_ms=%.1f post_portfolio_ms=%.1f "
+                "ws_state=%s non_quote_balance_rows=%d",
+                lightweight,
+                status_total_ms,
+                portfolio_ms,
+                max(0.0, status_total_ms - portfolio_ms),
+                ws_state,
+                non_quote_balance_rows,
+            )
 
         return {
             "running": getattr(self.bot, "running", False),

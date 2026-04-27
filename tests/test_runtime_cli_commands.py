@@ -736,7 +736,7 @@ def test_signal_alignment_reports_waiting_for_market_data(tmp_path):
         rows = app._build_cli_signal_alignment(["THB_BTC"])
 
         assert rows[0]["action"] == "WAIT"
-        assert rows[0]["status"] == "แท่งไม่พอ 3/210"
+        assert rows[0]["status"] == "Insufficient bars 3/210"
     finally:
         _clear_signal_flow()
 
@@ -749,7 +749,7 @@ def test_signal_alignment_reports_waiting_for_first_signal_flow(tmp_path):
         rows = app._build_cli_signal_alignment(["THB_BTC"])
 
         assert rows[0]["action"] == "WAIT"
-        assert rows[0]["status"] == "รอรอบแรก"
+        assert rows[0]["status"] == "First cycle"
     finally:
         _clear_signal_flow()
 

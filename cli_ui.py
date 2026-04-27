@@ -123,6 +123,36 @@ class CLICommandCenter:
         except Exception:
             return
 
+    @staticmethod
+    def _layout_term_dimensions(console: Any) -> tuple[int, int]:
+        """Width/height for layout decisions.
+
+        Rich only fixes ``size`` when both ``_width`` and ``_height`` are set; a lone
+        ``Console(width=140)`` still reports 80 columns via ``.width``. Prefer stored
+        ``_width`` / ``_height`` when present so tests and non-TTY sizing behave.
+        """
+        if console is None:
+            return 120, 30
+        fw = getattr(console, "_width", None)
+        fh = getattr(console, "_height", None)
+        if fw is not None and fh is not None:
+            try:
+                w = max(int(fw) - int(bool(getattr(console, "legacy_windows", False))), 1)
+                return w, max(int(fh), 1)
+            except (TypeError, ValueError):
+                pass
+        if fw is not None:
+            try:
+                return max(int(fw), 1), max(int(getattr(console, "height", None) or 30), 1)
+            except (TypeError, ValueError):
+                pass
+        try:
+            w = int(console.width)
+            h = int(console.height)
+            return (w if w > 0 else 120), (h if h > 0 else 30)
+        except Exception:
+            return 120, 30
+
     def start_log_capture(self) -> None:
         """Start mirroring runtime logs into an in-memory ring buffer for UI rendering."""
         if self._log_handler is not None:
@@ -258,8 +288,7 @@ class CLICommandCenter:
         footer_mode = str(ui_cfg.get("footer_mode") or "compact").lower()
 
         # Adaptive footer size: compact chat area while preserving input visibility.
-        term_height = self.console.height if self.console else 30
-        term_width = self.console.width if self.console else 120
+        term_width, term_height = self._layout_term_dimensions(self.console)
         compact_mode = term_width < 140 or term_height < 30
         footer_size = self._resolve_footer_size(term_width, term_height, footer_mode)
 
@@ -274,7 +303,7 @@ class CLICommandCenter:
                 Layout(self._build_runtime_overview_panel(snapshot), ratio=2, name="overview"),
                 Layout(self._build_positions_table(snapshot, compact=True), ratio=4, name="positions"),
                 Layout(self._build_signal_alignment_panel(snapshot), ratio=4, name="alignment"),
-                Layout(self._build_signal_flow_panel(snapshot, compact=True), ratio=3, name="signal_flow"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=3, name="signal_flow"),
                 Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
                 Layout(self._build_log_stream_panel(snapshot), ratio=2, name="logs"),
             )
@@ -292,7 +321,7 @@ class CLICommandCenter:
             layout["center"].split_column(
                 Layout(self._build_positions_table(snapshot, compact=False), ratio=5, name="positions"),
                 Layout(self._build_signal_alignment_panel(snapshot), ratio=5, name="alignment"),
-                Layout(self._build_signal_flow_panel(snapshot, compact=False), ratio=4, name="signal_flow"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=4, name="signal_flow"),
             )
             layout["right"].split_column(
                 Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
@@ -433,19 +462,19 @@ class CLICommandCenter:
         if not label:
             return "-"
         mapping = {
-            "Bootstrap": "เริ่ม",
-            "Sniper:DataCheck": "ข้อมูล",
-            "Sniper:MacroTrend": "เทรนด์ใหญ่",
-            "Sniper:MicroTrend": "เทรนด์ย่อย",
+            "Bootstrap": "Start",
+            "Sniper:DataCheck": "Data",
+            "Sniper:MacroTrend": "Macro",
+            "Sniper:MicroTrend": "Micro",
             "Sniper:MACDTrigger": "MACD",
             "Sniper:ATR": "ATR",
             "Sniper:ADX": "ADX",
-            "Sniper:Result": "ผลลัพธ์",
-            "Aggregation": "รวมสัญญาณ",
-            "SignalCollection": "เก็บสัญญาณ",
-            "GetBestSignal": "เลือกสัญญาณ",
-            "Aggregate:Input": "นำเข้า",
-            "Sniper:Exception": "ข้อผิดพลาด",
+            "Sniper:Result": "Result",
+            "Aggregation": "Agg",
+            "SignalCollection": "Collect",
+            "GetBestSignal": "Pick",
+            "Aggregate:Input": "Input",
+            "Sniper:Exception": "Error",
         }
         if label in mapping:
             return mapping[label]
@@ -461,78 +490,78 @@ class CLICommandCenter:
         return CLICommandCenter._truncate_inline(label, 9)
 
     @staticmethod
-    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 40) -> str:
-        """Short Thai-first labels for CLI Signal Flow (raw diagnostics stay in logs)."""
+    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 20) -> str:
+        """Ultra-short English for one-row-per-pair SigFlow (details stay in logs)."""
         st = str(step or "").strip()
         rt = str(result or "").upper().strip()
         s = str(raw or "").strip()
         if not s:
-            return "โอเค" if rt == "PASS" else "—"
+            return "ok" if rt == "PASS" else "—"
         low = s.lower()
 
         m = re.search(r"Insufficient data \((\d+)/(\d+) bars\)", s, re.I)
         if m:
-            return CLICommandCenter._truncate_inline(f"แท่งไม่พอ {m.group(1)}/{m.group(2)}", max_len)
+            return CLICommandCenter._truncate_inline(f"{m.group(1)}/{m.group(2)} bars", max_len)
 
         if "waiting for first signal cycle" in low or s.strip().lower() == "no diagnostics":
-            return "รอรอบแรก"
+            return "warmup"
 
         if "cooldown period active" in low:
-            return "พักคูลดาวน์"
+            return "cooldown"
 
         if "daily loss limit" in low:
-            return "จำกัดขาดทุนวันนี้"
+            return "daily loss"
 
         if "empty signal list" in low or "nothing to aggregate" in low:
-            return "ไม่มีสัญญาณให้รวม"
+            return "no agg"
 
         if "invalid portfolio value" in low:
-            return "มูลค่าพอร์ตผิดปกติ"
+            return "port?"
 
         if st == "Sniper:MacroTrend" or st.endswith("MacroTrend"):
             if rt == "REJECT" or ("buy_ok=false" in low and "sell_ok=false" in low):
-                return "ยังไม่มีทิศ EMA ชัด"
-            return "ทิศ EMA50/200 ชัดแล้ว"
+                return "no EMA trend"
+            return "EMA ok"
 
         if st == "Sniper:MicroTrend" or st.endswith("MicroTrend"):
             if rt == "REJECT":
-                return "ราคาห่างจาก EMA50"
-            return "ราคาเข้าโซน EMA50"
+                return "off EMA50"
+            return "at EMA50"
 
         if st == "Sniper:MACDTrigger" or st.endswith("MACDTrigger"):
             if rt == "REJECT":
-                return "ยังไม่ตัด MACD"
-            return "มีจุดตัด MACD"
+                return "no MACD"
+            return "MACD"
 
         if st == "Sniper:ATR" or st.endswith("ATR"):
             mx = re.search(r"ATR=([0-9.eE+-]+)", s)
             if mx:
-                return CLICommandCenter._truncate_inline(f"ATR ใช้ไม่ได้ ({mx.group(1)})", max_len)
-            return "ATR ผิดปกติ"
+                return CLICommandCenter._truncate_inline(f"ATR? {mx.group(1)}", max_len)
+            return "ATR?"
 
         if st == "Sniper:ADX" or ("ADX" in st and "Sniper" in st):
             mx = re.search(r"ADX=([0-9.]+)", s)
             if mx:
-                return CLICommandCenter._truncate_inline(f"แรงเทรนด์ ADX≈{mx.group(1)}", max_len)
+                return CLICommandCenter._truncate_inline(f"ADX {mx.group(1)}", max_len)
 
         if st == "Sniper:Result" or st.endswith("Result"):
             if rt == "PASS":
-                return "ยืนยันส่งสัญญาณ"
+                return "emit"
             return CLICommandCenter._truncate_inline(s, max_len)
 
         if st.startswith("RiskCheck:"):
             if rt == "REJECT":
-                tail = CLICommandCenter._truncate_inline(s.replace("\n", " "), max(8, max_len - 10))
-                return CLICommandCenter._truncate_inline(f"เช็กไม่ผ่าน {tail}", max_len)
-            return "ผ่านเช็กความเสี่ยง"
+                tail = CLICommandCenter._truncate_inline(s.replace("\n", " "), max(6, max_len - 6))
+                return CLICommandCenter._truncate_inline(f"! {tail}", max_len)
+            return "risk ok"
 
         if st.startswith("RiskMgr:"):
             return CLICommandCenter._truncate_inline(s, max_len)
 
         if st.startswith("Strategy:"):
             if rt == "REJECT":
-                return "กลยุทธ์ไม่จับสัญญาณ"
-            return "กลยุทธ์ผ่าน"
+                return "str skip"
+            return "str ok"
 
         return CLICommandCenter._truncate_inline(s, max_len)
 
@@ -878,10 +907,14 @@ class CLICommandCenter:
         return self._panel(grid, title="⚙ System Bus", theme="system")
 
     def _build_signal_alignment_panel(self, snapshot: Dict[str, Any]) -> Panel:
+        term_w, _term_h = self._layout_term_dimensions(self.console)
+        show_wait_col = term_w >= 120
+
         table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"])
         table.add_column("Pair", style=f"bold {self._WHITE}", no_wrap=True)
         table.add_column("TF", justify="center", no_wrap=True, style=self._DIM)
-        table.add_column("Wait", no_wrap=True, style=self._DIM)
+        if show_wait_col:
+            table.add_column("Wait", no_wrap=True, style=self._DIM)
         table.add_column("M/m/T", justify="center", no_wrap=True)
         table.add_column("Trend", justify="center", no_wrap=True)
         table.add_column("Action", justify="center", no_wrap=True)
@@ -892,8 +925,20 @@ class CLICommandCenter:
         buy_signals = sum(1 for row in rows if str(row.get("action") or "").upper() == "BUY")
         sell_signals = sum(1 for row in rows if str(row.get("action") or "").upper() == "SELL")
         wait_signals = sum(1 for row in rows if str(row.get("action") or "").upper() == "WAIT")
+
+        def _trend_cell_style(trend_raw: str) -> str:
+            t = str(trend_raw or "MIXED").upper()
+            if t in ("BUY", "UP"):
+                return f"bold {self._GREEN}"
+            if t in ("SELL", "DOWN"):
+                return f"bold {self._RED}"
+            return f"bold {self._EMBER}"
+
         if not rows:
-            table.add_row("-", "-", "-", "-", "-", "-", "No pairs")
+            if show_wait_col:
+                table.add_row("-", "-", "-", "-", "-", "-", "No pairs")
+            else:
+                table.add_row("-", "-", "-", "-", "-", "No pairs")
         else:
             for row in rows[:12]:
                 action = str(row.get("action") or "HOLD").upper()
@@ -912,18 +957,16 @@ class CLICommandCenter:
                 micro = "-" if micro_value.upper() == "N/A" else micro_value[0:1]
                 trigger = "-" if trigger_value.upper() == "N/A" else trigger_value[0:1]
                 symbol = self._short_symbol_label(row.get("symbol") or "-")
-                # Truncate status
-                status = str(row.get("status") or row.get("pair_state") or "พร้อม")[:14]
-                trend_style = f"bold {self._GREEN}" if str(row.get("trend") or "").upper() == "UP" else f"bold {self._RED}" if str(row.get("trend") or "").upper() == "DOWN" else f"bold {self._EMBER}"
-                table.add_row(
-                    symbol,
-                    str(row.get("tf_ready") or "-"),
-                    str(row.get("wait_detail") or "-"),
-                    f"{macro}/{micro}/{trigger}",
-                    Text(str(row.get("trend") or "MIXED"), style=trend_style),
-                    action_text,
-                    status,
-                )
+                tf_cell = str(row.get("tf_ready") or "-")
+                status = str(row.get("status") or row.get("pair_state") or "Ready")[:14]
+                trend_label = str(row.get("trend") or "MIXED")
+                trend_cell = Text(trend_label, style=_trend_cell_style(trend_label))
+                mmt = f"{macro}/{micro}/{trigger}"
+                wait_cell = str(row.get("wait_detail") or "-")
+                if show_wait_col:
+                    table.add_row(symbol, tf_cell, wait_cell, mmt, trend_cell, action_text, status)
+                else:
+                    table.add_row(symbol, tf_cell, mmt, trend_cell, action_text, status)
 
         summary_lines = [
             Text.assemble(
@@ -950,12 +993,8 @@ class CLICommandCenter:
 
         return self._panel(Group(*summary_lines, table), title="◎ Signal Radar", theme=self._resolve_signal_theme(rows))
 
-    def _build_signal_flow_panel(self, snapshot: Dict[str, Any], compact: bool = False) -> Panel:
-        """Render Signal Flow Diagnostics from signal_generator._LATEST_SIGNAL_FLOW.
-
-        Compact mode shows only the latest step per pair (mini view).
-        Full mode shows every recorded step per pair (PASS / REJECT / INFO).
-        """
+    def _build_signal_flow_panel(self, snapshot: Dict[str, Any]) -> Panel:
+        """Render Signal Flow: one row per pair (latest step only); short Why text."""
         try:
             flow_snapshot = get_latest_signal_flow_snapshot()
         except Exception as exc:
@@ -963,13 +1002,13 @@ class CLICommandCenter:
             flow_snapshot = {}
 
         table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"])
-        table.add_column("คู่", style=f"bold {self._WHITE}", max_width=7, no_wrap=True)
-        table.add_column("ขั้น", style=self._DIM, no_wrap=True, max_width=9)
+        table.add_column("Pair", style=f"bold {self._WHITE}", max_width=8, no_wrap=True)
+        table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
         table.add_column("\u2713", justify="center", no_wrap=True, width=2)
-        table.add_column("ทำไม", style=self._DIM, ratio=1, overflow="ellipsis", max_width=44)
+        table.add_column("Why", style=self._DIM, ratio=1, overflow="ellipsis", max_width=22)
 
         if not isinstance(flow_snapshot, dict) or not flow_snapshot:
-            table.add_row("-", "—", "·", "ยังไม่มีข้อมูล")
+            table.add_row("-", "—", "·", "no data")
             return self._panel(table, title="◬ SigFlow", theme="signal_flow")
 
         sorted_pairs = sorted(flow_snapshot.items(), key=lambda kv: str(kv[0] or ""))
@@ -988,61 +1027,56 @@ class CLICommandCenter:
             step_items = list(steps_dict.items())
 
             symbol_label = self._short_symbol_label(pair or "-")
+            pair_cell = Text.assemble((symbol_label, f"bold {self._WHITE}"), (" " + time_only, self._DIM))
 
-            iter_steps = step_items[-1:] if compact else step_items
+            # One row per pair: latest recorded step only (dict order = insertion order).
+            iter_steps = step_items[-1:] if step_items else []
             if not iter_steps:
                 table.add_row(
-                    Text.assemble((symbol_label, f"bold {self._WHITE}"), (" " + time_only, self._DIM)),
+                    pair_cell,
                     "—",
                     Text("\u00b7", style=self._DIM),
-                    "รอรอบแรก",
+                    "warmup",
                 )
                 continue
 
-            first_row = True
-            for step_name, step_data in iter_steps:
-                if not isinstance(step_data, dict):
-                    continue
-                result_raw = str(step_data.get("result") or "").upper()
-                reason_raw = str(step_data.get("reason") or "")
-                step_key = str(step_name or "")
-                why = self._humanize_signal_flow_reason(step_key, result_raw, reason_raw, max_len=44)
+            step_name, step_data = iter_steps[0]
+            if not isinstance(step_data, dict):
+                table.add_row(pair_cell, "—", Text("\u00b7", style=self._DIM), "—")
+                continue
+            result_raw = str(step_data.get("result") or "").upper()
+            reason_raw = str(step_data.get("reason") or "")
+            step_key = str(step_name or "")
+            why = self._humanize_signal_flow_reason(step_key, result_raw, reason_raw, max_len=22)
 
-                if result_raw == "PASS":
-                    result_cell = Text("\u2713", style=f"bold {self._GREEN}")
-                    pass_count += 1
-                elif result_raw == "REJECT":
-                    result_cell = Text("\u2717", style=f"bold {self._RED}")
-                    reject_count += 1
-                elif result_raw == "INFO":
-                    result_cell = Text("\u00b7", style=f"bold {self._WHITE}")
-                else:
-                    result_cell = Text("\u00b7", style=self._DIM)
+            if result_raw == "PASS":
+                result_cell = Text("\u2713", style=f"bold {self._GREEN}")
+                pass_count += 1
+            elif result_raw == "REJECT":
+                result_cell = Text("\u2717", style=f"bold {self._RED}")
+                reject_count += 1
+            elif result_raw == "INFO":
+                result_cell = Text("\u00b7", style=f"bold {self._WHITE}")
+            else:
+                result_cell = Text("\u00b7", style=self._DIM)
 
-                if first_row:
-                    pair_cell = Text.assemble((symbol_label, f"bold {self._WHITE}"), (" " + time_only, self._DIM))
-                    first_row = False
-                else:
-                    pair_cell = Text("", style=self._DIM)
+            table.add_row(
+                pair_cell,
+                self._abbrev_signal_flow_step(step_key),
+                result_cell,
+                why,
+            )
 
-                table.add_row(
-                    pair_cell,
-                    self._abbrev_signal_flow_step(step_key),
-                    result_cell,
-                    why,
-                )
-
-        view_label = "ย่อ" if compact else "เต็ม"
         summary_line = Text.assemble(
             ("\u25b8 ", f"bold {self._CYAN}"),
-            (f"{len(sorted_pairs)}คู่", self._DIM),
+            (f"{len(sorted_pairs)} pairs", self._DIM),
             (" \u2502 ", self._DIM),
             ("\u2713", f"bold {self._GREEN}"),
             (str(pass_count), f"bold {self._GREEN}"),
             (" \u2717", f"bold {self._RED}"),
             (str(reject_count), f"bold {self._RED}"),
             (" \u2502 ", self._DIM),
-            (view_label, f"bold {self._WHITE}"),
+            ("latest", f"bold {self._WHITE}"),
         )
 
         return self._panel(Group(summary_line, table), title="\u25ec SigFlow", theme="signal_flow")
@@ -1454,19 +1488,32 @@ class CLICommandCenter:
         score = 0.0
         for row in rows:
             action = str(row.get("action") or "").upper()
-            trend = str(row.get("trend") or "").upper()
-            status = str(row.get("status") or row.get("pair_state") or "").upper()
+            trend_raw = str(row.get("trend") or "").upper()
+            if trend_raw == "UP":
+                trend_norm = "BUY"
+            elif trend_raw == "DOWN":
+                trend_norm = "SELL"
+            else:
+                trend_norm = trend_raw
+
             if action == "BUY":
                 score += 2.0
             elif action == "SELL":
                 score -= 2.0
             elif action == "WAIT":
                 score -= 0.5
-            if trend == "UP":
+
+            if trend_norm == "BUY":
                 score += 1.0
-            elif trend == "DOWN":
+            elif trend_norm == "SELL":
                 score -= 1.0
-            if "WAIT" in status or "LAG" in status:
+
+            status_plain = str(row.get("status") or "").strip()
+            status_u = status_plain.upper()
+            combined_u = f"{row.get('status') or ''} {row.get('pair_state') or ''}".upper()
+            if "LAG" in combined_u:
+                score -= 0.5
+            elif action in ("HOLD", "WAIT") and status_u != "READY":
                 score -= 0.5
         return score
 

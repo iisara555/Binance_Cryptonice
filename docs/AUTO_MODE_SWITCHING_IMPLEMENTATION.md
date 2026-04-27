@@ -1,17 +1,21 @@
 # Auto Mode Switching Implementation Summary
 
 ## Overview
+
 Implemented a comprehensive **Adaptive Strategy Router** system that automatically switches trading strategy modes based on real-time market analysis. This enables the bot to adapt to changing market conditions without manual intervention.
 
 ## Files Created
 
 ### 1. **strategies/adaptive_router.py** (new)
+
 Core routing engine with:
+
 - `AdaptiveStrategyRouter` class: Main router orchestrating mode decisions
 - `MarketAnalysis` dataclass: Multi-dimensional market metrics
 - `ModeDecision` dataclass: Switching recommendation with reasoning
 
 **Key Features:**
+
 - Analyzes 5 market dimensions:
   - Trend strength (ADX: 0-100)
   - Volatility (ATR as % of price)
@@ -24,7 +28,9 @@ Core routing engine with:
 ## Files Modified
 
 ### 1. **main.py**
+
 Added adaptive router integration:
+
 - Import: `from strategies.adaptive_router import AdaptiveStrategyRouter, ModeDecision`
 - Initialize router in `TradingBotApp.__init__()` and `initialize()`
 - Add `_check_adaptive_mode_switch()` method that runs every main loop iteration
@@ -32,12 +38,15 @@ Added adaptive router integration:
 - Integrate checks into main event loop with minimal overhead
 
 **Integration Points:**
+
 - Router initialization in `initialize()` after other components
 - Mode check in all three main loop variants (CLI dashboard, fallback, plain log mode)
 - Config reload when mode changes, including signal generator restart
 
 ### 2. **strategies/sniper.py**
+
 Enhanced Sniper strategy with ADX-based dynamic SL/TP:
+
 - Calculate ADX (trend strength indicator)
 - Adjust SL/TP multipliers based on ADX:
   - **ADX > 50** (very strong trend): SL=1.0×ATR, TP=3.0×ATR (tight stops, wide profit)
@@ -46,6 +55,7 @@ Enhanced Sniper strategy with ADX-based dynamic SL/TP:
 - Include ADX value and context in signal metadata for diagnostics
 
 ### 3. **bot_config.yaml**
+
 Added three new configuration sections:
 
 ```yaml
@@ -77,19 +87,22 @@ btc_correlation:
 
 The router recommends modes based on market conditions:
 
-| Condition | ADX | Algorithm | Recommended Mode |
-|-----------|-----|-----------|-----------------|
-| Strong uptrend | > 40 | EMA50 > EMA200 | **TREND_ONLY** |
-| Strong downtrend | > 40 | EMA50 < EMA200 | **TREND_ONLY** |
-| High volatility + high volume | > 1.3x vol ratio | No clear trend | **SCALPING** |
-| Low volatility + ranging | < 25 | Price near EMA50 | **SNIPER** |
-| Everything else | — | Multi-strategy voting | **STANDARD** |
+
+| Condition                     | ADX              | Algorithm             | Recommended Mode |
+| ----------------------------- | ---------------- | --------------------- | ---------------- |
+| Strong uptrend                | > 40             | EMA50 > EMA200        | **TREND_ONLY**   |
+| Strong downtrend              | > 40             | EMA50 < EMA200        | **TREND_ONLY**   |
+| High volatility + high volume | > 1.3x vol ratio | No clear trend        | **SCALPING**     |
+| Low volatility + ranging      | < 25             | Price near EMA50      | **SNIPER**       |
+| Everything else               | —                | Multi-strategy voting | **STANDARD**     |
+
 
 ## Test Coverage
 
 Created comprehensive test suite: **tests/test_adaptive_router.py** (15 tests)
 
 Test categories:
+
 - ✓ Router initialization (enabled/disabled states)
 - ✓ Market analysis data structures
 - ✓ Mode classification logic (all 4 modes)
@@ -102,11 +115,13 @@ Test categories:
 ## Usage
 
 ### Enable Auto Mode Switching
+
 1. Set `auto_mode_switch.enabled: true` in `bot_config.yaml`
 2. Optionally adjust thresholds and timings
 3. Bot will auto-switch modes every 5 minutes when market conditions change
 
 ### Monitor Mode Switches
+
 - All switches logged to console with:
   - Market condition analysis (ADX, volatility, volume)
   - Previous mode → New mode
@@ -119,6 +134,7 @@ Test categories:
   ```
 
 ### Disable (Default)
+
 - Keep `auto_mode_switch.enabled: false` (default)
 - Bot operates in manual mode set by `strategy_mode.active`
 
@@ -134,21 +150,20 @@ Test categories:
 Prevents thrashing (rapid mode switches) via:
 
 1. **Cooldown Period**: 30 minutes minimum between any two switches
-   - Once switched, no new switch can occur for 30 minutes
-   - Persists even if market conditions reverse
-
+  - Once switched, no new switch can occur for 30 minutes
+  - Persists even if market conditions reverse
 2. **Persistence Requirement**: 3 consecutive checks must agree
-   - Market condition must be consistent across 15 minutes (3 × 5min checks)
-   - Single spikes/noise don't trigger switches
-
+  - Market condition must be consistent across 15 minutes (3 × 5min checks)
+  - Single spikes/noise don't trigger switches
 3. **State Tracking**:
-   - Decision history kept (last N decisions)
-   - Last switch timestamp recorded
-   - Current mode validated on startup
+  - Decision history kept (last N decisions)
+  - Last switch timestamp recorded
+  - Current mode validated on startup
 
 ## Future Enhancements
 
 Potential improvements for next iteration:
+
 1. Multi-symbol mode selection (different modes for different pairs)
 2. Time-of-day gating (e.g., no switches during low-liquidity hours)
 3. Performance-based weighting (favor modes with better recent P/L)
@@ -167,3 +182,4 @@ Potential improvements for next iteration:
 - ✅ Comprehensive test suite (15 tests, all passing)
 - ✅ No regressions (all 50 existing tests still pass)
 - ✅ Logging for diagnostics and debugging
+

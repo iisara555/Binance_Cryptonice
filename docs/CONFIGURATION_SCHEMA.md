@@ -5,15 +5,16 @@ Full documented configuration reference for the current standalone runtime.
 ---
 
 ## Table of Contents
-1.  [Global Bot Configuration](#global-bot-configuration)
-2.  [Trading Configuration](#trading-configuration)
-3.  [Risk Management](#risk-management)
-4.  [Strategies Configuration](#strategies-configuration)
-5.  [Signal Source Configuration](#signal-source-configuration)
-6.  [Logging & Metrics](#logging--metrics)
-7.  [Notifications](#notifications)
-8.  [Monitoring](#monitoring)
-9.  [Portfolio Rebalancing](#portfolio-rebalancing)
+
+1. [Global Bot Configuration](#global-bot-configuration)
+2. [Trading Configuration](#trading-configuration)
+3. [Risk Management](#risk-management)
+4. [Strategies Configuration](#strategies-configuration)
+5. [Signal Source Configuration](#signal-source-configuration)
+6. [Logging & Metrics](#logging--metrics)
+7. [Notifications](#notifications)
+8. [Monitoring](#monitoring)
+9. [Portfolio Rebalancing](#portfolio-rebalancing)
 10. [Backtesting Validation](#backtesting-validation)
 11. [Full Example Configuration](#full-example-configuration)
 12. [Binance Thailand alignment (`bot_config.yaml`)](#binance-thailand-alignment-bot_configyaml)
@@ -22,13 +23,15 @@ Full documented configuration reference for the current standalone runtime.
 
 ## Global Bot Configuration
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `mode` | string | `semi_auto` | Bot operation mode: `full_auto`, `semi_auto`, `dry_run` |
-| `trading_pair` | string | `""` | Primary trading pair symbol; runtime may fill this from holdings |
-| `interval_seconds` | integer | `60` | Main loop execution interval in seconds |
-| `timeframe` | string | `15m` | Candle timeframe |
-| `read_only` | boolean | `false` | Read-only mode (no trades executed) |
+
+| Parameter          | Type    | Default     | Description                                                      |
+| ------------------ | ------- | ----------- | ---------------------------------------------------------------- |
+| `mode`             | string  | `semi_auto` | Bot operation mode: `full_auto`, `semi_auto`, `dry_run`          |
+| `trading_pair`     | string  | `""`        | Primary trading pair symbol; runtime may fill this from holdings |
+| `interval_seconds` | integer | `60`        | Main loop execution interval in seconds                          |
+| `timeframe`        | string  | `15m`       | Candle timeframe                                                 |
+| `read_only`        | boolean | `false`     | Read-only mode (no trades executed)                              |
+
 
 ---
 
@@ -42,12 +45,14 @@ trading:
   mode: "full_auto"
 ```
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `trading_pair` | string | Runtime pair override |
-| `interval_seconds` | integer | Main loop interval |
-| `timeframe` | string | Primary timeframe |
-| `mode` | string | `dry_run`, `semi_auto`, `full_auto` |
+
+| Parameter          | Type    | Description                         |
+| ------------------ | ------- | ----------------------------------- |
+| `trading_pair`     | string  | Runtime pair override               |
+| `interval_seconds` | integer | Main loop interval                  |
+| `timeframe`        | string  | Primary timeframe                   |
+| `mode`             | string  | `dry_run`, `semi_auto`, `full_auto` |
+
 
 ---
 
@@ -67,18 +72,22 @@ risk:
 
 These are **not** a single unified percentage in all code paths:
 
-| Path | Where | What drives levels |
-|------|--------|-------------------|
-| **1. Strategy levels** | Strategies such as `ScalpingStrategy` | `strategies.<name>.stop_loss_pct` / `take_profit_pct` on the signal (for scalping, `main._apply_strategy_mode_profile` syncs from `strategy_mode.scalping`). |
-| **2. ATR plan** | `trading/signal_runtime.py` when the aggregated signal has no absolute SL/TP | `RiskManager.calc_sl_tp_from_atr` — ATR distance × multiplier from `MODE_ATR_PROFILES` (per active mode) or `risk.atr_multiplier`. **Not** the same numbers as path 1 percentages. |
+
+| Path                    | Where                                                                              | What drives levels                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Strategy levels**  | Strategies such as `ScalpingStrategy`                                              | `strategies.<name>.stop_loss_pct` / `take_profit_pct` on the signal (for scalping, `main._apply_strategy_mode_profile` syncs from `strategy_mode.scalping`).                                                                                                                                                                                                                                                        |
+| **2. ATR plan**         | `trading/signal_runtime.py` when the aggregated signal has no absolute SL/TP       | `RiskManager.calc_sl_tp_from_atr` — ATR distance × multiplier from `MODE_ATR_PROFILES` (per active mode) or `risk.atr_multiplier`. **Not** the same numbers as path 1 percentages.                                                                                                                                                                                                                                  |
 | **3. Percent fallback** | Bootstrap held positions, manual CLI track (`resolve_effective_sl_tp_percentages`) | If `use_dynamic_sl_tp` is true: `sl_tp_percent_source_when_dynamic` — `volatility` uses `DEFAULT_SL_TP` by pair class; `risk_config` uses `risk.stop_loss_pct` / `risk.take_profit_pct`. `main._apply_strategy_mode_profile` sets `risk_config` for `strategy_mode` **scalping** and **trend_only** so path 3 matches those mode percentages. Standard mode keeps default `volatility` unless you override in YAML. |
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `use_dynamic_sl_tp` | boolean | `true` | When true, path 3 uses `sl_tp_percent_source_when_dynamic` (below); when false, path 3 always uses `stop_loss_pct` / `take_profit_pct`. |
-| `sl_tp_percent_source_when_dynamic` | string | `volatility` | `volatility` \| `risk_config`. See path 3 above. |
-| `stop_loss_pct` | float | (varies) | Loss side % (stored negative after resolve); used for path 3 when applicable. |
-| `take_profit_pct` | float | (varies) | Profit side % for path 3 when applicable. |
+
+
+| Parameter                           | Type    | Default      | Description                                                                                                                             |
+| ----------------------------------- | ------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `use_dynamic_sl_tp`                 | boolean | `true`       | When true, path 3 uses `sl_tp_percent_source_when_dynamic` (below); when false, path 3 always uses `stop_loss_pct` / `take_profit_pct`. |
+| `sl_tp_percent_source_when_dynamic` | string  | `volatility` | `volatility`                                                                                                                            |
+| `stop_loss_pct`                     | float   | (varies)     | Loss side % (stored negative after resolve); used for path 3 when applicable.                                                           |
+| `take_profit_pct`                   | float   | (varies)     | Profit side % for path 3 when applicable.                                                                                               |
+
 
 ---
 
@@ -249,15 +258,18 @@ backtesting:
 
 These notes summarize how the **current** Python runtime uses `bot_config.yaml` when the exchange is **Binance Thailand** (`api.binance.th`, `BinanceThClient` in `config.py`).
 
-| YAML area | Actual runtime behavior |
-|-----------|-------------------------|
-| **Live orders** | **`.env` `LIVE_TRADING=true`** (`config.py`) is required to arm real exchange orders. YAML `simulate_only: false` and `read_only: false` must align; unset `BOT_STARTUP_TEST_MODE`; keep `BOT_READ_ONLY` / `SIMULATE_ONLY` off. See `.env.example`. |
-| `api_keys.binance_*` / `bitkub_*` | **Binance credentials are not read from YAML.** Use `.env`: `BINANCE_API_KEY`, `BINANCE_API_SECRET`. Optional: `telegram_bot_token` / `telegram_chat_id` here or in `.env` / `notifications`. Legacy `bitkub_*` entries are unused. |
-| `websocket` | Enables runtime WebSocket pricing when a supported backend is available (native Binance stream in Binance mode). If unavailable, runtime falls back to REST pricing. |
-| `balance_monitor` | Uses whatever `api_client` the bot was constructed with (`BinanceThClient`). Balances refresh; **fiat/crypto deposit/withdraw history** calls are **stubbed empty** on Binance.th (`api_client.py`), so history-driven deposit/withdraw events usually do not fire. |
-| `monitoring` / reconciliation | `monitoring.py` reconciles via `api_client` + executor — **not** Bitkub-specific. |
-| `rebalance` | `portfolio_rebalancer.py` is exchange-agnostic; set `cash_assets` / `target_allocation` keys to match your **quote** asset (e.g. **USDT** for `*USDT` pairs). |
-| `data.hybrid_dynamic_coin_config.min_quote_balance_thb` | **Legacy key name** (`_thb`); value is treated as a **minimum quote balance** threshold — for USDT pairs interpret as **USDT**. |
+
+| YAML area                                               | Actual runtime behavior                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Live orders**                                         | `**.env` `LIVE_TRADING=true`** (`config.py`) is required to arm real exchange orders. YAML `simulate_only: false` and `read_only: false` must align; unset `BOT_STARTUP_TEST_MODE`; keep `BOT_READ_ONLY` / `SIMULATE_ONLY` off. See `.env.example`.                                                                   |
+| `api_keys.binance_`* / `bitkub_*`                       | **Binance credentials are not read from YAML.** Use `.env`: `BINANCE_API_KEY`, `BINANCE_API_SECRET`. Optional: `telegram_bot_token` / `telegram_chat_id` here or in `.env` / `notifications`. Legacy `bitkub_`* entries are unused.                                                                                   |
+| `websocket`                                             | Enables runtime WebSocket pricing when a supported backend is available (native Binance stream in Binance mode). If unavailable, runtime falls back to REST pricing.                                                                                                                                                  |
+| `balance_monitor`                                       | Uses whatever `api_client` the bot was constructed with (`BinanceThClient`). Balances refresh; **fiat/crypto deposit/withdraw history** calls are **stubbed empty** on Binance.th (`api_client.py`), so history-driven deposit/withdraw events usually do not fire.                                                   |
+| `monitoring` / reconciliation                           | `monitoring.py` reconciles via `api_client` + executor — **not** Bitkub-specific.                                                                                                                                                                                                                                     |
+| `rebalance`                                             | `portfolio_rebalancer.py` is exchange-agnostic; set `cash_assets` / `target_allocation` keys to match your **quote** asset (e.g. **USDT** for `*USDT` pairs).                                                                                                                                                         |
+| `data.hybrid_dynamic_coin_config.min_quote_balance_thb` | **Legacy key name** (`_thb`); value is treated as a **minimum quote balance** threshold — for USDT pairs interpret as **USDT**.                                                                                                                                                                                       |
+| `multi_timeframe.required_candles_for_readiness`        | Integer (default **35**, clamped **5–2000**). Each **gated** timeframe for a pair must have at least this many rows in `prices` before MTF readiness marks the pair `ready` (`trading/status_runtime.py` + `trading_bot._filter_pairs_by_candle_readiness`). Lower = faster startup, higher = more indicator history. |
+
 
 ---
 
@@ -268,3 +280,4 @@ Configuration is validated by the runtime on startup. For operational checks, us
 ```powershell
 .\.venv-3\Scripts\python.exe scripts/vps_preflight.py --bot-health-url http://127.0.0.1:8080/health --json
 ```
+

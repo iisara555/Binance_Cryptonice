@@ -10,6 +10,35 @@ from risk_management import calculate_atr
 
 logger = logging.getLogger(__name__)
 
+# Mark-to-quote totals for live CLI: reuse up to this many seconds when balances
+# are unchanged (avoids N sequential REST tickers every portfolio-cache expiry).
+_LIGHTWEIGHT_MTM_CACHE_TTL_SEC = 45.0
+_PORTFOLIO_PERF_WARN_MS = 500.0
+
+
+def _balances_signature(balances: Dict[str, Any], quote: str) -> str:
+    """Stable key from spot holdings; invalidates when any non-zero balance changes."""
+    quote_u = str(quote or "").upper()
+    parts: list[str] = []
+    for asset in sorted(balances.keys(), key=lambda x: str(x).upper()):
+        asset_u = str(asset or "").upper()
+        payload = balances.get(asset) or {}
+        if isinstance(payload, dict):
+            av = float(payload.get("available", 0.0) or 0.0)
+            rv = float(payload.get("reserved", 0.0) or 0.0)
+            tot = payload.get("total")
+            if tot is not None:
+                t = float(tot or 0.0)
+            else:
+                t = av + rv
+        else:
+            t = float(payload or 0.0)
+        if t <= 0.0:
+            continue
+        parts.append(f"{asset_u}:{t:.8f}")
+    parts.append(f"Q={quote_u}")
+    return "|".join(parts)
+
 
 class PortfolioRuntimeHelper:
     def __init__(
@@ -22,6 +51,8 @@ class PortfolioRuntimeHelper:
         self.bot = bot
         self.websocket_available = bool(websocket_available)
         self.latest_ticker_getter = latest_ticker_getter if callable(latest_ticker_getter) else None
+        # Set to {"ws_hits": int, "rest_ticker": int} while profiling mark-to-quote work.
+        self._pricing_stats: Optional[Dict[str, int]] = None
 
     @staticmethod
     def extract_total_balance(balance_state: Optional[Dict[str, Any]], asset: str) -> float:
@@ -59,6 +90,8 @@ class PortfolioRuntimeHelper:
             try:
                 tick = self.latest_ticker_getter(pair)
                 if tick and getattr(tick, "last", None):
+                    if self._pricing_stats is not None:
+                        self._pricing_stats["ws_hits"] = int(self._pricing_stats.get("ws_hits", 0)) + 1
                     return float(tick.last)
             except Exception as exc:
                 logger.debug("[PortfolioRuntime] WS mark price lookup failed for %s: %s", pair, exc)
@@ -66,6 +99,8 @@ class PortfolioRuntimeHelper:
         try:
             ticker = self.bot.api_client.get_ticker(pair)
             if isinstance(ticker, dict):
+                if self._pricing_stats is not None:
+                    self._pricing_stats["rest_ticker"] = int(self._pricing_stats.get("rest_ticker", 0)) + 1
                 return float(ticker.get("last", ticker.get("close", 0.0)) or 0.0)
         except Exception as exc:
             logger.debug("[PortfolioRuntime] REST mark price lookup failed for %s: %s", pair, exc)
@@ -100,6 +135,7 @@ class PortfolioRuntimeHelper:
         return total_value
 
     def get_portfolio_state(self, allow_refresh: bool = True) -> Dict[str, Any]:
+        t_entry = time.perf_counter()
         now = time.time()
         _cache_lock = getattr(self.bot, "_portfolio_cache_lock", None)
         if _cache_lock:
@@ -119,6 +155,12 @@ class PortfolioRuntimeHelper:
             return result
 
         if portfolio_cache["data"] is not None and (now - float(portfolio_cache.get("timestamp", 0.0) or 0.0)) < cache_ttl:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[PORTFOLIO PERF] path=cache_hit allow_refresh=%s total_ms=%.2f",
+                    allow_refresh,
+                    (time.perf_counter() - t_entry) * 1000.0,
+                )
             return portfolio_cache["data"]
 
         if getattr(self.bot, "_auth_degraded", False):
@@ -131,17 +173,54 @@ class PortfolioRuntimeHelper:
 
         stale_balance_result: Optional[Dict[str, Any]] = None
         if not allow_refresh:
+            t_bm0 = time.perf_counter()
             balance_monitor = getattr(self.bot, "_balance_monitor", None)
             balance_state = balance_monitor.get_state() if balance_monitor else {}
+            balance_monitor_ms = (time.perf_counter() - t_bm0) * 1000.0
+
             balances = balance_state.get("balances") or {}
             quote = self.quote_asset()
             quote_payload = balances.get(quote) or {}
             quote_balance = float(quote_payload.get("total", quote_payload.get("available", 0.0)) or 0.0)
-            total_balance = self.estimate_total_portfolio_balance(balances) or quote_balance
+            non_quote_assets = sum(
+                1
+                for a, p in balances.items()
+                if str(a or "").upper() != quote
+                and self.extract_total_balance({"balances": {str(a).upper(): p}}, str(a)) > 0
+            )
+            sig = _balances_signature(balances, quote)
+            t_est0 = time.perf_counter()
+            mtm_cache = getattr(self.bot, "_lightweight_mtm_cache", None)
+            used_mtm_cache = False
+            pricing_stats: Dict[str, int] = {"ws_hits": 0, "rest_ticker": 0}
+            if (
+                isinstance(mtm_cache, dict)
+                and mtm_cache.get("sig") == sig
+                and (now - float(mtm_cache.get("ts", 0.0) or 0.0)) < _LIGHTWEIGHT_MTM_CACHE_TTL_SEC
+            ):
+                total_balance = float(mtm_cache.get("total", 0.0) or 0.0)
+                used_mtm_cache = True
+            else:
+                self._pricing_stats = pricing_stats
+                try:
+                    total_balance = self.estimate_total_portfolio_balance(balances) or quote_balance
+                finally:
+                    self._pricing_stats = None
+                setattr(
+                    self.bot,
+                    "_lightweight_mtm_cache",
+                    {"sig": sig, "total": float(total_balance or 0.0), "ts": now},
+                )
+            estimate_ms = (time.perf_counter() - t_est0) * 1000.0
+
+            t_pos0 = time.perf_counter()
+            positions = self.bot.executor.get_open_orders()
+            open_orders_ms = (time.perf_counter() - t_pos0) * 1000.0
+
             stale_balance_result = {
                 "balance": quote_balance,
                 "total_balance": total_balance,
-                "positions": self.bot.executor.get_open_orders(),
+                "positions": positions,
                 "timestamp": datetime.now(),
             }
 
@@ -163,11 +242,37 @@ class PortfolioRuntimeHelper:
             if updated_at is not None:
                 is_stale = (datetime.now() - updated_at).total_seconds() > stale_after_seconds
 
+            ws_connected = bool(
+                getattr(self.bot, "_ws_client", None)
+                and getattr(self.bot._ws_client, "is_connected", lambda: False)()
+            )
+            total_ms = (time.perf_counter() - t_entry) * 1000.0
+            rest_n = 0 if used_mtm_cache else int(pricing_stats.get("rest_ticker", 0))
+            ws_n = 0 if used_mtm_cache else int(pricing_stats.get("ws_hits", 0))
+            if total_ms >= _PORTFOLIO_PERF_WARN_MS or logger.isEnabledFor(logging.DEBUG):
+                log_fn = logger.warning if total_ms >= _PORTFOLIO_PERF_WARN_MS else logger.debug
+                log_fn(
+                    "[PORTFOLIO PERF] path=lightweight allow_refresh=False total_ms=%.1f "
+                    "balance_monitor_ms=%.1f estimate_ms=%.1f get_open_orders_ms=%.1f "
+                    "non_quote_assets=%d rest_tickers=%d ws_ticker_hits=%d ws_connected=%s mtm_cache_hit=%s",
+                    total_ms,
+                    balance_monitor_ms,
+                    estimate_ms,
+                    open_orders_ms,
+                    non_quote_assets,
+                    rest_n,
+                    ws_n,
+                    ws_connected,
+                    used_mtm_cache,
+                )
+
             if balance_state and not is_stale:
                 return _store_portfolio_cache(stale_balance_result)
 
         try:
+            t_rest0 = time.perf_counter()
             response = self.bot.api_client.get_balances()
+            get_balances_ms = (time.perf_counter() - t_rest0) * 1000.0
 
             if isinstance(response, dict):
                 quote = self.quote_asset()
@@ -192,6 +297,16 @@ class PortfolioRuntimeHelper:
                 "positions": self.bot.executor.get_open_orders(),
                 "timestamp": datetime.now(),
             }
+            setattr(self.bot, "_lightweight_mtm_cache", None)
+            full_ms = (time.perf_counter() - t_entry) * 1000.0
+            if full_ms >= _PORTFOLIO_PERF_WARN_MS or logger.isEnabledFor(logging.DEBUG):
+                log_fn = logger.warning if full_ms >= _PORTFOLIO_PERF_WARN_MS else logger.debug
+                log_fn(
+                    "[PORTFOLIO PERF] path=rest_balances allow_refresh=%s total_ms=%.1f get_balances_ms=%.1f",
+                    allow_refresh,
+                    full_ms,
+                    get_balances_ms,
+                )
             return _store_portfolio_cache(result)
         except Exception as exc:
             logger.error("Error getting portfolio state from exchange: %s", exc, exc_info=True)
