@@ -339,6 +339,7 @@ class TestFullIntegrationFlow:
         api_module.SHUTDOWN_REASON = ''
         client = BinanceThClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
         client.check_clock_sync = Mock(return_value=True)
+        client.signed_transient_2015_http_retries = 1
 
         response = Mock()
         response.status_code = 401

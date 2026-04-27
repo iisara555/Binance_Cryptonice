@@ -18,6 +18,7 @@ def test_unsuppressed_binance_auth_error_raises_auth_exception_without_global_sh
     client = BinanceThClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
     client.check_clock_sync = Mock(return_value=True)
     client.auth_fatal_threshold = 1
+    client.signed_transient_2015_http_retries = 1
 
     response = Mock()
     response.status_code = 401
@@ -41,6 +42,7 @@ def test_transient_binance_auth_errors_below_threshold_do_not_escalate():
     client = BinanceThClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
     client.check_clock_sync = Mock(return_value=True)
     client.auth_fatal_threshold = 5
+    client.signed_transient_2015_http_retries = 1
 
     response = Mock()
     response.status_code = 401
@@ -65,6 +67,30 @@ def test_transient_binance_auth_errors_below_threshold_do_not_escalate():
         assert exc_info.value.code == -2015
 
 
+def test_signed_request_retries_on_2015_before_success():
+    """HTTP 401 + -2015 on first attempt should transparently retry signed GET."""
+
+    client = BinanceThClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
+    client.check_clock_sync = Mock(return_value=True)
+    client.signed_transient_2015_http_retries = 3
+
+    fail = Mock()
+    fail.status_code = 401
+    fail.text = '{"code":-2015,"msg":"Invalid API-key"}'
+    fail.json.return_value = {'code': -2015, 'msg': 'Invalid API-key'}
+
+    ok = Mock()
+    ok.status_code = 200
+    ok.text = '{"balances":[]}'
+    ok.json.return_value = {'balances': []}
+
+    with patch('api_client.requests.request', side_effect=[fail, ok]) as req:
+        out = client.get_balances(force_refresh=True, allow_stale=False)
+
+    assert req.call_count == 2
+    assert out == {}
+
+
 def test_signed_success_resets_consecutive_auth_failure_counter():
     """A successful signed response must reset the consecutive auth-failure
     counter so subsequent transient errors restart the tolerance window."""
@@ -72,6 +98,7 @@ def test_signed_success_resets_consecutive_auth_failure_counter():
     client = BinanceThClient(api_key='key', api_secret='secret', base_url='https://example.invalid')
     client.check_clock_sync = Mock(return_value=True)
     client.auth_fatal_threshold = 3
+    client.signed_transient_2015_http_retries = 1
 
     fail_response = Mock()
     fail_response.status_code = 401

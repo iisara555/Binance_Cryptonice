@@ -372,6 +372,11 @@ class BinanceThClient:
     # successful signed response resets the counter to 0.
     AUTH_FATAL_CONSECUTIVE_THRESHOLD: int = 5
 
+    # When a signed call gets HTTP 401/403 with Binance body code -2015 (intermittent
+    # gateway / IP whitelist propagation), retry the same logical request this many
+    # times with a short backoff before surfacing BinanceAPIError to callers.
+    SIGNED_TRANSIENT_2015_HTTP_RETRIES: int = 3
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -426,6 +431,7 @@ class BinanceThClient:
         # many *consecutive* auth failures with no intervening signed success.
         self._consecutive_auth_failures: int = 0
         self.auth_fatal_threshold: int = int(self.AUTH_FATAL_CONSECUTIVE_THRESHOLD)
+        self.signed_transient_2015_http_retries: int = int(self.SIGNED_TRANSIENT_2015_HTTP_RETRIES)
 
         # --- NEW: SPEC_01 --- exchangeInfo cache (per Binance symbol).
         self._exchange_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -707,64 +713,113 @@ class BinanceThClient:
         if sleep_for:
             time.sleep(sleep_for)
 
-        request_params: Dict[str, Any] = {k: v for k, v in (params or {}).items() if v is not None}
-        headers: Dict[str, str] = {"Accept": "application/json"}
-
-        if signed:
-            request_params["timestamp"] = self._server_now_ms()
-            request_params.setdefault("recvWindow", 5000)
-            request_params["signature"] = self._sign(request_params)
-            headers["X-MBX-APIKEY"] = self.api_key
-        elif self.api_key and method.upper() != "GET":
-            headers["X-MBX-APIKEY"] = self.api_key
-
         url = f"{self.base_url}{path}"
-
-        try:
-            r = requests.request(
-                method.upper(),
-                url,
-                params=request_params,
-                headers=headers,
-                timeout=self.TIMEOUT if timeout is None else timeout,
+        base_params: Dict[str, Any] = {k: v for k, v in (params or {}).items() if v is not None}
+        max_http = 1
+        if signed:
+            max_http = max(
+                1,
+                int(getattr(self, "signed_transient_2015_http_retries", self.SIGNED_TRANSIENT_2015_HTTP_RETRIES)),
             )
 
-            if r.status_code >= 400:
-                is_suppressed_auth = (
-                    signed
-                    and r.status_code in (401, 403)
-                    and bool(self._fatal_auth_suppression_context)
-                )
-                log_method = logger.warning if is_suppressed_auth else logger.error
-                suffix = (
-                    f" during {self._fatal_auth_suppression_context}"
-                    if is_suppressed_auth else ""
-                )
-                log_method(
-                    f"HTTP {r.status_code} from {path}{suffix} — "
-                    f"Raw response: {r.text[:500]}"
+        try:
+            data: Any = None
+            for http_attempt in range(max_http):
+                request_params = dict(base_params)
+                headers: Dict[str, str] = {"Accept": "application/json"}
+                if signed:
+                    request_params["timestamp"] = self._server_now_ms()
+                    request_params.setdefault("recvWindow", 5000)
+                    request_params["signature"] = self._sign(request_params)
+                    headers["X-MBX-APIKEY"] = self.api_key
+                elif self.api_key and method.upper() != "GET":
+                    headers["X-MBX-APIKEY"] = self.api_key
+
+                r = requests.request(
+                    method.upper(),
+                    url,
+                    params=request_params,
+                    headers=headers,
+                    timeout=self.TIMEOUT if timeout is None else timeout,
                 )
 
-            try:
-                data = r.json()
-            except ValueError:
-                raise BinanceAPIError(
-                    -1,
-                    f"Non-JSON response ({r.status_code}): {r.text[:300]}",
-                )
+                try:
+                    data = r.json()
+                except ValueError:
+                    raise BinanceAPIError(
+                        -1,
+                        f"Non-JSON response ({r.status_code}): {r.text[:300]}",
+                    )
 
-            if isinstance(data, dict) and "code" in data and "msg" in data:
-                code_val = data.get("code")
-                if code_val is None:
-                    code_int = 0
-                else:
-                    try:
-                        code_int = int(code_val)
-                    except (TypeError, ValueError):
-                        code_int = code_val
-                if isinstance(code_int, int) and code_int < 0:
-                    msg = _binance_error_message(code_int, data.get("msg"))
-                    raise BinanceAPIError(code_int, msg, raw=data)
+                if isinstance(data, dict) and "code" in data and "msg" in data:
+                    code_val = data.get("code")
+                    if code_val is None:
+                        code_int = 0
+                    else:
+                        try:
+                            code_int = int(code_val)
+                        except (TypeError, ValueError):
+                            code_int = code_val
+                    if isinstance(code_int, int) and code_int < 0:
+                        if (
+                            signed
+                            and r.status_code in (401, 403)
+                            and code_int == -2015
+                            and http_attempt < max_http - 1
+                        ):
+                            logger.warning(
+                                "HTTP %s + code -2015 on %s — retrying signed request (%s/%s) after gateway blip",
+                                r.status_code,
+                                path,
+                                http_attempt + 1,
+                                max_http,
+                            )
+                            time.sleep(0.35 * (1.45 ** http_attempt))
+                            continue
+
+                        if r.status_code >= 400:
+                            is_suppressed_auth = (
+                                signed
+                                and r.status_code in (401, 403)
+                                and bool(self._fatal_auth_suppression_context)
+                            )
+                            threshold = max(
+                                1,
+                                int(getattr(self, "auth_fatal_threshold", self.AUTH_FATAL_CONSECUTIVE_THRESHOLD)),
+                            )
+                            is_transient_soft = (
+                                signed
+                                and r.status_code in (401, 403)
+                                and code_int == -2015
+                                and (self._consecutive_auth_failures + 1) < threshold
+                            )
+                            log_method = (
+                                logger.warning
+                                if (is_suppressed_auth or is_transient_soft)
+                                else logger.error
+                            )
+                            suffix = (
+                                f" during {self._fatal_auth_suppression_context}"
+                                if is_suppressed_auth else ""
+                            )
+                            log_method(
+                                f"HTTP {r.status_code} from {path}{suffix} — "
+                                f"Raw response: {r.text[:500]}"
+                            )
+                        msg = _binance_error_message(code_int, data.get("msg"))
+                        raise BinanceAPIError(code_int, msg, raw=data)
+
+                if r.status_code >= 400:
+                    logger.error(
+                        f"HTTP {r.status_code} from {path} — "
+                        f"Raw response: {r.text[:500]}"
+                    )
+                    raise BinanceAPIError(
+                        -1,
+                        f"HTTP {r.status_code} from {path}: {str(data)[:300]}",
+                    )
+
+                break
 
             if signed and self._consecutive_auth_failures:
                 logger.info(
@@ -1070,7 +1125,13 @@ class BinanceThClient:
                 if allow_stale and self._balances_cache is not None:
                     logger.warning("[Balance] Using stale cache due to API error: %s", exc)
                     return self._balances_cache
-            logger.error("[Balance] Failed to fetch balances and no stale cache is available", exc_info=True)
+            if isinstance(exc, BinanceAPIError) and exc.code == -2015:
+                logger.warning(
+                    "[Balance] Failed to fetch balances (transient -2015), no stale cache: %s",
+                    exc,
+                )
+            else:
+                logger.error("[Balance] Failed to fetch balances and no stale cache is available", exc_info=True)
             raise
 
     def get_balances_fresh(self) -> Dict[str, Dict[str, float]]:
