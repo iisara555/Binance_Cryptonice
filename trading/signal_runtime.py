@@ -16,6 +16,45 @@ from trading.orchestrator import BotMode, TradeDecision
 logger = logging.getLogger(__name__)
 
 
+def _reduce_opposing_signals_single_direction(signals: List[Any], symbol: str) -> List[Any]:
+    """Keep at most one trade direction per symbol when BUY and SELL both appear in one tick."""
+    aggs = [s for s in signals if isinstance(s, AggregatedSignal)]
+    others = [s for s in signals if not isinstance(s, AggregatedSignal)]
+    if len(aggs) < 2:
+        return signals
+    buckets: Dict[str, List[AggregatedSignal]] = {}
+    for s in aggs:
+        raw = s.signal_type.value if hasattr(s.signal_type, "value") else s.signal_type
+        d = str(raw).upper()
+        buckets.setdefault(d, []).append(s)
+    if "BUY" not in buckets or "SELL" not in buckets:
+        return signals
+    best_buy = max(buckets["BUY"], key=lambda x: x.combined_confidence)
+    best_sell = max(buckets["SELL"], key=lambda x: x.combined_confidence)
+    if best_buy.combined_confidence >= best_sell.combined_confidence:
+        kept = best_buy
+        dropped = "SELL"
+        other_best = best_sell.combined_confidence
+    else:
+        kept = best_sell
+        dropped = "BUY"
+        other_best = best_buy.combined_confidence
+    logger.debug(
+        "[Signal] %s opposing BUY/SELL same tick — keeping %s conf=%.3f (dropped %s conf=%.3f)",
+        symbol,
+        str(kept.signal_type.value if hasattr(kept.signal_type, "value") else kept.signal_type).upper(),
+        kept.combined_confidence,
+        dropped,
+        other_best,
+    )
+    extra: List[AggregatedSignal] = []
+    for direction, lst in buckets.items():
+        if direction in ("BUY", "SELL"):
+            continue
+        extra.append(max(lst, key=lambda x: x.combined_confidence))
+    return others + extra + [kept]
+
+
 @dataclass(slots=True)
 class SignalRuntimeDeps:
     get_portfolio_state: Callable[[], Dict[str, Any]]
@@ -104,6 +143,9 @@ class SignalRuntimeHelper:
 
         strategy_mode = str(deps.active_strategy_mode or "standard").strip().lower() or "standard"
         active_strategies = deps.resolve_active_strategies(strategy_mode)
+        refresh = getattr(deps.signal_generator, "refresh_risk_config_for_mode", None)
+        if callable(refresh):
+            refresh(strategy_mode)
         signals = deps.signal_generator.generate_signals(
             data=data,
             symbol=symbol,
@@ -115,6 +157,7 @@ class SignalRuntimeHelper:
                 signals = fallback(data=data, symbol=symbol)
         if not isinstance(signals, list):
             signals = []
+        signals = _reduce_opposing_signals_single_direction(signals, symbol)
 
         current_market_condition = None
         for generated_signal in signals:
@@ -149,6 +192,8 @@ class SignalRuntimeHelper:
         for signal in signals:
             if not isinstance(signal, AggregatedSignal):
                 continue
+
+            portfolio = deps.get_portfolio_state()
 
             signal_type = signal.signal_type.value.lower() if hasattr(signal.signal_type, "value") else str(signal.signal_type).lower()
             if signal_type == "buy" and not deps.is_entry_signal_confirmed(data, signal_type, strategy_mode):

@@ -316,6 +316,32 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
     return runtime_config
 
 
+def _risk_manager_from_config(config: Dict[str, Any]) -> RiskManager:
+    """Build RiskManager from a merged runtime config (used at startup and after strategy mode switch)."""
+    risk_config = dict(config.get("risk", {}) or {})
+    risk_params = RiskConfig(
+        max_risk_per_trade_pct=risk_config.get("max_risk_per_trade_pct", 4.0),
+        max_daily_loss_pct=risk_config.get("max_daily_loss_pct", 10.0),
+        max_position_per_trade_pct=risk_config.get("max_position_per_trade_pct", 10.0),
+        max_drawdown_threshold_pct=risk_config.get("max_drawdown_threshold_pct", 12.0),
+        drawdown_soft_reduce_start_pct=risk_config.get("drawdown_soft_reduce_start_pct", 5.0),
+        min_drawdown_risk_multiplier=risk_config.get("min_drawdown_risk_multiplier", 0.35),
+        drawdown_block_new_entries=risk_config.get("drawdown_block_new_entries", True),
+        stop_loss_pct=risk_config.get("stop_loss_pct", -4.5),
+        take_profit_pct=risk_config.get("take_profit_pct", 10.0),
+        atr_multiplier=risk_config.get("atr_multiplier", 3.0),
+        atr_period=risk_config.get("atr_period", 14),
+        use_dynamic_sl_tp=risk_config.get("use_dynamic_sl_tp", True),
+        initial_balance=config.get("portfolio", {}).get("initial_balance", 1000.0),
+        min_balance_threshold=config.get("portfolio", {}).get("min_balance_threshold", 100.0),
+        max_open_positions=risk_config.get("max_open_positions", 3),
+        max_daily_trades=risk_config.get("max_daily_trades", 10),
+        cool_down_minutes=risk_config.get("cool_down_minutes", 5),
+        min_order_amount=config.get("trading", {}).get("min_order_amount", 15.0),
+    )
+    return RiskManager(risk_params)
+
+
 def _normalize_optional_secret(value: Optional[Any]) -> str:
     text = str(value or "").strip()
     if not text:
@@ -2767,7 +2793,11 @@ class TradingBotApp:
             updated_config = _apply_strategy_mode_profile(self.config)
             self.config = updated_config
             self._current_strategy_mode = mode
-            
+
+            self.risk_manager = _risk_manager_from_config(self.config)
+            if self.executor:
+                self.executor.risk_manager = self.risk_manager
+
             # Restart signal generator with new strategy config
             if self.signal_generator:
                 strategies_config = self.config.get("strategies", {})
@@ -2788,16 +2818,23 @@ class TradingBotApp:
                     "mean_reversion": strategies_config.get("mean_reversion", {}),
                     "breakout": strategies_config.get("breakout", {}),
                 })
-                if self.risk_manager and self.signal_generator.set_database:
+                if self.signal_generator.set_database:
                     from database import get_database
                     self.signal_generator.set_database(get_database())
-            
+
+            if self.bot and self.signal_generator:
+                self.bot.apply_runtime_strategy_refresh(
+                    self.config,
+                    self.signal_generator,
+                    risk_manager=self.risk_manager,
+                )
+
             # Update trade executor config if needed
             if self.executor:
                 risk_cfg = self.config.get("risk", {})
                 self.executor.retry_delay = risk_cfg.get("retry_delay_seconds", 5)
                 self.executor.order_timeout = risk_cfg.get("order_timeout_seconds", 30)
-            
+
             logger.info(f"[AdaptiveRouter] Strategy mode switched to: {mode}")
             logger.info(f"[AdaptiveRouter] Configuration updated with new strategy profile")
         
@@ -3273,28 +3310,7 @@ class TradingBotApp:
                     )
 
         # 2. Initialize Risk Manager
-        risk_config = self.config.get("risk", {})
-        risk_params = RiskConfig(
-            max_risk_per_trade_pct=risk_config.get("max_risk_per_trade_pct", 4.0),
-            max_daily_loss_pct=risk_config.get("max_daily_loss_pct", 10.0),
-            max_position_per_trade_pct=risk_config.get("max_position_per_trade_pct", 10.0),
-            max_drawdown_threshold_pct=risk_config.get("max_drawdown_threshold_pct", 12.0),
-            drawdown_soft_reduce_start_pct=risk_config.get("drawdown_soft_reduce_start_pct", 5.0),
-            min_drawdown_risk_multiplier=risk_config.get("min_drawdown_risk_multiplier", 0.35),
-            drawdown_block_new_entries=risk_config.get("drawdown_block_new_entries", True),
-            stop_loss_pct=risk_config.get("stop_loss_pct", -4.5),
-            take_profit_pct=risk_config.get("take_profit_pct", 10.0),
-            atr_multiplier=risk_config.get("atr_multiplier", 3.0),
-            atr_period=risk_config.get("atr_period", 14),
-            use_dynamic_sl_tp=risk_config.get("use_dynamic_sl_tp", True),
-            initial_balance=self.config.get("portfolio", {}).get("initial_balance", 1000.0),
-            min_balance_threshold=self.config.get("portfolio", {}).get("min_balance_threshold", 100.0),
-            max_open_positions=risk_config.get("max_open_positions", 3),
-            max_daily_trades=risk_config.get("max_daily_trades", 10),
-            cool_down_minutes=risk_config.get("cool_down_minutes", 5),
-            min_order_amount=self.config.get("trading", {}).get("min_order_amount", 15.0),
-        )
-        self.risk_manager = RiskManager(risk_params)
+        self.risk_manager = _risk_manager_from_config(self.config)
         logger.info("Risk Manager initialized")
         
         # 3. Initialize Signal Generator

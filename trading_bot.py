@@ -398,6 +398,53 @@ class TradingBotOrchestrator:
         # 2) reconcile against the active exchange (in start())
         # 3) sync OMS in-memory tracking from DB (after reconciliation)
 
+    def apply_runtime_strategy_refresh(
+        self,
+        config: Dict[str, Any],
+        signal_generator: SignalGenerator,
+        *,
+        risk_manager: Optional[RiskManager] = None,
+    ) -> None:
+        """Sync orchestrator with new runtime config after strategy mode switch or hot reload."""
+        self.config = config
+        self.signal_generator = signal_generator
+        if risk_manager is not None:
+            self.risk_manager = risk_manager
+
+        mode = str(config.get("active_strategy_mode") or "standard").lower()
+        self._active_strategy_mode = mode
+
+        self.strategies_config = dict(config.get("strategies", {}) or {})
+        enabled = self.strategies_config.get("enabled", [])
+        if isinstance(enabled, list) and enabled:
+            self.enabled_strategies = list(enabled)
+        self._scalping_mode_enabled = mode == "scalping"
+
+        trading_cfg = dict(config.get("trading", {}) or {})
+        self.timeframe = trading_cfg.get("timeframe", self.timeframe)
+        self.interval_seconds = trading_cfg.get("interval_seconds", self.interval_seconds)
+        self.trading_pair = (
+            trading_cfg.get("trading_pair")
+            or config.get("trading_pair")
+            or self.trading_pair
+        )
+        self.trading_pairs = self._get_trading_pairs()
+
+        mtf = dict(config.get("multi_timeframe", {}) or {})
+        self.multi_timeframe_config = mtf
+        self.mtf_enabled = bool(mtf.get("enabled", False))
+        self.mtf_timeframes = [
+            str(timeframe).strip()
+            for timeframe in (mtf.get("timeframes") or ["1m", "5m", "15m", "1h"])
+            if str(timeframe).strip()
+        ]
+        self._mtf_confirmation_required = bool(mtf.get("require_htf_confirmation", False))
+
+        self.signal_generator.set_database(self.db)
+
+        self._portfolio_cache = {"data": None, "timestamp": 0.0}
+        self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}
+
     def _required_candles_for_trading_readiness(self) -> int:
         """Minimum stored OHLC rows per gated timeframe before a pair is MTF-ready.
 
