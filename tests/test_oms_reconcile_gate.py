@@ -14,6 +14,7 @@ Verifies that:
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, Mock, patch, call
 import pytest
 
@@ -219,7 +220,6 @@ class TestOMSLoopGatedByReconciliation:
              patch.object(ex, "_verify_order_fill"):
 
             # Plant a timed-out order (60s old — exceeds 1s timeout, under 24h limit)
-            from datetime import datetime, timedelta
             ex._open_orders["ord-timeout"] = {
                 "order_id": "ord-timeout",
                 "symbol": "THB_BTC",
@@ -228,7 +228,7 @@ class TestOMSLoopGatedByReconciliation:
                 "entry_price": 1_500_000.0,
                 "stop_loss": None,
                 "take_profit": None,
-                "timestamp": datetime.now() - timedelta(seconds=60),
+                "timestamp": datetime.now(timezone.utc) - timedelta(seconds=60),
                 "is_partial_fill": False,
                 "remaining_amount": 0.001,
                 "total_entry_cost": 1500.0,

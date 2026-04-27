@@ -20,7 +20,7 @@ import sys
 import time
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional, Dict, Any, List
 
 from alerts import AlertSystem, AlertLevel, format_fatal_auth_alert  # Unified alert system
@@ -67,6 +67,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _MIN_CANDLES_FOR_TRADING_READINESS = 35
+_MIN_READINESS_CANDLES_CAP = 2000
+_MIN_READINESS_CANDLES_FLOOR = 5
 
 
 def _coerce_trade_float(val, default: float = 0.0) -> float:
@@ -396,6 +398,67 @@ class TradingBotOrchestrator:
         # 2) reconcile against the active exchange (in start())
         # 3) sync OMS in-memory tracking from DB (after reconciliation)
 
+    def apply_runtime_strategy_refresh(
+        self,
+        config: Dict[str, Any],
+        signal_generator: SignalGenerator,
+        *,
+        risk_manager: Optional[RiskManager] = None,
+    ) -> None:
+        """Sync orchestrator with new runtime config after strategy mode switch or hot reload."""
+        self.config = config
+        self.signal_generator = signal_generator
+        if risk_manager is not None:
+            self.risk_manager = risk_manager
+
+        mode = str(config.get("active_strategy_mode") or "standard").lower()
+        self._active_strategy_mode = mode
+
+        self.strategies_config = dict(config.get("strategies", {}) or {})
+        enabled = self.strategies_config.get("enabled", [])
+        if isinstance(enabled, list) and enabled:
+            self.enabled_strategies = list(enabled)
+        self._scalping_mode_enabled = mode == "scalping"
+
+        trading_cfg = dict(config.get("trading", {}) or {})
+        self.timeframe = trading_cfg.get("timeframe", self.timeframe)
+        self.interval_seconds = trading_cfg.get("interval_seconds", self.interval_seconds)
+        self.trading_pair = (
+            trading_cfg.get("trading_pair")
+            or config.get("trading_pair")
+            or self.trading_pair
+        )
+        self.trading_pairs = self._get_trading_pairs()
+
+        mtf = dict(config.get("multi_timeframe", {}) or {})
+        self.multi_timeframe_config = mtf
+        self.mtf_enabled = bool(mtf.get("enabled", False))
+        self.mtf_timeframes = [
+            str(timeframe).strip()
+            for timeframe in (mtf.get("timeframes") or ["1m", "5m", "15m", "1h"])
+            if str(timeframe).strip()
+        ]
+        self._mtf_confirmation_required = bool(mtf.get("require_htf_confirmation", False))
+
+        self.signal_generator.set_database(self.db)
+
+        self._portfolio_cache = {"data": None, "timestamp": 0.0}
+        self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}
+
+    def _required_candles_for_trading_readiness(self) -> int:
+        """Minimum stored OHLC rows per gated timeframe before a pair is MTF-ready.
+
+        Default matches historical constant ``_MIN_CANDLES_FOR_TRADING_READINESS``.
+        Override with ``multi_timeframe.required_candles_for_readiness`` in YAML.
+        """
+        cfg = dict(getattr(self, "multi_timeframe_config", None) or {})
+        raw = cfg.get("required_candles_for_readiness", _MIN_CANDLES_FOR_TRADING_READINESS)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            n = int(_MIN_CANDLES_FOR_TRADING_READINESS)
+        return max(_MIN_READINESS_CANDLES_FLOOR, min(n, _MIN_READINESS_CANDLES_CAP))
+
     def _prune_invalid_btc_positions(self) -> None:
         """Drop BTC rows with impossible base size (any side) and zero-remaining ghosts.
 
@@ -479,6 +542,7 @@ class TradingBotOrchestrator:
                 self._portfolio_cache = {"data": None, "timestamp": 0.0}
         else:
             self._portfolio_cache = {"data": None, "timestamp": 0.0}
+        self._lightweight_mtm_cache = None
 
     def _find_tracked_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         if not self.executor:
@@ -1427,7 +1491,7 @@ class TradingBotOrchestrator:
         self.running = True
         self._loop_thread = threading.Thread(target=self._main_loop, daemon=True)
         self._loop_thread.start()
-        logger.info("ระบบจัดการเทรดบอทกำลังเริ่มต้นการทำงาน")
+        logger.info("Trading bot orchestrator starting")
 
     def _bootstrap_held_coin_history(self) -> None:
         self._get_startup_runtime_helper().bootstrap_held_coin_history()
@@ -1447,7 +1511,7 @@ class TradingBotOrchestrator:
     
     def stop(self):
         """Stop the trading bot gracefully."""
-        logger.info("กำลังหยุดการทำงานของเทรดบอท...")
+        logger.info("Stopping trading bot...")
         self.running = False
 
         if self._loop_thread and self._loop_thread.is_alive():
@@ -1457,9 +1521,9 @@ class TradingBotOrchestrator:
         if _WEBSOCKET_AVAILABLE and stop_websocket:
             try:
                 stop_websocket()
-                logger.info("หยุดการทำงานของ WebSocket สำเร็จ")
+                logger.info("WebSocket stopped")
             except Exception as e:
-                logger.warning(f"เกิดข้อผิดพลาดในการหยุด WebSocket: {e}")
+                logger.warning(f"Error stopping WebSocket: {e}")
 
         balance_monitor = getattr(self, "_balance_monitor", None)
         if balance_monitor:
@@ -1469,9 +1533,9 @@ class TradingBotOrchestrator:
             try:
                 self.executor.stop()
             except Exception as e:
-                logger.warning(f"เกิดข้อผิดพลาดในการหยุด OMS executor: {e}")
+                logger.warning(f"Error stopping OMS executor: {e}")
 
-        logger.info("เทรดบอทหยุดการทำงานโดยสมบูรณ์")
+        logger.info("Trading bot stopped")
 
     def _start_or_refresh_websocket(self, symbols: List[str], reason: str = "runtime") -> bool:
         if not (self._ws_enabled and self._ws_import_ok and get_websocket):
@@ -1557,8 +1621,7 @@ class TradingBotOrchestrator:
                     except Exception as alert_exc:
                         logger.warning("Failed to send fatal auth alert: %s", alert_exc)
                 logger.critical(
-                    "หยุดการทำงานอย่างปลอดภัย — "
-                    "กรุณาตรวจสอบ API Key/Secret ใน .env แล้วรีสตาร์ทบอท"
+                    "Graceful shutdown — check API Key/Secret in .env and restart the bot"
                 )
                 self.running = False
                 break
@@ -1768,7 +1831,7 @@ class TradingBotOrchestrator:
     ) -> None:
         if not getattr(self, "db", None) or quantity <= 0 or price <= 0:
             return
-        logged_at = timestamp or datetime.utcnow()
+        logged_at = timestamp or datetime.now(timezone.utc)
         try:
             self.db.insert_order(
                 pair=symbol,
@@ -2303,7 +2366,7 @@ class TradingBotOrchestrator:
         if helper is None:
             helper = StatusRuntimeHelper(
                 self,
-                required_candles=_MIN_CANDLES_FOR_TRADING_READINESS,
+                required_candles=self._required_candles_for_trading_readiness(),
                 websocket_available=bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)),
                 latest_ticker_getter=get_latest_ticker if bool(_WEBSOCKET_AVAILABLE and getattr(self, "_ws_enabled", False)) else None,
             )

@@ -139,7 +139,7 @@ class WeeklyReviewer:
     ) -> WeeklyStats:
         """Compute stats and (optionally) send Telegram + save markdown."""
         if week_end is None:
-            week_end = datetime.utcnow()
+            week_end = datetime.now(timezone.utc)
         if week_start is None:
             week_start = week_end - timedelta(days=7)
 
@@ -924,7 +924,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         week_start = _parse_date(args.start)
         week_end = _parse_date(args.end)
     else:
-        week_end = datetime.utcnow()
+        week_end = datetime.now(timezone.utc)
         week_start = week_end - timedelta(days=7)
 
     if week_end <= week_start:

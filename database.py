@@ -527,6 +527,28 @@ class Database:
         finally:
             session.close()
 
+    def get_earliest_price(self, pair: str, timeframe: str) -> Optional[Price]:
+        """Oldest stored candle for a pair and timeframe (used for paged backfill)."""
+        session = self.get_session()
+        try:
+            query = session.query(Price).filter(Price.pair == pair)
+            if timeframe:
+                query = query.filter(Price.timeframe == timeframe)
+            return query.order_by(Price.timestamp.asc()).first()
+        finally:
+            session.close()
+
+    def count_price_rows(self, pair: str, timeframe: str) -> int:
+        """Count OHLC rows for a pair and timeframe."""
+        session = self.get_session()
+        try:
+            q = session.query(func.count(Price.id)).filter(Price.pair == pair)
+            if timeframe:
+                q = q.filter(Price.timeframe == timeframe)
+            return int(q.scalar() or 0)
+        finally:
+            session.close()
+
     def get_price_history(self, pair: str,
                           start_time: datetime = None,
                           end_time: datetime = None,
@@ -552,7 +574,7 @@ class Database:
         """Get price data as list of dicts for analysis (pandas-ready)"""
         session = self.get_session()
         try:
-            start_time = datetime.utcnow() - timedelta(days=days)
+            start_time = datetime.now(timezone.utc) - timedelta(days=days)
             query = session.query(Price).filter(
                 Price.pair == pair,
                 Price.timestamp >= start_time
@@ -641,7 +663,7 @@ class Database:
         def _do_insert() -> Order:
             session = self.get_session()
             try:
-                ts = timestamp or datetime.utcnow()
+                ts = timestamp or datetime.now(timezone.utc)
                 order = Order(
                     timestamp=ts,
                     created_at=ts,
@@ -710,7 +732,7 @@ class Database:
             try:
                 pnl_value = realized_pnl if realized_pnl is not None else pnl
                 trade = Trade(
-                    timestamp=timestamp or datetime.utcnow(),
+                    timestamp=timestamp or datetime.now(timezone.utc),
                     pair=pair,
                     side=side,
                     quantity=quantity,
@@ -760,7 +782,7 @@ class Database:
                          timestamp: datetime = None) -> Optional[HeldCoinHistory]:
         """Record a successful BUY for a coin/pair in history."""
         symbol_key = symbol.upper()
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or datetime.now(timezone.utc)
 
         def _do_upsert() -> Optional[HeldCoinHistory]:
             session = self.get_session()
@@ -818,7 +840,7 @@ class Database:
             session = self.get_session()
             try:
                 signal = Signal(
-                    timestamp=timestamp or datetime.utcnow(),
+                    timestamp=timestamp or datetime.now(timezone.utc),
                     pair=pair,
                     signal_type=signal_type,
                     confidence=confidence,
@@ -906,7 +928,7 @@ class Database:
         """
         session = self.get_session()
         try:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             signals = (
                 session.query(Signal)
                 .filter(Signal.strategy.isnot(None))
@@ -1191,7 +1213,7 @@ class Database:
                     row.trigger = state_data.get("trigger")
                     row.notes = state_data.get("notes")
                     row.opened_at = state_data.get("opened_at")
-                    row.last_transition_at = state_data.get("last_transition_at", datetime.utcnow())
+                    row.last_transition_at = state_data.get("last_transition_at", datetime.now(timezone.utc))
                     session.commit()
                     session.refresh(row)
                     return row
@@ -1218,7 +1240,7 @@ class Database:
                     trigger=state_data.get("trigger"),
                     notes=state_data.get("notes"),
                     opened_at=state_data.get("opened_at"),
-                    last_transition_at=state_data.get("last_transition_at", datetime.utcnow()),
+                    last_transition_at=state_data.get("last_transition_at", datetime.now(timezone.utc)),
                 )
                 session.add(row)
                 session.commit()
@@ -1351,7 +1373,7 @@ class Database:
                     trigger=trade_data.get("trigger", ""),
                     price_source=trade_data.get("price_source", ""),
                     opened_at=trade_data.get("opened_at"),
-                    closed_at=trade_data.get("closed_at", datetime.utcnow()),
+                    closed_at=trade_data.get("closed_at", datetime.now(timezone.utc)),
                 )
                 session.add(ct)
                 session.commit()
@@ -1438,7 +1460,7 @@ class Database:
         def _do_cleanup() -> Dict[str, int]:
             session = self.get_session()
             try:
-                cutoff = datetime.utcnow() - timedelta(days=days)
+                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
                 deleted_prices = session.query(Price).filter(
                     Price.timestamp < cutoff
@@ -1501,7 +1523,7 @@ class Database:
             session = self.get_session()
             deleted_counts: Dict[str, int] = {}
             try:
-                now_utc = datetime.utcnow()
+                now_utc = datetime.now(timezone.utc)
                 total_deleted = 0
                 for timeframe, days in normalized_policy.items():
                     cutoff = now_utc - timedelta(days=days)

@@ -40,6 +40,10 @@ trading:
   mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
   min_order_amount: 15.0            # Minimum order notional (quote); for *USDT pairs = USDT (see also MIN_ORDER_AMOUNT in .env)
 
+# strategy_mode: which *mode* is active for risk/TF/thresholds (SL/TP %, intervals, etc.).
+# The per-pair list of strategy *names* that actually run in the signal loop comes from
+# mode_indicator_profiles.<mode>.active_strategies via signal_generator.get_active_strategies_for_mode()
+# (not from strategies.enabled alone). Keep mode_indicator_profiles in sync with how you want to trade.
 strategy_mode:
   active: "scalping"               # "standard" | "trend_only" | "scalping"
   trend_only:
@@ -86,6 +90,9 @@ strategy_mode:
     position_size_cap_pct: 10.0
 
 # ── Mode-Specific Indicator Profiles ─────────────────────────────────────
+# active_strategies: authoritative list for the signal loop (see get_active_strategies_for_mode).
+# strategy_mode (above) tunes risk/TF for the active mode; do not assume strategies.enabled in YAML
+# replaces this list without checking SignalGenerator.
 # กำหนดว่าแต่ละ mode ใช้ strategies ไหนบ้าง
 # และ timeframe / parameter ที่เหมาะสม (อ่านโดย SignalGenerator)
 # NOTE: ส่วนนี้ใช้ "ADD-ON" — ถ้า SignalGenerator ไม่ได้รับ mode จะ fallback
@@ -166,9 +173,24 @@ btc_correlation:
 # Multi-Timeframe Analysis Settings
 multi_timeframe:
   enabled: true                      # Enable multi-timeframe analysis
+  # Minimum OHLC rows per *gated* timeframe in SQLite before a pair is tradable
+  # (MTF candle readiness). Clamped to [5, 2000]. Default if omitted: 35.
+  # NOTE: Sniper (strategies/sniper.py) needs ~210 bars on the *primary* dataframe — higher than
+  # this gate — so CLI may show MTF "ready" while Sniper alignment still shows -/-/- until history grows.
+  required_candles_for_readiness: 35
   # Timeframes to analyze (in order of priority for storage/collection)
   # NOTE: higher_timeframes MUST be a subset of this list so data is actually collected
   timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]
+  # Optional: subset for startup backfill only (defaults to all ``timeframes`` above).
+  # startup_backfill_timeframes: ["5m", "15m", "1h"]
+  # Backfill depth: pages older klines until at least this many rows exist (>= required_candles_for_readiness).
+  # backfill_target_bars: 120
+  # Klines per REST request when backfilling (50–1000; Binance max 1000).
+  # backfill_kline_limit_per_request: 1000
+  # Walk history with repeated /klines calls before ``max_backfill_days`` (safety cap).
+  # paged_backfill_enabled: true
+  # max_backfill_days: 365   # or per-TF map, e.g. { "1m": 14, "1d": 730 }
+  # backfill_max_pages: 200
   # Minimum timeframe alignment for trade (0.0-1.0)
   alignment_threshold: 0.4
   # Require higher timeframe (1h+) confirmation before trade
@@ -475,6 +497,9 @@ monitoring:
   enabled: true                     # Enable monitoring service
 
   # Health check HTTP server (for load balancer / uptime monitors)
+  # Bind to loopback by default so the port is not exposed on the public internet.
+  # Use "0.0.0.0" only behind a trusted reverse proxy / LB and host firewall.
+  health_check_host: "127.0.0.1"     # Listen address (127.0.0.1 = localhost only)
   health_check_port: 8080           # Port for /health endpoint (set to 0 to disable)
   health_check_path: "/health"       # Endpoint path
 

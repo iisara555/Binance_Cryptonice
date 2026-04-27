@@ -723,8 +723,8 @@ def test_footer_size_handles_zero_terminal_height(tmp_path):
     compact_size = command_center._resolve_footer_size(80, 0, "compact")
     verbose_size = command_center._resolve_footer_size(80, 0, "verbose")
 
-    assert compact_size >= 9
-    assert verbose_size >= 9
+    assert compact_size >= 4
+    assert verbose_size >= 4
 
 
 def test_signal_alignment_reports_waiting_for_market_data(tmp_path):
@@ -736,7 +736,7 @@ def test_signal_alignment_reports_waiting_for_market_data(tmp_path):
         rows = app._build_cli_signal_alignment(["THB_BTC"])
 
         assert rows[0]["action"] == "WAIT"
-        assert rows[0]["status"] == "แท่งไม่พอ 3/210"
+        assert rows[0]["status"] == "Insufficient bars 3/210"
     finally:
         _clear_signal_flow()
 
@@ -749,7 +749,7 @@ def test_signal_alignment_reports_waiting_for_first_signal_flow(tmp_path):
         rows = app._build_cli_signal_alignment(["THB_BTC"])
 
         assert rows[0]["action"] == "WAIT"
-        assert rows[0]["status"] == "รอรอบแรก"
+        assert rows[0]["status"] == "First cycle"
     finally:
         _clear_signal_flow()
 

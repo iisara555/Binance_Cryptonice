@@ -646,3 +646,80 @@ class TestBotSyncsStateBeforeSignals:
 
         mock_sg.check_risk.assert_not_called()
         bot._create_execution_plan_for_symbol.assert_not_called()
+
+
+class TestOpposingSignalsDedupe:
+    def test_reduce_keeps_higher_confidence_direction(self):
+        from trading.signal_runtime import _reduce_opposing_signals_single_direction
+
+        buy = _make_aggregated_signal(sig_type=SignalType.BUY)
+        buy.combined_confidence = 0.9
+        sell = _make_aggregated_signal(sig_type=SignalType.SELL)
+        sell.combined_confidence = 0.4
+        out = _reduce_opposing_signals_single_direction([buy, sell], "THB_BTC")
+        assert len(out) == 1
+        assert out[0].signal_type == SignalType.BUY
+
+    def test_reduce_keeps_sell_when_stronger(self):
+        from trading.signal_runtime import _reduce_opposing_signals_single_direction
+
+        buy = _make_aggregated_signal(sig_type=SignalType.BUY)
+        buy.combined_confidence = 0.3
+        sell = _make_aggregated_signal(sig_type=SignalType.SELL)
+        sell.combined_confidence = 0.85
+        out = _reduce_opposing_signals_single_direction([buy, sell], "THB_BTC")
+        assert len(out) == 1
+        assert out[0].signal_type == SignalType.SELL
+
+
+class TestRefreshRiskConfigForMode:
+    def test_profile_overrides_global_thresholds(self):
+        sg = SignalGenerator(
+            {
+                "min_confidence": 0.5,
+                "min_strategies_agree": 2,
+                "max_open_positions": 3,
+                "max_daily_trades": 10,
+                "mode_indicator_profiles": {
+                    "scalping": {"min_confidence": 0.41, "min_strategies_agree": 1},
+                },
+                "strategies": {},
+                "risk": {"max_open_positions": 5, "max_daily_trades": 8},
+            }
+        )
+        sg.refresh_risk_config_for_mode("scalping")
+        assert sg.risk_config["min_confidence"] == 0.41
+        assert sg.risk_config["min_strategies_agree"] == 1
+        assert sg.risk_config["max_positions"] == 5
+        assert sg.risk_config["max_daily_trades"] == 8
+
+
+class TestApplyRuntimeStrategyRefresh:
+    def test_updates_mode_generator_and_risk_manager(self):
+        mock_api = Mock()
+        mock_api.get_balances.return_value = {"THB": {"available": 100_000.0}}
+        mock_api.is_circuit_open.return_value = False
+        initial_sg = MagicMock(spec=SignalGenerator)
+        mock_executor = Mock()
+        mock_executor.get_open_orders.return_value = []
+        bot = _build_bot(
+            api_client=mock_api,
+            signal_generator=initial_sg,
+            risk_manager=Mock(),
+            executor=mock_executor,
+        )
+
+        new_sg = MagicMock(spec=SignalGenerator)
+        new_rm = Mock()
+        cfg = dict(bot.config)
+        cfg["active_strategy_mode"] = "scalping"
+        cfg["strategies"] = {"enabled": ["sniper", "simple_scalp_plus"]}
+        cfg.setdefault("multi_timeframe", {})["enabled"] = False
+
+        bot.apply_runtime_strategy_refresh(cfg, new_sg, risk_manager=new_rm)
+
+        assert bot._active_strategy_mode == "scalping"
+        assert bot.signal_generator is new_sg
+        assert bot.risk_manager is new_rm
+        assert bot.enabled_strategies == ["sniper", "simple_scalp_plus"]
+        new_sg.set_database.assert_called_once()

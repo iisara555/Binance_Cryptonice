@@ -281,6 +281,32 @@ class SignalGenerator:
             return active
         return list(self._aggregate_strategy_names)
 
+    def refresh_risk_config_for_mode(self, mode: str) -> None:
+        """Align risk gate thresholds with ``mode_indicator_profiles`` then global ``risk`` / ``strategies``."""
+        mode_name = str(mode or "standard").strip().lower() or "standard"
+        profiles = dict(self.config.get("mode_indicator_profiles", {}) or {})
+        profile = dict(profiles.get(mode_name, {}) or {})
+        strategies_cfg = dict(self.config.get("strategies", {}) or {})
+        risk_cfg = dict(self.config.get("risk", {}) or {})
+
+        if "min_confidence" in profile:
+            self.risk_config["min_confidence"] = float(profile["min_confidence"])
+        elif "min_confidence" in strategies_cfg:
+            self.risk_config["min_confidence"] = float(strategies_cfg["min_confidence"])
+
+        if "min_strategies_agree" in profile:
+            self.risk_config["min_strategies_agree"] = int(profile["min_strategies_agree"])
+        elif "min_strategies_agree" in strategies_cfg:
+            self.risk_config["min_strategies_agree"] = int(strategies_cfg["min_strategies_agree"])
+
+        if "max_risk_score" in profile:
+            self.risk_config["max_risk_score"] = float(profile["max_risk_score"])
+
+        if "max_open_positions" in risk_cfg:
+            self.risk_config["max_positions"] = int(risk_cfg["max_open_positions"])
+        if "max_daily_trades" in risk_cfg:
+            self.risk_config["max_daily_trades"] = int(risk_cfg["max_daily_trades"])
+
     def _make_mtf_cache_key(self, pair: str, timeframes: List[str], db: Any) -> str:
         raw = f"{str(pair or '').upper()}|{','.join(str(tf) for tf in timeframes)}|{type(db).__name__}:{id(db)}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]

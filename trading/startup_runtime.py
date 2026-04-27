@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from helpers import extract_base_asset, normalize_side_value
@@ -491,7 +491,7 @@ class StartupRuntimeHelper:
                                         "buy",
                                         filled_amount,
                                         filled_price,
-                                        timestamp=local_pos.get("timestamp") or datetime.utcnow(),
+                                        timestamp=local_pos.get("timestamp") or datetime.now(timezone.utc),
                                     )
                                     logger.info(
                                         "[Reconcile] Restored filled BUY %s as tracked position %.8f @ %.2f",

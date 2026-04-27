@@ -15,7 +15,7 @@ M2 — "Non-atomic rebalance state tracking":
 
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
@@ -95,7 +95,7 @@ def _pending_order(order_id: str = "ord-1", symbol: str = "THB_BTC") -> dict:
         "entry_price": 1_500_000.0,
         "stop_loss": None,
         "take_profit": None,
-        "timestamp": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc),
         "is_partial_fill": False,
         "remaining_amount": 0.001,
         "total_entry_cost": 1500.0,
@@ -302,7 +302,7 @@ class TestM1AgedOrderOmsPath:
 
     def _aged_timestamp(self) -> datetime:
         """Return a real timestamp that is 26 hours in the past."""
-        return datetime.utcnow() - timedelta(hours=26)
+        return datetime.now(timezone.utc) - timedelta(hours=26)
 
     def test_aged_order_calls_cancel_before_removal(self):
         """The OMS aged-order path must call cancel_order (not silently drop the order)."""
@@ -409,7 +409,7 @@ def test_bootstrap_position_skips_exchange_timeout_and_cancel_paths():
     ex = _make_executor(db=db)
 
     bootstrap_order = _pending_order("bootstrap_THB_BTC_1")
-    bootstrap_order["timestamp"] = datetime.utcnow() - timedelta(hours=6)
+    bootstrap_order["timestamp"] = datetime.now(timezone.utc) - timedelta(hours=6)
     bootstrap_order["filled"] = False
     ex._open_orders["bootstrap_THB_BTC_1"] = bootstrap_order
 

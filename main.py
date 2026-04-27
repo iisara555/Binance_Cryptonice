@@ -1,7 +1,7 @@
 """
 Crypto Trading Bot - Main Entry Point
 ======================================
-Entry point หลัก:
+Main entry point:
 - Load config
 - Start collector (background)
 - Start trading bot (main loop)
@@ -42,7 +42,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # Import project modules
 from config import BINANCE, TRADING, validate_config
 from api_client import BinanceThClient, BinanceAPIError
-from data_collector import BinanceThCollector
+from data_collector import BinanceThCollector, resolve_startup_backfill_timeframes
 from signal_generator import (
     SignalGenerator,
     ensure_signal_flow_record,
@@ -314,6 +314,32 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
     )
     strategies_cfg["scalping"] = scalping_strategy_cfg
     return runtime_config
+
+
+def _risk_manager_from_config(config: Dict[str, Any]) -> RiskManager:
+    """Build RiskManager from a merged runtime config (used at startup and after strategy mode switch)."""
+    risk_config = dict(config.get("risk", {}) or {})
+    risk_params = RiskConfig(
+        max_risk_per_trade_pct=risk_config.get("max_risk_per_trade_pct", 4.0),
+        max_daily_loss_pct=risk_config.get("max_daily_loss_pct", 10.0),
+        max_position_per_trade_pct=risk_config.get("max_position_per_trade_pct", 10.0),
+        max_drawdown_threshold_pct=risk_config.get("max_drawdown_threshold_pct", 12.0),
+        drawdown_soft_reduce_start_pct=risk_config.get("drawdown_soft_reduce_start_pct", 5.0),
+        min_drawdown_risk_multiplier=risk_config.get("min_drawdown_risk_multiplier", 0.35),
+        drawdown_block_new_entries=risk_config.get("drawdown_block_new_entries", True),
+        stop_loss_pct=risk_config.get("stop_loss_pct", -4.5),
+        take_profit_pct=risk_config.get("take_profit_pct", 10.0),
+        atr_multiplier=risk_config.get("atr_multiplier", 3.0),
+        atr_period=risk_config.get("atr_period", 14),
+        use_dynamic_sl_tp=risk_config.get("use_dynamic_sl_tp", True),
+        initial_balance=config.get("portfolio", {}).get("initial_balance", 1000.0),
+        min_balance_threshold=config.get("portfolio", {}).get("min_balance_threshold", 100.0),
+        max_open_positions=risk_config.get("max_open_positions", 3),
+        max_daily_trades=risk_config.get("max_daily_trades", 10),
+        cool_down_minutes=risk_config.get("cool_down_minutes", 5),
+        min_order_amount=config.get("trading", {}).get("min_order_amount", 15.0),
+    )
+    return RiskManager(risk_params)
 
 
 def _normalize_optional_secret(value: Optional[Any]) -> str:
@@ -601,7 +627,7 @@ def setup_signal_handlers(bot: TradingBotOrchestrator, collector: BinanceThColle
     - SIGTERM (kill command)
     """
     def signal_handler(signum, frame):
-        logger.info(f"ได้รับสัญญาณ {signum}, กำลังเริ่มขั้นตอนปิดระบบอย่างปลอดภัย (Graceful shutdown)...")
+        logger.info(f"Received signal {signum}, starting graceful shutdown...")
 
         try:
             # Stop bot first (will stop main loop)
@@ -622,7 +648,7 @@ def setup_signal_handlers(bot: TradingBotOrchestrator, collector: BinanceThColle
             except Exception as lock_err:
                 logger.warning("Failed to release bot lock during signal shutdown: %s", lock_err)
 
-        logger.info("ปิดระบบเสร็จสมบูรณ์")
+        logger.info("Shutdown complete")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -2266,16 +2292,16 @@ class TradingBotApp:
 
     @staticmethod
     def _humanize_alignment_wait_reason(reason: str) -> str:
-        """Short Thai labels for Signal Radar status (same intent as CLI Signal Flow)."""
+        """Short English labels for Signal Radar status (same intent as CLI Signal Flow)."""
         s = str(reason or "").strip()
         if not s:
-            return "รอข้อมูล"
+            return "No data"
         low = s.lower()
         m = re.search(r"Insufficient data \((\d+)/(\d+) bars\)", s, re.I)
         if m:
-            return f"แท่งไม่พอ {m.group(1)}/{m.group(2)}"
+            return f"Insufficient bars {m.group(1)}/{m.group(2)}"
         if "waiting for first signal cycle" in low:
-            return "รอรอบแรก"
+            return "First cycle"
         if "collecting" in low:
             return s[:40] if len(s) > 40 else s
         return s[:44] + ("…" if len(s) > 44 else "")
@@ -2289,14 +2315,14 @@ class TradingBotApp:
         bootstrap_reason = str(bootstrap.get("reason") or "").strip()
 
         if not record:
-            return "รอข้อมูลสัญญาณ"
+            return "Waiting for signal data"
         if data_check_result == "REJECT" and data_check_reason:
             return TradingBotApp._humanize_alignment_wait_reason(data_check_reason)
         if data_check_result == "REJECT":
-            return "รอแท่งเทียน"
+            return "Waiting for candles"
         if bootstrap_reason:
             return TradingBotApp._humanize_alignment_wait_reason(bootstrap_reason)
-        return "พร้อม"
+        return "Ready"
 
     @staticmethod
     def _build_pair_runtime_context(multi_timeframe_status: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, str]]:
@@ -2377,7 +2403,7 @@ class TradingBotApp:
                 final_action = "SELL"
 
             status = self._describe_signal_alignment_status(record, steps)
-            if status != "พร้อม" and final_action == "HOLD":
+            if status != "Ready" and final_action == "HOLD":
                 final_action = "WAIT"
 
             rows.append(
@@ -2767,7 +2793,11 @@ class TradingBotApp:
             updated_config = _apply_strategy_mode_profile(self.config)
             self.config = updated_config
             self._current_strategy_mode = mode
-            
+
+            self.risk_manager = _risk_manager_from_config(self.config)
+            if self.executor:
+                self.executor.risk_manager = self.risk_manager
+
             # Restart signal generator with new strategy config
             if self.signal_generator:
                 strategies_config = self.config.get("strategies", {})
@@ -2788,16 +2818,23 @@ class TradingBotApp:
                     "mean_reversion": strategies_config.get("mean_reversion", {}),
                     "breakout": strategies_config.get("breakout", {}),
                 })
-                if self.risk_manager and self.signal_generator.set_database:
+                if self.signal_generator.set_database:
                     from database import get_database
                     self.signal_generator.set_database(get_database())
-            
+
+            if self.bot and self.signal_generator:
+                self.bot.apply_runtime_strategy_refresh(
+                    self.config,
+                    self.signal_generator,
+                    risk_manager=self.risk_manager,
+                )
+
             # Update trade executor config if needed
             if self.executor:
                 risk_cfg = self.config.get("risk", {})
                 self.executor.retry_delay = risk_cfg.get("retry_delay_seconds", 5)
                 self.executor.order_timeout = risk_cfg.get("order_timeout_seconds", 30)
-            
+
             logger.info(f"[AdaptiveRouter] Strategy mode switched to: {mode}")
             logger.info(f"[AdaptiveRouter] Configuration updated with new strategy profile")
         
@@ -3078,8 +3115,18 @@ class TradingBotApp:
             logger.info("Bot health HTTP server disabled (monitoring.health_check_port <= 0)")
             return
 
+        # Default loopback only — binding 0.0.0.0 exposes /health to the entire
+        # internet on VPS unless a host firewall restricts the port. Use
+        # monitoring.health_check_host: "0.0.0.0" only behind a trusted LB/proxy.
+        health_host = str(monitoring_config.get("health_check_host") or "").strip() or "127.0.0.1"
+        if health_host == "0.0.0.0":
+            logger.warning(
+                "monitoring.health_check_host is 0.0.0.0 — /health is reachable on all "
+                "interfaces; prefer 127.0.0.1 with SSH tunnel, or restrict the port with UFW"
+            )
+
         self.health_server = BotHealthServer(
-            host="0.0.0.0",
+            host=health_host,
             port=health_port,
             path=health_path,
             status_provider=self.get_health_status,
@@ -3103,8 +3150,8 @@ class TradingBotApp:
     
     def initialize(self):
         """Initialize all components."""
-        logger.info("กำลังเริ่มต้นระบบ Crypto Trading Bot...")
-        logger.info(f"โหมดการทำงาน: {self.config.get('trading', {}).get('mode', 'semi_auto')}")
+        logger.info("Initializing Crypto Trading Bot...")
+        logger.info(f"Trading mode: {self.config.get('trading', {}).get('mode', 'semi_auto')}")
         
         # Extract current strategy mode from config
         self._current_strategy_mode = str(self.config.get("active_strategy_mode") or "standard").lower()
@@ -3113,11 +3160,11 @@ class TradingBotApp:
         # Validate configuration before starting
         critical_errors, warnings = validate_config()
         for err in warnings:
-            logger.warning(f"คำเตือนจาก Config: {err}")
+            logger.warning(f"Config warning: {err}")
         if critical_errors:
             for err in critical_errors:
-                logger.error(f"ข้อผิดพลาดจาก Config: {err}")
-            logger.error("มีข้อผิดพลาดร้ายแรงเกี่ยวกับคอนฟิก — ปฏิเสธการเริ่มต้นระบบ")
+                logger.error(f"Config error: {err}")
+            logger.error("Critical configuration errors — refusing to start")
             return False
         logger.info("ตรวจสอบ Config ผ่านเรียบร้อย")
 
@@ -3209,9 +3256,11 @@ class TradingBotApp:
             elif auth_degraded:
                 logger.warning("Degraded startup mode active with no configured pairs — bot will run collector/monitor only")
             elif resolved_pairs:
-                logger.info(f"คู่เหรียญที่ถือบน Binance TH และจะติดตาม: {' add '.join(resolved_pairs)}")
+                logger.info(f"Binance TH held pairs to track: {' add '.join(resolved_pairs)}")
             else:
-                logger.warning("Binance TH ไม่พบเหรียญที่ถืออยู่ในคู่ที่เทรดได้ — bot จะเริ่มแบบไม่มีคู่เหรียญ active")
+                logger.warning(
+                    "Binance TH found no held assets in tradable pairs — bot will start with no active pairs"
+                )
         else:
             resolved_pairs = _normalize_pairs(configured_pairs)
             data_config["pairs"] = resolved_pairs
@@ -3221,7 +3270,7 @@ class TradingBotApp:
             self.config["trading_pair"] = top_level_pair
             self.config.setdefault("trading", {})["trading_pair"] = top_level_pair
             if resolved_pairs:
-                logger.info(f"คู่เหรียญที่เทรดจาก config: {' add '.join(resolved_pairs)}")
+                logger.info(f"Trading pairs from config: {' add '.join(resolved_pairs)}")
             else:
                 logger.warning("Config ไม่มีคู่เหรียญที่ใช้งานอยู่ — bot จะเริ่มแบบไม่มีคู่เหรียญ active")
 
@@ -3261,37 +3310,17 @@ class TradingBotApp:
                     )
 
         # 2. Initialize Risk Manager
-        risk_config = self.config.get("risk", {})
-        risk_params = RiskConfig(
-            max_risk_per_trade_pct=risk_config.get("max_risk_per_trade_pct", 4.0),
-            max_daily_loss_pct=risk_config.get("max_daily_loss_pct", 10.0),
-            max_position_per_trade_pct=risk_config.get("max_position_per_trade_pct", 10.0),
-            max_drawdown_threshold_pct=risk_config.get("max_drawdown_threshold_pct", 12.0),
-            drawdown_soft_reduce_start_pct=risk_config.get("drawdown_soft_reduce_start_pct", 5.0),
-            min_drawdown_risk_multiplier=risk_config.get("min_drawdown_risk_multiplier", 0.35),
-            drawdown_block_new_entries=risk_config.get("drawdown_block_new_entries", True),
-            stop_loss_pct=risk_config.get("stop_loss_pct", -4.5),
-            take_profit_pct=risk_config.get("take_profit_pct", 10.0),
-            atr_multiplier=risk_config.get("atr_multiplier", 3.0),
-            atr_period=risk_config.get("atr_period", 14),
-            use_dynamic_sl_tp=risk_config.get("use_dynamic_sl_tp", True),
-            initial_balance=self.config.get("portfolio", {}).get("initial_balance", 1000.0),
-            min_balance_threshold=self.config.get("portfolio", {}).get("min_balance_threshold", 100.0),
-            max_open_positions=risk_config.get("max_open_positions", 3),
-            max_daily_trades=risk_config.get("max_daily_trades", 10),
-            cool_down_minutes=risk_config.get("cool_down_minutes", 5),
-            min_order_amount=self.config.get("trading", {}).get("min_order_amount", 15.0),
-        )
-        self.risk_manager = RiskManager(risk_params)
-        logger.info("ระบบจัดการความเสี่ยงพร้อมทำงาน (Risk Manager initialized)")
+        self.risk_manager = _risk_manager_from_config(self.config)
+        logger.info("Risk Manager initialized")
         
         # 3. Initialize Signal Generator
         strategies_config = self.config.get("strategies", {})
+        risk_section = dict(self.config.get("risk", {}) or {})
         self.signal_generator = SignalGenerator({
             "min_confidence": strategies_config.get("min_confidence", 0.5),
             "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
-            "max_open_positions": risk_config.get("max_open_positions", 3),
-            "max_daily_trades": risk_config.get("max_daily_trades", 10),
+            "max_open_positions": risk_section.get("max_open_positions", 3),
+            "max_daily_trades": risk_section.get("max_daily_trades", 10),
             "strategies": {
                 "enabled": list(strategies_config.get("enabled") or []),
             },
@@ -3304,7 +3333,7 @@ class TradingBotApp:
             "mean_reversion": strategies_config.get("mean_reversion", {}),
             "breakout": strategies_config.get("breakout", {}),
         })
-        logger.info("ระบบสร้างสัญญาณเทรดพร้อมทำงาน (Signal Generator initialized)")
+        logger.info("Signal Generator initialized")
         
         # 4. Initialize Trade Executor (with DB persistence)
         from database import get_database
@@ -3341,11 +3370,11 @@ class TradingBotApp:
             db=db,
             notifier=self.alert_system.telegram,
         )
-        logger.info("ระบบประมวลผลคำสั่งซื้อขายพร้อมทำงาน (Trade Executor initialized)")
+        logger.info("Trade Executor initialized")
         if telegram_enabled and self.alert_system.telegram.enabled:
-            logger.info("เปิดใช้งานการแจ้งเตือนผ่าน Telegram (พร้อม Rate Limiting)")
+            logger.info("Telegram notifications enabled (with rate limiting)")
         else:
-            logger.info("การแจ้งเตือน Telegram ถูกปิด (ใช้ Console log แทน)")
+            logger.info("Telegram notifications disabled (using console log)")
         
         # 6. Initialize Trading Bot Orchestrator
         self.bot = TradingBotOrchestrator(
@@ -3358,18 +3387,18 @@ class TradingBotApp:
             alert_system=self.alert_system,
             trading_disabled_event=self.trading_disabled,
         )
-        logger.info("Trading Bot Orchestrator พร้อมทำงาน")
+        logger.info("Trading Bot Orchestrator ready")
 
         # 6b. Initialize Telegram Bot Handler
         telegram_pairs = list(self.config.get("data", {}).get("pairs") or [])
         if not telegram_enabled:
-            logger.info("ปิดการใช้งาน Telegram ผ่าน TELEGRAM_ENABLED=false")
+            logger.info("Telegram disabled via TELEGRAM_ENABLED=false")
         elif not telegram_command_polling_enabled:
-            logger.info("ปิดการใช้งานคำสั่ง Telegram polling ผ่าน notifications.telegram_command_polling_enabled=false")
+            logger.info("Telegram command polling disabled via notifications.telegram_command_polling_enabled=false")
         elif not bot_token:
-            logger.info("ไม่ได้ตั้งค่า Telegram Bot Token — ปิดการใช้งานคำสั่งผ่าน Telegram")
+            logger.info("Telegram Bot Token not set — Telegram commands disabled")
         elif not chat_id:
-            logger.info("ไม่ได้ตั้งค่า Telegram Chat ID — ปิดการใช้งานคำสั่งผ่าน Telegram")
+            logger.info("Telegram Chat ID not set — Telegram commands disabled")
         else:
             self.telegram_handler = TelegramBotHandler(
                 app_ref=self,
@@ -3379,7 +3408,7 @@ class TradingBotApp:
                 trading_disabled=self.trading_disabled,
             )
             self.telegram_handler.start()
-            logger.info("Telegram bot handler เริ่มทำงาน")
+            logger.info("Telegram bot handler started")
         
         # 7. Initialize Data Collector (background)
         data_config = self.config.get("data", {})
@@ -3393,7 +3422,7 @@ class TradingBotApp:
         )
         if self.bot is not None:
             self.bot.collector = self.collector
-        logger.info("ระบบเก็บข้อมูลเริ่มทำงาน (Data Collector initialized)")
+        logger.info("Data Collector initialized")
         
         # 8. Initialize Adaptive Strategy Router (auto mode switching)
         self.adaptive_router = AdaptiveStrategyRouter(
@@ -3407,7 +3436,7 @@ class TradingBotApp:
         else:
             logger.info("Adaptive Strategy Router initialized (auto mode switching disabled in config)")
         
-        logger.info("คอมโพเนนต์ทั้งหมดเริ่มต้นสำเร็จพร้อมใช้งาน")
+        logger.info("All components initialized successfully")
         return True
     
     def _resolve_active_strategies(self) -> list[str]:
@@ -3457,11 +3486,11 @@ class TradingBotApp:
             reporter.step("collector", "started", detail="background thread")
 
         with reporter.phase("Backfill"):
-            warmup_tfs = ["15m", "1h"]
             mtf_cfg = self.config.get("multi_timeframe") or {}
-            if mtf_cfg.get("enabled"):
-                configured = mtf_cfg.get("timeframes") or warmup_tfs
-                warmup_tfs = [tf for tf in configured if tf in ("5m", "15m", "1h", "4h")] or warmup_tfs
+            warmup_tfs = resolve_startup_backfill_timeframes(
+                mtf_cfg,
+                collector_timeframes=list(collector.multi_timeframes),
+            )
             reporter.step("timeframes", ", ".join(warmup_tfs))
             t0 = time.monotonic()
             try:
@@ -3512,7 +3541,7 @@ class TradingBotApp:
     
     def stop(self):
         """Stop all components gracefully."""
-        logger.info("กำลังหยุดการทำงาน Crypto Trading Bot...")
+        logger.info("Stopping Crypto Trading Bot...")
         self._shutdown_event.set()
 
         self._stop_health_server()
@@ -3539,7 +3568,7 @@ class TradingBotApp:
         # Release process lock
         release_bot_lock()
         
-        logger.info("คอมโพเนนต์ทั้งหมดถูกหยุดการทำงานแล้ว (All components stopped)")
+        logger.info("All components stopped")
     
     def run(self, register_signal_handlers: bool = True):
         """Run the bot until shutdown signal received."""

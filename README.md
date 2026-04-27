@@ -88,7 +88,7 @@ TELEGRAM_CHAT_ID=your_chat_id
 - `multi_timeframe.*`: การวิเคราะห์หลาย timeframe
 - `risk.*`: daily loss, max position, max open positions
 - `rebalance.*`: พฤติกรรม portfolio rebalance
-- `monitoring.health_check_port` และ `monitoring.health_check_path`: ค่าของ bot health endpoint
+- `monitoring.health_check_host` (ค่าเริ่มต้น `127.0.0.1`), `health_check_port`, `health_check_path`: bot health HTTP endpoint — bind loopback บน VPS เพื่อไม่เปิดพอร์ตสู่สาธารณะ
 - `notifications.telegram_command_polling_enabled`: ปิด long-poll command ได้โดยไม่ปิด outbound alerts
 
 ดูรายละเอียด field ทั้งหมดได้ที่ [docs/CONFIGURATION_SCHEMA.md](docs/CONFIGURATION_SCHEMA.md)
@@ -107,7 +107,9 @@ default profile ปัจจุบัน:
 - `ADA`
 - `DOGE`
 - `LINK`
-- `MATIC`
+- `POL`
+
+รายการ bullet ด้านบนสะท้อนไฟล์ [`coin_whitelist.json`](coin_whitelist.json) — แก้ whitelist หลักที่ไฟล์นั้น
 
 ดูตัวอย่างไฟล์แบบเต็มและคำอธิบายเพิ่มเติมได้ที่ [docs/MANUAL_THAI.md](docs/MANUAL_THAI.md)
 

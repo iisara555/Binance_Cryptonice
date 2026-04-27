@@ -22,8 +22,9 @@ import asyncio
 import atexit
 import logging
 import time
+from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -66,6 +67,48 @@ _LEGACY_MINUTES_TO_INTERVAL: Dict[int, str] = {
     720: "12h",
     1440: "1d",
 }
+
+
+def is_valid_binance_interval(interval: Any) -> bool:
+    """Return True if ``interval`` is a supported Binance kline string."""
+    return str(interval or "").strip() in _BINANCE_INTERVALS
+
+
+def resolve_startup_backfill_timeframes(
+    mtf_cfg: Optional[Dict[str, Any]],
+    *,
+    collector_timeframes: List[str],
+    default_when_mtf_disabled: Optional[List[str]] = None,
+) -> List[str]:
+    """Resolve which timeframes to hydrate in ``backfill_all_sync`` at bot startup.
+
+    When multi-timeframe is disabled, returns a small default list. When enabled,
+    uses ``startup_backfill_timeframes`` if present (empty list falls back to the
+    collector's timeframe list), otherwise all ``collector_timeframes``. Entries
+    that are not valid Binance intervals are dropped.
+    """
+    disabled_default = list(default_when_mtf_disabled or ["15m", "1h"])
+    cfg = dict(mtf_cfg or {})
+    if not cfg.get("enabled"):
+        return disabled_default
+
+    if "startup_backfill_timeframes" in cfg:
+        raw = cfg.get("startup_backfill_timeframes")
+        if raw is None:
+            base = [str(tf).strip() for tf in collector_timeframes if str(tf).strip()]
+        else:
+            base = [str(x).strip() for x in raw if str(x).strip()]
+            if not base:
+                base = [str(tf).strip() for tf in collector_timeframes if str(tf).strip()]
+    else:
+        base = [str(tf).strip() for tf in collector_timeframes if str(tf).strip()]
+        if not base:
+            base = [str(x).strip() for x in (cfg.get("timeframes") or []) if str(x).strip()]
+
+    if not base:
+        return disabled_default
+    filtered = [tf for tf in base if is_valid_binance_interval(tf)]
+    return filtered or disabled_default
 
 
 def _coerce_interval(interval: Any, default: str = "15m") -> str:
@@ -167,6 +210,50 @@ class BinanceThCollector:
         self._last_multi_timeframe_results: Dict[str, Dict[str, int]] = {}
         self._next_multi_timeframe_collect_at = 0.0
 
+        try:
+            readiness = int(mtf_config.get("required_candles_for_readiness") or 35)
+        except (TypeError, ValueError):
+            readiness = 35
+        readiness = max(5, min(readiness, 2000))
+        try:
+            target_override = int(mtf_config["backfill_target_bars"]) if "backfill_target_bars" in mtf_config else readiness
+        except (TypeError, ValueError, KeyError):
+            target_override = readiness
+        self._backfill_target_bars = max(readiness, max(1, target_override))
+
+        try:
+            self._backfill_kline_limit_per_request = min(
+                1000,
+                max(50, int(mtf_config.get("backfill_kline_limit_per_request") or 1000)),
+            )
+        except (TypeError, ValueError):
+            self._backfill_kline_limit_per_request = 1000
+
+        self._paged_backfill_enabled = bool(mtf_config.get("paged_backfill_enabled", True))
+
+        raw_max_days = mtf_config.get("max_backfill_days")
+        self._max_backfill_days_by_tf: Dict[str, int] = {}
+        self._max_backfill_days_default = 365
+        if isinstance(raw_max_days, dict):
+            for key, val in raw_max_days.items():
+                ks = str(key or "").strip()
+                if not ks or ks not in _BINANCE_INTERVALS:
+                    continue
+                try:
+                    self._max_backfill_days_by_tf[ks] = max(1, int(val))
+                except (TypeError, ValueError):
+                    continue
+        else:
+            try:
+                self._max_backfill_days_default = max(1, int(raw_max_days if raw_max_days is not None else 365))
+            except (TypeError, ValueError):
+                self._max_backfill_days_default = 365
+
+        try:
+            self._backfill_max_pages = max(1, min(500, int(mtf_config.get("backfill_max_pages") or 200)))
+        except (TypeError, ValueError):
+            self._backfill_max_pages = 200
+
         logger.info("BinanceThCollector initialized with pairs: %s", self.pairs)
 
     def set_pairs(self, pairs: List[str]) -> None:
@@ -220,6 +307,9 @@ class BinanceThCollector:
         symbol: str,
         interval: Any = "15m",
         limit: int = 500,
+        *,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
     ) -> List[List[Any]]:
         """Fetch klines from Binance Thailand.
 
@@ -232,6 +322,8 @@ class BinanceThCollector:
                 values are accepted and mapped automatically.
             limit: Maximum number of klines to fetch (Binance hard limit
                 is 1000).
+            start_time_ms: Optional Binance ``startTime`` (ms).
+            end_time_ms: Optional Binance ``endTime`` (ms).
 
         Returns:
             List of kline rows ``[open_time_ms, o, h, l, c, v, ...]``.
@@ -245,6 +337,10 @@ class BinanceThCollector:
             "interval": normalized_interval,
             "limit": int(limit),
         }
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
         try:
             response = requests.get(url, params=params, timeout=10)
             self._check_rate_limit(response)
@@ -265,42 +361,17 @@ class BinanceThCollector:
             logger.error("[%s] klines decode error: %s", symbol, exc)
             return []
 
-    def _collect_ohlc_result(
-        self,
+    @staticmethod
+    def _kline_rows_to_candles(
+        rows: List[List[Any]],
+        *,
         symbol: str,
-        interval: Any = "15m",
-        timeframe: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Collect klines and return a detailed outcome for richer logging.
-
-        # --- NEW: SPEC_02 --- Parses Binance kline rows where ``row[0]`` is
-        # the open time in *milliseconds* — divided by 1000 before being
-        # converted to a UTC ``datetime`` so the rest of the bot (which works
-        # in seconds) stays consistent.
-        """
-        normalized_interval = _coerce_interval(interval, default="15m")
-        tf = timeframe or normalized_interval
-
-        outcome: Dict[str, Any] = {
-            "pair": symbol,
-            "timeframe": tf,
-            "stored": 0,
-            "status": "no_data",
-            "latest_stored": None,
-            "latest_fetched": None,
-        }
-
-        rows = self.get_ohlc(symbol, interval=normalized_interval)
-        if not rows:
-            return outcome
-
-        latest_stored = self.db.get_latest_price(symbol, timeframe=tf)
-        latest_timestamp = latest_stored.timestamp if latest_stored else None
-        outcome["latest_stored"] = latest_timestamp
-        if latest_timestamp is not None and latest_timestamp.tzinfo is None:
-            latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
-
-        candles_to_insert: List[Dict[str, Any]] = []
+        timeframe: str,
+        latest_timestamp: Optional[datetime],
+        only_after_latest: bool,
+    ) -> tuple[List[Dict[str, Any]], Optional[datetime]]:
+        """Convert raw kline rows to price dicts; optionally keep only candles newer than ``latest_timestamp``."""
+        candles: List[Dict[str, Any]] = []
         latest_fetched: Optional[datetime] = None
         for row in rows:
             try:
@@ -311,9 +382,9 @@ class BinanceThCollector:
                 candle_timestamp = datetime.fromtimestamp(ts_seconds, tz=timezone.utc)
                 if latest_fetched is None or candle_timestamp > latest_fetched:
                     latest_fetched = candle_timestamp
-                if latest_timestamp is not None and candle_timestamp <= latest_timestamp:
+                if only_after_latest and latest_timestamp is not None and candle_timestamp <= latest_timestamp:
                     continue
-                candles_to_insert.append(
+                candles.append(
                     {
                         "pair": symbol,
                         "timestamp": candle_timestamp,
@@ -322,38 +393,176 @@ class BinanceThCollector:
                         "low": float(row[3]),
                         "close": float(row[4]),
                         "volume": float(row[5]),
-                        "timeframe": tf,
+                        "timeframe": timeframe,
                     }
                 )
             except (TypeError, ValueError, IndexError) as exc:
-                logger.warning("Invalid candle row for %s %s: %s", symbol, tf, exc)
+                logger.warning("Invalid candle row for %s %s: %s", symbol, timeframe, exc)
                 continue
+        return candles, latest_fetched
 
+    def _page_older_klines_until_target(
+        self,
+        symbol: str,
+        normalized_interval: str,
+        tf: str,
+    ) -> int:
+        """Fetch older klines in pages until ``_backfill_target_bars`` or limits are reached."""
+        if not self._paged_backfill_enabled or not self.multi_timeframe_enabled:
+            return 0
+
+        max_days = self._max_backfill_days_by_tf.get(
+            normalized_interval,
+            self._max_backfill_days_default,
+        )
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_days)
+        lim = self._backfill_kline_limit_per_request
+        target = self._backfill_target_bars
+        total_extra = 0
+
+        for _page in range(self._backfill_max_pages):
+            if self.db.count_price_rows(symbol, tf) >= target:
+                break
+            earliest = self.db.get_earliest_price(symbol, tf)
+            if earliest is None or earliest.timestamp is None:
+                break
+            ets = earliest.timestamp
+            if ets.tzinfo is None:
+                ets = ets.replace(tzinfo=timezone.utc)
+            if ets <= cutoff:
+                break
+            end_ms = int(ets.timestamp() * 1000) - 1
+            if end_ms < 0:
+                break
+            rows = self.get_ohlc(
+                symbol,
+                interval=normalized_interval,
+                limit=lim,
+                end_time_ms=end_ms,
+            )
+            if not rows:
+                break
+            candles, _ = self._kline_rows_to_candles(
+                rows,
+                symbol=symbol,
+                timeframe=tf,
+                latest_timestamp=None,
+                only_after_latest=False,
+            )
+            if not candles:
+                break
+            try:
+                batch_stored = int(self.db.insert_prices_batch(candles) or 0)
+            except Exception as exc:
+                logger.error("Paged batch insert failed for %s %s: %s", symbol, tf, exc)
+                batch_stored = 0
+                for price_data in candles:
+                    try:
+                        if self.db.insert_price(**price_data):
+                            batch_stored += 1
+                    except Exception:
+                        continue
+            total_extra += batch_stored
+            if batch_stored <= 0:
+                break
+            time.sleep(0.02)
+
+        if total_extra > 0:
+            logger.info(
+                "[Backfill] %s %s: paged history added %d candle(s) toward target=%d",
+                symbol,
+                tf,
+                total_extra,
+                target,
+            )
+        return total_extra
+
+    def _collect_ohlc_result(
+        self,
+        symbol: str,
+        interval: Any = "15m",
+        timeframe: Optional[str] = None,
+        *,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Collect klines and return a detailed outcome for richer logging.
+
+        # --- NEW: SPEC_02 --- Parses Binance kline rows where ``row[0]`` is
+        # the open time in *milliseconds* — divided by 1000 before being
+        # converted to a UTC ``datetime`` so the rest of the bot (which works
+        # in seconds) stays consistent.
+        """
+        normalized_interval = _coerce_interval(interval, default="15m")
+        tf = timeframe or normalized_interval
+        lim = int(limit) if limit is not None else self._backfill_kline_limit_per_request
+
+        outcome: Dict[str, Any] = {
+            "pair": symbol,
+            "timeframe": tf,
+            "stored": 0,
+            "status": "no_data",
+            "latest_stored": None,
+            "latest_fetched": None,
+        }
+
+        rows = self.get_ohlc(symbol, interval=normalized_interval, limit=lim)
+        latest_stored = self.db.get_latest_price(symbol, timeframe=tf)
+        latest_timestamp = latest_stored.timestamp if latest_stored else None
+        outcome["latest_stored"] = latest_timestamp
+        if latest_timestamp is not None and latest_timestamp.tzinfo is None:
+            latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+
+        if not rows:
+            if self._paged_backfill_enabled and self.multi_timeframe_enabled:
+                if self.db.count_price_rows(symbol, tf) < self._backfill_target_bars:
+                    paged = self._page_older_klines_until_target(symbol, normalized_interval, tf)
+                    outcome["stored"] = int(paged or 0)
+                    outcome["status"] = "stored" if paged > 0 else "no_data"
+            return outcome
+
+        candles_to_insert, latest_fetched = self._kline_rows_to_candles(
+            rows,
+            symbol=symbol,
+            timeframe=tf,
+            latest_timestamp=latest_timestamp,
+            only_after_latest=True,
+        )
         outcome["latest_fetched"] = latest_fetched
 
-        if not candles_to_insert:
+        stored = 0
+        if candles_to_insert:
+            try:
+                stored = int(self.db.insert_prices_batch(candles_to_insert) or 0)
+            except Exception as exc:
+                logger.error("Batch insert failed for %s %s: %s", symbol, tf, exc)
+                stored = 0
+                for price_data in candles_to_insert:
+                    try:
+                        if self.db.insert_price(**price_data):
+                            stored += 1
+                    except Exception:
+                        continue
+        else:
             if (
                 latest_timestamp is not None
                 and latest_fetched is not None
                 and latest_fetched <= latest_timestamp
             ):
                 outcome["status"] = "up_to_date"
-            return outcome
 
-        try:
-            stored = self.db.insert_prices_batch(candles_to_insert)
-        except Exception as exc:
-            logger.error("Batch insert failed for %s %s: %s", symbol, tf, exc)
-            stored = 0
-            for price_data in candles_to_insert:
-                try:
-                    if self.db.insert_price(**price_data):
-                        stored += 1
-                except Exception:
-                    continue
+        paged_extra = 0
+        if self._paged_backfill_enabled and self.multi_timeframe_enabled:
+            if self.db.count_price_rows(symbol, tf) < self._backfill_target_bars:
+                paged_extra = self._page_older_klines_until_target(symbol, normalized_interval, tf)
 
-        outcome["stored"] = int(stored or 0)
-        outcome["status"] = "stored" if outcome["stored"] > 0 else "up_to_date"
+        total_stored = int(stored or 0) + int(paged_extra or 0)
+        outcome["stored"] = total_stored
+        if total_stored > 0:
+            outcome["status"] = "stored"
+        elif candles_to_insert and stored == 0 and paged_extra == 0:
+            outcome["status"] = "no_data"
+        elif outcome["status"] != "up_to_date":
+            outcome["status"] = "up_to_date" if rows else "no_data"
         return outcome
 
     def _log_ohlc_collection_result(self, result: Dict[str, Any]) -> None:
@@ -574,12 +783,14 @@ class BinanceThCollector:
         ``async`` so an ``asyncio``-based runtime can ``await`` it without
         blocking its event loop. Returns the number of candles inserted.
         """
-        del limit
         result = await asyncio.to_thread(
-            self._collect_ohlc_result,
-            symbol,
-            interval,
-            interval,
+            partial(
+                self._collect_ohlc_result,
+                symbol,
+                interval,
+                interval,
+                limit=limit,
+            )
         )
         stored = int(result.get("stored", 0) or 0)
         logger.info("[Backfill] %s/%s: %d candles stored", symbol, interval, stored)

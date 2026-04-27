@@ -47,7 +47,7 @@ import shutil
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -348,7 +348,7 @@ class HyperoptRunner:
             "end_date": end_date,
             "fee_pct": self.fee_pct,
             "initial_capital": self.initial_capital,
-            "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z",
             "results": [r.to_dict() for r in results],
         }
 

@@ -60,3 +60,4 @@ runtime ปัจจุบันถือว่าใช้งานได้จ
 - health / preflight ล่าสุด
 - docs ที่ตรงกับ codebase ปัจจุบัน
 - operational behavior จริงหลัง restart, path move, และ service supervision
+

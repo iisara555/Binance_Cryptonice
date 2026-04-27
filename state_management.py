@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -91,7 +91,7 @@ class TradeStateSnapshot:
             trigger=str(row.get("trigger") or ""),
             notes=str(row.get("notes") or ""),
             opened_at=row.get("opened_at"),
-            last_transition_at=row.get("last_transition_at") or datetime.utcnow(),
+            last_transition_at=row.get("last_transition_at") or datetime.now(timezone.utc),
         )
 
     def to_row(self) -> Dict[str, Any]:
@@ -273,8 +273,8 @@ class TradeStateManager:
                     signal_source=snapshot.signal_source,
                     trigger=snapshot.trigger,
                     notes=snapshot.notes,
-                    opened_at=pos.get("timestamp") or snapshot.opened_at or datetime.utcnow(),
-                    last_transition_at=datetime.utcnow(),
+                    opened_at=pos.get("timestamp") or snapshot.opened_at or datetime.now(timezone.utc),
+                    last_transition_at=datetime.now(timezone.utc),
                 )
                 self._persist(updated)
                 continue
@@ -307,8 +307,8 @@ class TradeStateManager:
                 signal_source=snapshot.signal_source,
                 trigger=snapshot.trigger,
                 notes=snapshot.notes,
-                opened_at=pos.get("timestamp") or snapshot.opened_at or datetime.utcnow(),
-                last_transition_at=datetime.utcnow(),
+                opened_at=pos.get("timestamp") or snapshot.opened_at or datetime.now(timezone.utc),
+                last_transition_at=datetime.now(timezone.utc),
             )
             self._persist(updated)
 
@@ -347,7 +347,7 @@ class TradeStateManager:
         if not symbol_key or duration <= 0:
             return
 
-        block_started_at = blocked_at or datetime.utcnow()
+        block_started_at = blocked_at or datetime.now(timezone.utc)
         expires_at = block_started_at + timedelta(seconds=duration)
         with self._cache_lock:
             self._recent_exit_blocks[symbol_key] = {
@@ -365,7 +365,7 @@ class TradeStateManager:
         if not symbol_key:
             return ""
 
-        current_time = now or datetime.utcnow()
+        current_time = now or datetime.now(timezone.utc)
         with self._cache_lock:
             block = self._recent_exit_blocks.get(symbol_key)
             if not block:
@@ -408,7 +408,7 @@ class TradeStateManager:
                 f"confidence {confidence:.2f} below state threshold {self.min_entry_confidence:.2f}"
             )
 
-        now = signal_time or datetime.utcnow()
+        now = signal_time or datetime.now(timezone.utc)
         confirm_key = self._confirmation_key(symbol_key, action_key)
         existing = self._confirmations.get(confirm_key)
         if existing and (now - existing["timestamp"]) <= self.confirmation_window:
@@ -469,7 +469,7 @@ class TradeStateManager:
         )
 
     def start_pending_buy(self, symbol: str, plan, order_result, signal_source: str = "") -> TradeStateSnapshot:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         requested_amount = float(order_result.ordered_amount or 0.0)
         snapshot = TradeStateSnapshot(
             symbol=str(symbol or plan.symbol).upper(),
@@ -499,7 +499,7 @@ class TradeStateManager:
             )
             return self.get_state(symbol)
         snapshot = self.get_state(symbol)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         total_cost = snapshot.total_entry_cost or (filled_amount * filled_price)
         updated = TradeStateSnapshot(
             symbol=snapshot.symbol,
@@ -541,7 +541,7 @@ class TradeStateManager:
         notes: str = "",
     ) -> TradeStateSnapshot:
         snapshot = self.get_state(symbol)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         raw_amount = float(position.get("amount") or 0.0)
         raw_remaining = float(position.get("remaining_amount") or 0.0)
         raw_filled = float(position.get("filled_amount") or 0.0)
@@ -582,7 +582,7 @@ class TradeStateManager:
 
     def restore_in_position(self, symbol: str, notes: str = "") -> TradeStateSnapshot:
         snapshot = self.get_state(symbol)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         updated = TradeStateSnapshot(
             symbol=snapshot.symbol,
             state=TradeLifecycleState.IN_POSITION,
@@ -634,7 +634,7 @@ class TradeStateManager:
         return completed
 
     def is_timed_out(self, snapshot: TradeStateSnapshot) -> bool:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if snapshot.state == TradeLifecycleState.PENDING_BUY:
             elapsed = (now - snapshot.last_transition_at).total_seconds()
             if elapsed < 0:

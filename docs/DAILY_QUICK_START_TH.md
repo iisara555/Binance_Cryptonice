@@ -54,3 +54,4 @@ Set-Location "C:\path\to\crypto-bot V1"
 - ถ้ารันผ่าน `run_bot.bat` หรือ `restart_bot.bat` ให้ปิดหน้าต่างนั้นหรือกด `Ctrl+C`
 - ถ้ารันบน VPS แบบ Rich CLI + auto-start ให้ใช้ `systemctl stop crypto-bot-tmux`
 - ถ้ารันบน Windows service mode ให้ใช้ `Stop-Service CryptoBotRuntime`
+
