@@ -81,8 +81,8 @@ class CLICommandCenter:
         "risk": (_EMBER, f"bold {_EMBER}"),
         "footer": (_BORDER_DIM, f"bold {_WHITE}"),
     }
-    # SigFlow block: max chars for "Why" (table column uses max_width slightly above this).
-    _SIGFLOW_WHY_MAX_LEN = 44
+    # SigFlow block: max chars for "Why" (table column max_width should fit this + ellipsis).
+    _SIGFLOW_WHY_MAX_LEN = 60
 
     def __init__(
         self,
@@ -494,7 +494,7 @@ class CLICommandCenter:
         return CLICommandCenter._truncate_inline(label, 9)
 
     @staticmethod
-    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 44) -> str:
+    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 60) -> str:
         """Short English for one-row-per-pair SigFlow; longer tail still truncated at max_len."""
         st = str(step or "").strip()
         rt = str(result or "").upper().strip()
@@ -1015,8 +1015,8 @@ class CLICommandCenter:
             style=self._DIM,
             ratio=2,
             overflow="ellipsis",
-            min_width=28,
-            max_width=52,
+            min_width=40,
+            max_width=68,
         )
 
         if not isinstance(flow_snapshot, dict) or not flow_snapshot:
