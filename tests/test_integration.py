@@ -1129,8 +1129,11 @@ class TestFullIntegrationFlow:
         }
         app = TradingBotApp(config)
 
+        mock_api = Mock()
+        mock_api.validate_symbol_exchange_info.return_value = []
+
         with patch('main.validate_config', return_value=([], [])), \
-             patch('main.BinanceThClient', return_value=Mock()), \
+             patch('main.BinanceThClient', return_value=mock_api), \
              patch('main.RiskManager', return_value=Mock()), \
              patch('main.SignalGenerator', return_value=Mock()), \
              patch('main.AlertSystem') as mock_alert_system_cls, \
@@ -1163,8 +1166,11 @@ class TestFullIntegrationFlow:
         }
         app = TradingBotApp(config)
 
+        mock_api = Mock()
+        mock_api.validate_symbol_exchange_info.return_value = []
+
         with patch('main.validate_config', return_value=([], [])), \
-             patch('main.BinanceThClient', return_value=Mock()), \
+             patch('main.BinanceThClient', return_value=mock_api), \
              patch('main.RiskManager', return_value=Mock()), \
              patch('main.SignalGenerator', return_value=Mock()), \
              patch('main.AlertSystem') as mock_alert_system_cls, \

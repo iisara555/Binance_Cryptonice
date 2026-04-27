@@ -50,7 +50,7 @@ def sample_ohlcv_data():
     """Create sample OHLCV data for testing."""
     n_bars = 250
     base_price = 100.0
-    dates = pd.date_range(start="2024-01-01", periods=n_bars, freq="1H")
+    dates = pd.date_range(start="2024-01-01", periods=n_bars, freq="1h")
     
     # Create synthetic uptrend with increasing volatility
     trend = np.linspace(0, 5, n_bars)

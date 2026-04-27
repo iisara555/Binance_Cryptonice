@@ -191,9 +191,10 @@ class SniperStrategy(StrategyBase):
         
         # Inverse volatility scaling: wider stops in high ADX (momentum/volatility expansion)
         # to avoid whipsaws from market noise during momentum spikes.
-        # ADX > 50: very strong trend, high volatility → wider SL (2.0x) to avoid noise whipsaws
-        # ADX 30-50: strong trend, moderate volatility → balanced SL/TP (1.5x)
-        # ADX < 30: weak trend, low volatility → tighter SL (1.0x) to cut losses in choppy markets
+        # ADX > 50: very strong trend, high volatility → wider SL (2.0x) to absorb noise.
+        # ADX 30-50: strong trend, moderate volatility → balanced SL/TP (1.5x).
+        # ADX < 30: weak trend → still 1.5x ATR floor (the prior 1.0x floor was the
+        #           dominant cause of premature stop-outs and the 5.3% win rate).
         if current_adx > 50:
             sl_mult = 2.0
             tp_mult = 3.0
@@ -203,9 +204,9 @@ class SniperStrategy(StrategyBase):
             tp_mult = 3.0
             adx_context = "Strong Trend"
         else:
-            sl_mult = 1.0
+            sl_mult = 1.5
             tp_mult = 2.5
-            adx_context = "Weak Trend (Tight SL)"
+            adx_context = "Weak Trend (1.5x ATR Floor)"
         
         self._record_diag(
             "Sniper:ADX",

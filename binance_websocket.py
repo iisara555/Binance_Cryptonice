@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -37,6 +38,48 @@ except ImportError:
 WEBSOCKET_RUNTIME_OK: bool = bool(websocket)
 
 logger = logging.getLogger(__name__)
+
+# Official Binance.th combined streams: GLOBAL symbols → gstream, SITE → nstream
+# (see https://www.binance.th/api-docs/ — not stream.binance.th, which often does not resolve.)
+DEFAULT_WS_STREAM_BASE = "wss://www.binance.th/gstream"
+
+
+def _resolve_ws_stream_base() -> str:
+    """
+    Base URL for combined ``?streams=`` subscriptions (no query string here).
+
+    Env ``BINANCE_WS_URL`` or ``BINANCE_TH_WS_URL`` examples:
+
+    - ``wss://www.binance.th/gstream`` (default; GLOBAL / typical *USDT tickers)
+    - ``wss://www.binance.th/nstream`` (SITE symbol type per exchangeInfo)
+    - ``wss://stream.binance.com:9443/stream`` (optional global mirror)
+
+    ``stream.binance.th`` is remapped to ``www.binance.th/gstream`` because it is not
+    in current public API docs and frequently returns NXDOMAIN from resolvers.
+    """
+    raw = (os.environ.get("BINANCE_WS_URL") or os.environ.get("BINANCE_TH_WS_URL") or "").strip()
+    if not raw:
+        return DEFAULT_WS_STREAM_BASE
+    lower = raw.lower()
+    if "stream.binance.th" in lower:
+        logger.warning(
+            "[BINANCE-WS] BINANCE_WS_URL points at stream.binance.th (not in Binance.th docs / often NXDOMAIN). "
+            "Using wss://www.binance.th/gstream instead."
+        )
+        return DEFAULT_WS_STREAM_BASE
+    raw = raw.rstrip("/")
+    if not (raw.startswith("wss://") or raw.startswith("ws://")):
+        logger.warning(
+            "[BINANCE-WS] BINANCE_WS_URL must start with wss:// or ws:// — got %r; using default %s",
+            raw[:80],
+            DEFAULT_WS_STREAM_BASE,
+        )
+        return DEFAULT_WS_STREAM_BASE
+    # Binance.com / .us spot combined streams use a ``/stream`` path segment.
+    if "binance.com" in lower or "binance.us" in lower:
+        if not lower.endswith("/stream"):
+            return raw + "/stream"
+    return raw
 
 
 class ConnectionState(Enum):
@@ -75,7 +118,8 @@ class BinanceWebSocket:
     def __init__(self, symbols: List[str], on_tick: Callable[[PriceTick], None]) -> None:
         self.symbols = [str(s or "").upper() for s in symbols if str(s or "").strip()]
         self.on_tick = on_tick
-        self.endpoint = "wss://stream.binance.th:9443/stream"
+        self.endpoint = _resolve_ws_stream_base()
+        self._dns_help_logged = False
 
         self._state = ConnectionState.DISCONNECTED
         self._state_lock = threading.RLock()
@@ -129,6 +173,7 @@ class BinanceWebSocket:
         self._running = True
         self._wakeup_event.clear()
         self._set_state(ConnectionState.CONNECTING)
+        logger.info("[BINANCE-WS] Stream base %s | symbols=%s", self.endpoint, self.symbols)
         self._thread = threading.Thread(target=self._run_forever, daemon=True, name="BinanceWS")
         self._thread.start()
 
@@ -214,7 +259,18 @@ class BinanceWebSocket:
 
     def _on_error(self, _ws: Any, error: Any) -> None:
         self._stats["last_error"] = str(error)
+        err_s = str(error)
         logger.warning("[BINANCE-WS] Error: %s", error)
+        if "getaddrinfo" in err_s.lower() and not self._dns_help_logged:
+            self._dns_help_logged = True
+            logger.warning(
+                "[BINANCE-WS] DNS lookup failed — check internet, firewall, VPN, or corporate DNS "
+                "(e.g. try: nslookup www.binance.th 1.1.1.1). Current base: %s. "
+                "Official TH spot streams: wss://www.binance.th/gstream or wss://www.binance.th/nstream "
+                "(set BINANCE_WS_URL). Optional mirror: wss://stream.binance.com:9443/stream "
+                "(global USDT tickers; prices may differ from TH venue).",
+                self.endpoint,
+            )
 
     def _on_close(self, _ws: Any, code: Any, reason: Any) -> None:
         logger.info("[BINANCE-WS] Closed code=%s reason=%s", code, reason)

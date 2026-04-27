@@ -8,7 +8,7 @@ across the codebase.
 import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 class TechnicalIndicators:
@@ -323,26 +323,34 @@ def vwap(
     low: pd.Series,
     close: pd.Series,
     volume: pd.Series,
+    period: Optional[int] = None,
 ) -> pd.Series:
     """
     Volume Weighted Average Price.
-    VWAP = cumsum(typical_price * volume) / cumsum(volume)
+    VWAP = sum(typical_price * volume) / sum(volume)
     where typical_price = (high + low + close) / 3.
+
+    Args:
+        period: Optional rolling window length. When given, returns a
+            rolling VWAP over the last ``period`` bars (useful for intraday
+            scalping where a fresh per-bar reference is preferable to a
+            slow cumulative one). When None, returns the conventional
+            cumulative session VWAP.
 
     Acts as:
         - Dynamic support / resistance reference.
         - Entry filter (long only when price > VWAP).
         - Institutional benchmark price.
 
-    Note:
-        VWAP is conventionally a per-session metric.
-        The caller is responsible for slicing data to a single session
-        (e.g. one trading day) before calling for true "daily VWAP".
-
     Source: Simple Scalp strategy concept.
     """
     typical_price = (high + low + close) / 3
     tp_vol = typical_price * volume
+    if period is not None and int(period) > 0:
+        window = int(period)
+        rolling_tp_vol = tp_vol.rolling(window=window, min_periods=1).sum()
+        rolling_vol = volume.rolling(window=window, min_periods=1).sum().replace(0, np.nan)
+        return rolling_tp_vol / rolling_vol
     cumulative_tp_vol = tp_vol.cumsum()
     cumulative_vol = volume.cumsum().replace(0, np.nan)
     return cumulative_tp_vol / cumulative_vol

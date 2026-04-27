@@ -26,5 +26,5 @@ coverage>=7.0.0
 factory-boy>=3.2.0
 faker>=18.0.0
 
-# Memory profiling for tests
-pytest-memory-profiler>=0.0.4
+# Memory profiling (optional; often no wheel for newest Python — install manually if needed)
+# pytest-memory-profiler>=0.0.4

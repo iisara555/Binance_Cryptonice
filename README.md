@@ -46,7 +46,7 @@ Crypto Bot V1 คือบอทเทรด Binance Thailand แบบ standalo
 
 ## ความต้องการของระบบ
 
-- Python 3.10+
+- Python 3.10 ขึ้นไป (แนะนำเวอร์ชันล่าสุดที่เสถียรจาก [python.org](https://www.python.org/downloads/) หรือ Microsoft Store; ทดสอบกับ 3.14)
 - Binance Thailand API key และ secret ที่ถูกต้อง ถ้าจะใช้ private API หรือ live mode
 - PowerShell บน Windows ถ้าจะใช้ตัวอย่างคำสั่งใน README นี้ตรง ๆ
 - ถ้าจะใช้ Windows service mode ต้องมี NSSM (`nssm.exe`) และสิทธิ Administrator
