@@ -53,6 +53,7 @@ GRADE_STARS: Dict[str, str] = {
 # Dataclass
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class WeeklyStats:
     """Aggregate weekly performance snapshot."""
@@ -93,6 +94,7 @@ class WeeklyStats:
 # Reviewer
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class WeeklyReviewer:
     """
     Compute weekly trading performance from `closed_trades`,
@@ -115,15 +117,11 @@ class WeeklyReviewer:
         self.benchmark = str(review_cfg.get("benchmark", "BTC")).upper()
         self.save_to_file = bool(review_cfg.get("save_to_file", True))
         self.send_telegram_flag = bool(review_cfg.get("send_telegram", True))
-        self.file_path_template = str(
-            review_cfg.get("file_path", f"{DEFAULT_REVIEW_SUBDIR}/review_{{date}}.md")
-        )
+        self.file_path_template = str(review_cfg.get("file_path", f"{DEFAULT_REVIEW_SUBDIR}/review_{{date}}.md"))
 
         portfolio_cfg = dict(self.config.get("portfolio", {}) or {})
         self.quote_currency = str(
-            review_cfg.get("quote_currency")
-            or portfolio_cfg.get("quote_currency")
-            or "USDT"
+            review_cfg.get("quote_currency") or portfolio_cfg.get("quote_currency") or "USDT"
         ).upper()
         self.initial_balance = float(portfolio_cfg.get("initial_balance", 1000.0))
 
@@ -180,6 +178,7 @@ class WeeklyReviewer:
     ) -> WeeklyStats:
         """Async wrapper — runs `run_review` in a worker thread."""
         import asyncio
+
         return await asyncio.to_thread(self.run_review, week_start, week_end, **kwargs)
 
     def compute_weekly_stats(
@@ -194,11 +193,7 @@ class WeeklyReviewer:
         net_pnl_total = sum(self._safe(t, "net_pnl") for t in trades)
         starting_equity = max(ending_equity - net_pnl_total, 0.01)
         week_return_amt = net_pnl_total
-        week_return_pct = (
-            week_return_amt / starting_equity * 100.0
-            if starting_equity > 0
-            else 0.0
-        )
+        week_return_pct = week_return_amt / starting_equity * 100.0 if starting_equity > 0 else 0.0
 
         winners = [t for t in trades if self._safe(t, "net_pnl") > 0]
         losers = [t for t in trades if self._safe(t, "net_pnl") <= 0]
@@ -215,11 +210,7 @@ class WeeklyReviewer:
 
         best = max(trades, key=lambda t: self._safe(t, "net_pnl_pct")) if trades else {}
         worst = min(trades, key=lambda t: self._safe(t, "net_pnl_pct")) if trades else {}
-        avg_pct = (
-            sum(self._safe(t, "net_pnl_pct") for t in trades) / len(trades)
-            if trades
-            else 0.0
-        )
+        avg_pct = sum(self._safe(t, "net_pnl_pct") for t in trades) / len(trades) if trades else 0.0
 
         max_dd = self._compute_max_drawdown(trades, starting_equity)
         sharpe = self._compute_sharpe(trades, starting_equity)
@@ -287,6 +278,7 @@ class WeeklyReviewer:
 
         try:
             from alerts import AlertLevel
+
             level = AlertLevel.SUMMARY
         except Exception:
             level = "summary"
@@ -344,12 +336,14 @@ class WeeklyReviewer:
                 f"| Worst Trade        | {wt.get('symbol', '?')} {fmt_pct(wt.get('pnl_pct', 0.0))} ({fmt_amt(wt.get('pnl_amt', 0.0))} {cur}) |"
             )
 
-        lines.extend([
-            f"| Avg Trade          | {fmt_pct(stats.avg_trade_pct)} |",
-            f"| Max Drawdown       | -{stats.max_drawdown_pct:.2f}% |",
-            f"| Sharpe Ratio       | {stats.sharpe_ratio:.2f} |",
-            "",
-        ])
+        lines.extend(
+            [
+                f"| Avg Trade          | {fmt_pct(stats.avg_trade_pct)} |",
+                f"| Max Drawdown       | -{stats.max_drawdown_pct:.2f}% |",
+                f"| Sharpe Ratio       | {stats.sharpe_ratio:.2f} |",
+                "",
+            ]
+        )
 
         if stats.trades_by_trigger:
             lines += ["## 🎯 By Exit Trigger", "", "| Trigger | Trades | PnL |", "|---------|--------|-----|"]
@@ -360,7 +354,12 @@ class WeeklyReviewer:
             lines.append("")
 
         if stats.trades_by_strategy and any(k != "unknown" for k in stats.trades_by_strategy):
-            lines += ["## 📈 By Strategy (best-effort)", "", "| Strategy | Trades | PnL |", "|----------|--------|-----|"]
+            lines += [
+                "## 📈 By Strategy (best-effort)",
+                "",
+                "| Strategy | Trades | PnL |",
+                "|----------|--------|-----|",
+            ]
             for strat in sorted(stats.trades_by_strategy.keys()):
                 n = stats.trades_by_strategy[strat]
                 pnl = stats.pnl_by_strategy.get(strat, 0.0)
@@ -394,6 +393,7 @@ class WeeklyReviewer:
             from alerts import escape_html as _escape_html
         except Exception:
             import html as _html
+
             def _escape_html(value: Any) -> str:
                 return _html.escape(str(value or ""), quote=False)
 
@@ -408,11 +408,9 @@ class WeeklyReviewer:
             f"<i>{stats.week_start.strftime('%b %d')} – {stats.week_end.strftime('%b %d, %Y')}</i>",
             "─" * 22,
             f"Portfolio: <code>{stats.ending_equity:,.2f}</code> {cur}",
-            f"Return: <b>{sign_amt(stats.week_return_amt)} {cur}</b> "
-            f"(<b>{sign_pct(stats.week_return_pct)}</b>)",
+            f"Return: <b>{sign_amt(stats.week_return_amt)} {cur}</b> " f"(<b>{sign_pct(stats.week_return_pct)}</b>)",
             "",
-            f"Trades: <code>{stats.total_trades}</code> "
-            f"({stats.winning_trades}W / {stats.losing_trades}L)",
+            f"Trades: <code>{stats.total_trades}</code> " f"({stats.winning_trades}W / {stats.losing_trades}L)",
             f"Win Rate: <code>{stats.win_rate:.1f}%</code>",
             f"Profit Factor: <code>{pf_str}</code>",
             f"Max DD: <code>-{stats.max_drawdown_pct:.2f}%</code>",
@@ -422,20 +420,16 @@ class WeeklyReviewer:
         if stats.best_trade:
             bt = stats.best_trade
             lines.append(
-                f"Best: <code>{_escape_html(bt.get('symbol', '?'))}</code> "
-                f"{sign_pct(bt.get('pnl_pct', 0.0))}"
+                f"Best: <code>{_escape_html(bt.get('symbol', '?'))}</code> " f"{sign_pct(bt.get('pnl_pct', 0.0))}"
             )
         if stats.worst_trade:
             wt = stats.worst_trade
             lines.append(
-                f"Worst: <code>{_escape_html(wt.get('symbol', '?'))}</code> "
-                f"{sign_pct(wt.get('pnl_pct', 0.0))}"
+                f"Worst: <code>{_escape_html(wt.get('symbol', '?'))}</code> " f"{sign_pct(wt.get('pnl_pct', 0.0))}"
             )
 
         if stats.trades_by_trigger:
-            top_triggers = sorted(
-                stats.trades_by_trigger.items(), key=lambda kv: kv[1], reverse=True
-            )[:3]
+            top_triggers = sorted(stats.trades_by_trigger.items(), key=lambda kv: kv[1], reverse=True)[:3]
             lines.append("")
             lines.append("Triggers: " + ", ".join(f"{_escape_html(k)}×{v}" for k, v in top_triggers))
 
@@ -533,9 +527,7 @@ class WeeklyReviewer:
 
     # ── Data fetching ───────────────────────────────────────────────────
 
-    def _fetch_closed_trades(
-        self, start: datetime, end: datetime
-    ) -> List[Dict[str, Any]]:
+    def _fetch_closed_trades(self, start: datetime, end: datetime) -> List[Dict[str, Any]]:
         """Fetch closed trades in [start, end) as plain dicts (session-detached)."""
         if self.db is None:
             return []
@@ -589,9 +581,7 @@ class WeeklyReviewer:
         finally:
             session.close()
 
-    def _fetch_strategy_lookup(
-        self, start: datetime, end: datetime
-    ) -> Dict[str, List[Tuple[datetime, str]]]:
+    def _fetch_strategy_lookup(self, start: datetime, end: datetime) -> Dict[str, List[Tuple[datetime, str]]]:
         """
         Build {symbol_upper: [(timestamp, strategy), ...]} sorted by timestamp.
         Used for best-effort strategy attribution per closed trade.
@@ -695,9 +685,7 @@ class WeeklyReviewer:
 
     # ── Stat helpers ────────────────────────────────────────────────────
 
-    def _compute_max_drawdown(
-        self, trades: List[Dict[str, Any]], starting_equity: float
-    ) -> float:
+    def _compute_max_drawdown(self, trades: List[Dict[str, Any]], starting_equity: float) -> float:
         """
         Trade-level running drawdown — % retracement from peak equity.
         Not a true intraday portfolio drawdown (we don't snapshot equity)
@@ -718,9 +706,7 @@ class WeeklyReviewer:
                     max_dd_pct = dd_pct
         return max_dd_pct
 
-    def _compute_sharpe(
-        self, trades: List[Dict[str, Any]], starting_equity: float
-    ) -> float:
+    def _compute_sharpe(self, trades: List[Dict[str, Any]], starting_equity: float) -> float:
         """
         Daily-bucket Sharpe annualized × √365 (crypto trades 7 days/week).
         Returns 0.0 with fewer than 2 active days or zero variance.
@@ -747,7 +733,7 @@ class WeeklyReviewer:
 
         if std_r == 0:
             return 0.0
-        return (mean_r / std_r) * (365 ** 0.5)
+        return (mean_r / std_r) * (365**0.5)
 
     @staticmethod
     def _format_profit_factor(pf: float) -> str:
@@ -806,6 +792,7 @@ class WeeklyReviewer:
 # ────────────────────────────────────────────────────────────────────────────
 # CLI entry point
 # ────────────────────────────────────────────────────────────────────────────
+
 
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
@@ -874,24 +861,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="weekly_review",
         description="Crypto bot weekly performance review (SPEC_08B).",
     )
-    parser.add_argument("--manual", action="store_true",
-                        help="Run review for the trailing 7 days (default if --start/--end omitted)")
-    parser.add_argument("--start", type=str, default=None,
-                        help="Period start (YYYY-MM-DD). UTC.")
-    parser.add_argument("--end", type=str, default=None,
-                        help="Period end (YYYY-MM-DD or ISO). UTC.")
-    parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH),
-                        help="Path to bot_config.yaml")
-    parser.add_argument("--db", type=str, default=None,
-                        help="Override SQLite database path")
-    parser.add_argument("--no-send", action="store_true",
-                        help="Do not send Telegram summary")
-    parser.add_argument("--no-save", action="store_true",
-                        help="Do not write the markdown report to disk")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Suppress markdown stdout preview")
-    parser.add_argument("--log-level", type=str, default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument(
+        "--manual", action="store_true", help="Run review for the trailing 7 days (default if --start/--end omitted)"
+    )
+    parser.add_argument("--start", type=str, default=None, help="Period start (YYYY-MM-DD). UTC.")
+    parser.add_argument("--end", type=str, default=None, help="Period end (YYYY-MM-DD or ISO). UTC.")
+    parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH), help="Path to bot_config.yaml")
+    parser.add_argument("--db", type=str, default=None, help="Override SQLite database path")
+    parser.add_argument("--no-send", action="store_true", help="Do not send Telegram summary")
+    parser.add_argument("--no-save", action="store_true", help="Do not write the markdown report to disk")
+    parser.add_argument("--quiet", action="store_true", help="Suppress markdown stdout preview")
+    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -912,6 +892,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.no_send:
         try:
             from alerts import AlertSystem
+
             alerts_obj = AlertSystem()
         except Exception as exc:
             logger.warning("[WeeklyReview] AlertSystem unavailable (%s); Telegram disabled", exc)

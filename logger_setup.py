@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 try:
     from rich.console import Console
     from rich.logging import RichHandler
+
     _RICH_AVAILABLE = True
 except ImportError:  # pragma: no cover - fallback when rich is not installed yet
     Console = None  # type: ignore[assignment]
@@ -32,11 +33,11 @@ except ImportError:  # pragma: no cover - fallback when rich is not installed ye
 
 
 # ── Default constants (overridable via YAML config) ──────────────────────────
-MAX_LOG_SIZE = 100 * 1024 * 1024   # 100 MB per file
-BACKUP_COUNT = 10                  # rotated copies for size-based
-DEBUG_RETENTION_DAYS = 30          # keep daily debug logs this many days
-ERROR_RETENTION_DAYS = 90          # keep error.log backups this many days
-TRADE_RETENTION_DAYS = 90          # keep trades.log backups this many days
+MAX_LOG_SIZE = 100 * 1024 * 1024  # 100 MB per file
+BACKUP_COUNT = 10  # rotated copies for size-based
+DEBUG_RETENTION_DAYS = 30  # keep daily debug logs this many days
+ERROR_RETENTION_DAYS = 90  # keep error.log backups this many days
+TRADE_RETENTION_DAYS = 90  # keep trades.log backups this many days
 WATCHDOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB for watchdog.log
 WATCHDOG_BACKUP_COUNT = 3
 
@@ -264,6 +265,7 @@ def get_shared_console() -> Optional[Any]:
 
 
 # ── Log cleanup / rotation helpers ───────────────────────────────────────────
+
 
 def _cleanup_old_timed_logs(log_dir: str, base_name: str, retention_days: int) -> int:
     """Remove TimedRotatingFileHandler rotated files older than *retention_days*.

@@ -1,34 +1,49 @@
 """
-Strategy base module - exports from strategies package.
+Strategy base module — re-exports the strategies package and local enums/helpers.
 """
-from strategies.base import StrategyBase, Signal, StrategyConfig, TradingSignal, SignalType
+
+from __future__ import annotations
+
+from enum import Enum
+
 from strategies import (
-    TrendFollowingStrategy,
-    MeanReversionStrategy,
     BreakoutStrategy,
+    MacheteV8bLite,
+    MeanReversionStrategy,
     MomentumStrategy,
     ScalpingStrategy,
-    SniperStrategy,
-    MacheteV8bLite,
     SimpleScalpPlus,
+    SniperStrategy,
+    TrendFollowingStrategy,
 )
-from typing import Dict, Any
-from enum import Enum
+from strategies.base import Signal, SignalType, StrategyBase, StrategyConfig, TradingSignal
 
 # Re-export for compatibility
 __all__ = [
-    'StrategyBase', 'Signal', 'StrategyConfig',
-    'TrendFollowingStrategy', 'MeanReversionStrategy',
-    'BreakoutStrategy', 'MomentumStrategy', 'ScalpingStrategy',
-    'SniperStrategy', 'MacheteV8bLite', 'SimpleScalpPlus',
-    'TradingSignal', 'SignalType', 'SignalConfidence', 'MarketCondition', 
-    'detect_market_condition'
+    "StrategyBase",
+    "Signal",
+    "StrategyConfig",
+    "TrendFollowingStrategy",
+    "MeanReversionStrategy",
+    "BreakoutStrategy",
+    "MomentumStrategy",
+    "ScalpingStrategy",
+    "SniperStrategy",
+    "MacheteV8bLite",
+    "SimpleScalpPlus",
+    "TradingSignal",
+    "SignalType",
+    "SignalConfidence",
+    "MarketCondition",
+    "detect_market_condition",
 ]
+
 
 class SignalConfidence(Enum):
     HIGH = "HIGH"
     MEDIUM = "MEDIUM"
     LOW = "LOW"
+
 
 class MarketCondition(Enum):
     BULL = "BULL"
@@ -40,33 +55,34 @@ class MarketCondition(Enum):
     VOLATILE = "VOLATILE"
     LOW_VOLUME = "LOW_VOLUME"
 
-def detect_market_condition(prices: list) -> MarketCondition:
-    """Detect current market condition.
-    
-    Args:
-        prices: List of numeric price values (not timestamps!)
-    """
-    if len(prices) < 50:
-        return MarketCondition.SIDEWAY
-    
-    import numpy as np
-    
-    # Filter out non-numeric values (timestamps, strings, etc)
-    numeric_prices = []
-    for p in prices:
+
+def _coerce_numeric_prices(prices: list) -> list[float]:
+    """Keep only finite float closing prices; drop timestamps and invalid rows."""
+    out: list[float] = []
+    for p in prices or []:
         try:
-            numeric_prices.append(float(p))
-        except (ValueError, TypeError):
-            continue  # Skip timestamps or invalid values
-    
+            v = float(p)
+        except (TypeError, ValueError):
+            continue
+        if not (v == v):  # NaN
+            continue
+        out.append(v)
+    return out
+
+
+def detect_market_condition(prices: list) -> MarketCondition:
+    """Rough regime from the last 50 closes (numeric values only)."""
+    numeric_prices = _coerce_numeric_prices(list(prices))
     if len(numeric_prices) < 50:
         return MarketCondition.SIDEWAY
-    
-    prices_arr = np.array(numeric_prices, dtype=float)
-    sma = np.mean(prices_arr[-50:])
-    
-    if prices_arr[-1] > sma * 1.02:
+
+    import numpy as np
+
+    prices_arr = np.asarray(numeric_prices, dtype=float)
+    sma = float(np.mean(prices_arr[-50:]))
+    last = float(prices_arr[-1])
+    if last > sma * 1.02:
         return MarketCondition.BULL
-    elif prices_arr[-1] < sma * 0.98:
+    if last < sma * 0.98:
         return MarketCondition.BEAR
     return MarketCondition.SIDEWAY

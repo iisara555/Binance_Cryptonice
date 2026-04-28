@@ -7,15 +7,13 @@ import sys
 from datetime import timedelta
 
 import numpy as np
-from pandas import DataFrame
-
 from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.misc import plural
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import FtTTLCache, dt_floor_day, dt_now, dt_ts
-
+from pandas import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +42,11 @@ class VolatilityFilter(IPairList):
             raise OperationalException("VolatilityFilter requires lookback_days to be >= 1")
         if self._days > candle_limit:
             raise OperationalException(
-                "VolatilityFilter requires lookback_days to not "
-                f"exceed exchange max request size ({candle_limit})"
+                "VolatilityFilter requires lookback_days to not " f"exceed exchange max request size ({candle_limit})"
             )
         if self._sort_direction not in [None, "asc", "desc"]:
             raise OperationalException(
-                "VolatilityFilter requires sort_direction to be "
-                "either None (undefined), 'asc' or 'desc'"
+                "VolatilityFilter requires sort_direction to be " "either None (undefined), 'asc' or 'desc'"
             )
 
     def short_desc(self) -> str:
@@ -122,9 +118,7 @@ class VolatilityFilter(IPairList):
             if volatility_avg is not None:
                 if self._validate_pair_loc(p, volatility_avg):
                     resulting_pairlist.append(p)
-                    volatilitys[p] = (
-                        volatility_avg if volatility_avg and not np.isnan(volatility_avg) else 0
-                    )
+                    volatilitys[p] = volatility_avg if volatility_avg and not np.isnan(volatility_avg) else 0
             else:
                 self.log_once(f"Removed {p} from whitelist, no candles found.", logger.info)
 

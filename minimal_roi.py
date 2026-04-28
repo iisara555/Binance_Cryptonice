@@ -33,6 +33,7 @@ pass NET profit (after fee deduction) into ``should_exit``. Use the
 
 # --- NEW: SPEC_06 Minimal ROI ---
 """
+
 from __future__ import annotations
 
 import logging
@@ -80,9 +81,7 @@ class MinimalROI:
             parsed.append((minutes, threshold))
 
         if not parsed:
-            raise ValueError(
-                "MinimalROI requires at least one valid {minutes: threshold} row"
-            )
+            raise ValueError("MinimalROI requires at least one valid {minutes: threshold} row")
 
         parsed.sort(key=lambda row: row[0], reverse=True)
         self._table: Tuple[Tuple[int, float], ...] = tuple(parsed)
@@ -188,9 +187,7 @@ def build_roi_tables(roi_config: Mapping) -> Dict[str, MinimalROI]:
         try:
             tables[str(mode_name)] = MinimalROI(table)
         except ValueError as exc:
-            logger.warning(
-                "MinimalROI: skipping mode %r — invalid table (%s)", mode_name, exc
-            )
+            logger.warning("MinimalROI: skipping mode %r — invalid table (%s)", mode_name, exc)
     return tables
 
 

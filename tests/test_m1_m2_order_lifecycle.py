@@ -20,8 +20,7 @@ from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
-from trade_executor import TradeExecutor, OrderSide, OrderRequest, OrderResult, OrderStatus
-
+from trade_executor import OrderRequest, OrderResult, OrderSide, OrderStatus, TradeExecutor
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared fixture helpers (mirrors test_oms_reconcile_gate.py pattern)
@@ -67,6 +66,7 @@ def _make_executor(db: object = _SENTINEL) -> TradeExecutor:
     ex.order_type = "limit"
 
     from trade_executor import PartialFillTracker
+
     ex._fill_tracker = PartialFillTracker(max_wait_seconds=60.0)
     ex._open_orders = {}
     ex._order_history = []
@@ -109,6 +109,7 @@ def _pending_order(order_id: str = "ord-1", symbol: str = "THB_BTC") -> dict:
 # M1 — cancel_order: memory + DB removal only on confirmed API success
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestM1CancelOrderAtomicity:
     """cancel_order must not remove tracking until the exchange confirms the cancel."""
 
@@ -123,9 +124,7 @@ class TestM1CancelOrderAtomicity:
         result = ex.cancel_order("ord-1", symbol="THB_BTC", side="buy")
 
         assert result is False
-        assert "ord-1" in ex._open_orders, (
-            "Order must NOT be removed from _open_orders when the API cancel fails"
-        )
+        assert "ord-1" in ex._open_orders, "Order must NOT be removed from _open_orders when the API cancel fails"
 
     def test_failed_cancel_does_not_touch_db(self):
         """API cancel failure must not trigger a DB delete."""
@@ -166,9 +165,7 @@ def test_oms_processing_is_cleared_when_replacement_thread_fails_to_start():
         result = ex.cancel_order("ord-1", symbol="THB_BTC", side="buy")
 
         assert result is True
-        assert "ord-1" not in ex._open_orders, (
-            "Order must be removed from _open_orders after confirmed cancel"
-        )
+        assert "ord-1" not in ex._open_orders, "Order must be removed from _open_orders after confirmed cancel"
 
     def test_successful_cancel_removes_from_db(self):
         """Confirmed API cancel must also remove the order from the DB (M1 ghost fix)."""
@@ -297,6 +294,7 @@ def test_place_order_sell_rounds_down_decimal_balance_to_exchange_precision():
 # M1 — OMS 24-hour aged-order path
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestM1AgedOrderOmsPath:
     """OMS must attempt cancel_order before removing aged orders from tracking."""
 
@@ -328,6 +326,7 @@ class TestM1AgedOrderOmsPath:
         ex._reconcile_done.set()
 
         with patch.object(ex, "cancel_order", side_effect=_fake_cancel):
+
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
@@ -337,9 +336,7 @@ class TestM1AgedOrderOmsPath:
             ex._oms_monitor_loop()
             t.join(timeout=2)
 
-        assert cancel_calls == ["ord-aged"], (
-            "cancel_order must be invoked for aged orders before removing tracking"
-        )
+        assert cancel_calls == ["ord-aged"], "cancel_order must be invoked for aged orders before removing tracking"
 
     def test_aged_order_retained_when_cancel_fails(self):
         """If cancel_order fails for an aged order, the order must be kept in tracking."""
@@ -364,9 +361,7 @@ class TestM1AgedOrderOmsPath:
             ex._oms_monitor_loop()
             t.join(timeout=2)
 
-        assert "ord-aged" in ex._open_orders, (
-            "Order must be retained in _open_orders when the aged-order cancel fails"
-        )
+        assert "ord-aged" in ex._open_orders, "Order must be retained in _open_orders when the aged-order cancel fails"
 
     def test_aged_order_removed_when_cancel_succeeds(self):
         """If cancel_order succeeds for an aged order, it must be removed from tracking."""
@@ -389,6 +384,7 @@ class TestM1AgedOrderOmsPath:
         ex._reconcile_done.set()
 
         with patch.object(ex, "cancel_order", side_effect=_fake_cancel):
+
             def _stop():
                 time.sleep(0.3)
                 ex._oms_running = False
@@ -398,9 +394,9 @@ class TestM1AgedOrderOmsPath:
             ex._oms_monitor_loop()
             t.join(timeout=2)
 
-        assert "ord-aged" not in ex._open_orders, (
-            "Order must be removed from _open_orders when the aged-order cancel succeeds"
-        )
+        assert (
+            "ord-aged" not in ex._open_orders
+        ), "Order must be removed from _open_orders when the aged-order cancel succeeds"
 
 
 def test_bootstrap_position_skips_exchange_timeout_and_cancel_paths():
@@ -417,6 +413,7 @@ def test_bootstrap_position_skips_exchange_timeout_and_cancel_paths():
     ex._reconcile_done.set()
 
     with patch.object(ex, "check_order_status") as check_status_mock, patch.object(ex, "cancel_order") as cancel_mock:
+
         def _stop():
             time.sleep(0.2)
             ex._oms_running = False
@@ -435,6 +432,7 @@ def test_bootstrap_position_skips_exchange_timeout_and_cancel_paths():
 # M2 — register_tracked_position: DB-first ordering
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestM2RegisterTrackedPositionAtomicity:
     """register_tracked_position must persist to DB before touching _open_orders."""
 
@@ -447,9 +445,7 @@ class TestM2RegisterTrackedPositionAtomicity:
 
         ex.register_tracked_position("ord-1", {"symbol": "THB_BTC", "side": "buy"})
 
-        assert "ord-1" not in ex._open_orders, (
-            "_open_orders must NOT be updated when the DB write fails"
-        )
+        assert "ord-1" not in ex._open_orders, "_open_orders must NOT be updated when the DB write fails"
 
     def test_db_success_updates_memory(self):
         """When the DB write succeeds, _open_orders must be populated."""
@@ -477,9 +473,9 @@ class TestM2RegisterTrackedPositionAtomicity:
 
         ex.register_tracked_position("ord-1", {"symbol": "THB_BTC", "side": "buy"})
 
-        assert memory_state_at_db_write == [False], (
-            "save_position must be called BEFORE the order is inserted into _open_orders"
-        )
+        assert memory_state_at_db_write == [
+            False
+        ], "save_position must be called BEFORE the order is inserted into _open_orders"
 
     def test_no_db_still_updates_memory(self):
         """When _db is None, register_tracked_position must still populate _open_orders."""
@@ -534,6 +530,4 @@ class TestM2RegisterTrackedPositionAtomicity:
         ex.register_tracked_position("ord-B", {"symbol": "THB_ETH", "side": "buy"})
 
         assert "ord-A" in ex._open_orders, "First successful registration must persist"
-        assert "ord-B" not in ex._open_orders, (
-            "Second registration (DB failed) must NOT appear in memory"
-        )
+        assert "ord-B" not in ex._open_orders, "Second registration (DB failed) must NOT appear in memory"

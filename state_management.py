@@ -170,10 +170,7 @@ class TradeStateManager:
 
     def list_active_states(self) -> List[TradeStateSnapshot]:
         with self._cache_lock:
-            return [
-                snapshot for snapshot in self._state_cache.values()
-                if snapshot.state != TradeLifecycleState.IDLE
-            ]
+            return [snapshot for snapshot in self._state_cache.values() if snapshot.state != TradeLifecycleState.IDLE]
 
     @staticmethod
     def _resolve_base_amount(
@@ -244,10 +241,7 @@ class TradeStateManager:
                 inferred_in_position = True
             elif side == "buy":
                 inferred_in_position = (
-                    is_filled
-                    or is_partial_fill
-                    or filled_amount > 0
-                    or (amount > 0 and remaining_amount <= 0)
+                    is_filled or is_partial_fill or filled_amount > 0 or (amount > 0 and remaining_amount <= 0)
                 )
 
             if not inferred_in_position:
@@ -404,9 +398,7 @@ class TradeStateManager:
 
         if confidence < self.min_entry_confidence:
             self.clear_confirmation(symbol_key, action=action_key)
-            return False, (
-                f"confidence {confidence:.2f} below state threshold {self.min_entry_confidence:.2f}"
-            )
+            return False, (f"confidence {confidence:.2f} below state threshold {self.min_entry_confidence:.2f}")
 
         now = signal_time or datetime.now(timezone.utc)
         confirm_key = self._confirmation_key(symbol_key, action_key)
@@ -495,7 +487,9 @@ class TradeStateManager:
         if filled_amount <= 0 or filled_price <= 0:
             logger.error(
                 "[State] Invalid filled state: symbol=%s amount=%s price=%s — rejecting",
-                symbol, filled_amount, filled_price,
+                symbol,
+                filled_amount,
+                filled_price,
             )
             return self.get_state(symbol)
         snapshot = self.get_state(symbol)
@@ -640,7 +634,8 @@ class TradeStateManager:
             if elapsed < 0:
                 logger.warning(
                     "[State] Clock skew detected for %s (elapsed=%ds), forcing timeout",
-                    snapshot.symbol, int(elapsed),
+                    snapshot.symbol,
+                    int(elapsed),
                 )
                 return True
             return elapsed >= self.pending_buy_timeout.total_seconds()
@@ -649,7 +644,8 @@ class TradeStateManager:
             if elapsed < 0:
                 logger.warning(
                     "[State] Clock skew detected for %s (elapsed=%ds), forcing timeout",
-                    snapshot.symbol, int(elapsed),
+                    snapshot.symbol,
+                    int(elapsed),
                 )
                 return True
             return elapsed >= self.pending_sell_timeout.total_seconds()

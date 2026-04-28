@@ -15,7 +15,6 @@ from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import FtTTLCache, dt_now, format_ms_time
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -31,8 +30,7 @@ class VolumePairList(IPairList):
 
         if "number_assets" not in self._pairlistconfig:
             raise OperationalException(
-                "`number_assets` not specified. Please check your configuration "
-                'for "pairlist.config.number_assets"'
+                "`number_assets` not specified. Please check your configuration " 'for "pairlist.config.number_assets"'
             )
 
         self._stake_currency: str = self._config["stake_currency"]
@@ -74,8 +72,7 @@ class VolumePairList(IPairList):
             )
 
         if not self._use_range and not (
-            self._exchange.exchange_has("fetchTickers")
-            and self._exchange.get_option("tickers_have_quoteVolume")
+            self._exchange.exchange_has("fetchTickers") and self._exchange.get_option("tickers_have_quoteVolume")
         ):
             raise OperationalException(
                 f"Exchange {self._exchange.name} does not support dynamic whitelist in this "
@@ -88,15 +85,12 @@ class VolumePairList(IPairList):
         if not self._validate_keys(self._sort_key):
             raise OperationalException(f"key {self._sort_key} not in {SORT_VALUES}")
 
-        candle_limit = self._exchange.ohlcv_candle_limit(
-            self._lookback_timeframe, self._def_candletype
-        )
+        candle_limit = self._exchange.ohlcv_candle_limit(self._lookback_timeframe, self._def_candletype)
         if self._lookback_period < 0:
             raise OperationalException("VolumeFilter requires lookback_period to be >= 0")
         if self._lookback_period > candle_limit:
             raise OperationalException(
-                "VolumeFilter requires lookback_period to not "
-                f"exceed exchange max request size ({candle_limit})"
+                "VolumeFilter requires lookback_period to not " f"exceed exchange max request size ({candle_limit})"
             )
 
     @property
@@ -229,10 +223,7 @@ class VolumePairList(IPairList):
                 int(
                     timeframe_to_prev_date(
                         self._lookback_timeframe,
-                        dt_now()
-                        + timedelta(
-                            minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min
-                        ),
+                        dt_now() + timedelta(minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min),
                     ).timestamp()
                 )
                 * 1000
@@ -283,13 +274,7 @@ class VolumePairList(IPairList):
                         pair_candles["quoteVolume"] = pair_candles["volume"]
                     # ensure that a rolling sum over the lookback_period is built
                     # if pair_candles contains more candles than lookback_period
-                    quoteVolume = (
-                        pair_candles["quoteVolume"]
-                        .rolling(self._lookback_period)
-                        .sum()
-                        .fillna(0)
-                        .iloc[-1]
-                    )
+                    quoteVolume = pair_candles["quoteVolume"].rolling(self._lookback_period).sum().fillna(0).iloc[-1]
 
                     # replace quoteVolume with range quoteVolume sum calculated above
                     filtered_tickers[i]["quoteVolume"] = quoteVolume

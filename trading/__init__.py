@@ -4,16 +4,21 @@ Trading Module Package
 Refactored trading components split from monolithic trading_bot.py
 
 Modules:
-- orchestrator: Main bot loop and coordination (BotMode, SignalSource, TradeDecision)
+- orchestrator: BotMode, SignalSource, TradeDecision
+- coercion: Shared DB/API float coercion (``coerce_trade_float``)
+- bot_runtime/: slices delegated from ``TradingBotOrchestrator`` (loop, WS, deps, pause, …)
+- execution_runtime, signal_runtime, portfolio_runtime, position_monitor, …: runtime helpers
 """
 
 # Core imports - always available
+from trading.coercion import coerce_trade_float
 from trading.orchestrator import BotMode, SignalSource, TradeDecision
 
 __all__ = [
-    'BotMode',
-    'SignalSource',
-    'TradeDecision',
+    "BotMode",
+    "SignalSource",
+    "TradeDecision",
+    "coerce_trade_float",
 ]
 
 # Optional imports - may fail if dependencies not installed
@@ -22,4 +27,4 @@ try:
 except ImportError:
     PositionManager = None  # type: ignore[assignment]
 else:
-    __all__.append('PositionManager')
+    __all__.append("PositionManager")

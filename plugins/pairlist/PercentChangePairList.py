@@ -10,15 +10,13 @@ import logging
 from datetime import timedelta
 from typing import TypedDict
 
-from pandas import DataFrame
-
 from freqtrade.constants import ListPairsWithTimeframes, PairWithTimeframe
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import timeframe_to_minutes, timeframe_to_prev_date
 from freqtrade.exchange.exchange_types import Ticker, Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import FtTTLCache, dt_now, format_ms_time
-
+from pandas import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +35,7 @@ class PercentChangePairList(IPairList):
 
         if "number_assets" not in self._pairlistconfig:
             raise OperationalException(
-                "`number_assets` not specified. Please check your configuration "
-                'for "pairlist.config.number_assets"'
+                "`number_assets` not specified. Please check your configuration " 'for "pairlist.config.number_assets"'
             )
 
         self._stake_currency = self._config["stake_currency"]
@@ -80,8 +77,7 @@ class PercentChangePairList(IPairList):
             )
 
         if not self._use_range and not (
-            self._exchange.exchange_has("fetchTickers")
-            and self._exchange.get_option("tickers_have_percentage")
+            self._exchange.exchange_has("fetchTickers") and self._exchange.get_option("tickers_have_percentage")
         ):
             raise OperationalException(
                 f"Exchange {self._exchange.name} does not support dynamic whitelist in this "
@@ -89,14 +85,11 @@ class PercentChangePairList(IPairList):
                 "or switch to using candles and restart the bot."
             )
 
-        candle_limit = self._exchange.ohlcv_candle_limit(
-            self._lookback_timeframe, self._def_candletype
-        )
+        candle_limit = self._exchange.ohlcv_candle_limit(self._lookback_timeframe, self._def_candletype)
 
         if self._lookback_period > candle_limit:
             raise OperationalException(
-                "ChangeFilter requires lookback_period to not "
-                f"exceed exchange max request size ({candle_limit})"
+                "ChangeFilter requires lookback_period to not " f"exceed exchange max request size ({candle_limit})"
             )
 
     @property
@@ -193,10 +186,7 @@ class PercentChangePairList(IPairList):
                 filtered_tickers = [
                     v
                     for k, v in tickers.items()
-                    if (
-                        self._exchange.get_pair_quote_currency(k) == self._stake_currency
-                        and v["symbol"] in _pairlist
-                    )
+                    if (self._exchange.get_pair_quote_currency(k) == self._stake_currency and v["symbol"] in _pairlist)
                 ]
                 pairlist = [s["symbol"] for s in filtered_tickers]
             else:
@@ -215,9 +205,7 @@ class PercentChangePairList(IPairList):
         :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new whitelist
         """
-        filtered_tickers: list[SymbolWithPercentage] = [
-            {"symbol": k, "percentage": None} for k in pairlist
-        ]
+        filtered_tickers: list[SymbolWithPercentage] = [{"symbol": k, "percentage": None} for k in pairlist]
         if self._use_range:
             # calculating using lookback_period
             filtered_tickers = self.fetch_percent_change_from_lookback_period(filtered_tickers)
@@ -251,10 +239,7 @@ class PercentChangePairList(IPairList):
             int(
                 timeframe_to_prev_date(
                     self._lookback_timeframe,
-                    dt_now()
-                    + timedelta(
-                        minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min
-                    ),
+                    dt_now() + timedelta(minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min),
                 ).timestamp()
             )
             * 1000
@@ -298,11 +283,7 @@ class PercentChangePairList(IPairList):
             if pair_candles is not None and not pair_candles.empty:
                 current_close = pair_candles["close"].iloc[-1]
                 previous_close = pair_candles["close"].shift(self._lookback_period).iloc[-1]
-                pct_change = (
-                    ((current_close - previous_close) / previous_close) * 100
-                    if previous_close > 0
-                    else 0
-                )
+                pct_change = ((current_close - previous_close) / previous_close) * 100 if previous_close > 0 else 0
 
                 # replace change with a range change sum calculated above
                 filtered_tickers[i]["percentage"] = pct_change
@@ -317,9 +298,7 @@ class PercentChangePairList(IPairList):
         for p in filtered_tickers:
             # Filter out assets
             if (
-                self._validate_pair(
-                    p["symbol"], tickers[p["symbol"]] if p["symbol"] in tickers else None
-                )
+                self._validate_pair(p["symbol"], tickers[p["symbol"]] if p["symbol"] in tickers else None)
                 and p["symbol"] != "UNI/USDT"
             ):
                 p["percentage"] = tickers[p["symbol"]]["percentage"]

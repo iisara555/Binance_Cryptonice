@@ -18,12 +18,11 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import Mock, patch, call
+from unittest.mock import Mock, call, patch
 
 import pytest
 
-from risk_management import RiskManager, RiskConfig
-
+from risk_management import RiskConfig, RiskManager
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared helpers (mirrors test_m1_m2_order_lifecycle._make_executor pattern)
@@ -35,7 +34,8 @@ _SENTINEL = object()
 def _make_executor(db: object = _SENTINEL):
     """Build a TradeExecutor with the OMS thread NOT started."""
     import threading as _t
-    from trade_executor import TradeExecutor, PartialFillTracker
+
+    from trade_executor import PartialFillTracker, TradeExecutor
 
     api = Mock()
     api.is_circuit_open.return_value = False
@@ -94,12 +94,14 @@ def _make_rm(tmp_path: Path) -> RiskManager:
 # M3 — _apply_trailing_stop DB-first ordering
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestM3TrailingStopAtomicity:
     """_apply_trailing_stop must write to DB before updating _open_orders."""
 
     def _order_with_profit(self, entry: float, current: float) -> dict:
         """Minimal order dict that will trigger a trailing stop update."""
         from trade_executor import OrderSide
+
         return {
             "order_id": "ts-ord-1",
             "symbol": "THB_BTC",
@@ -129,9 +131,7 @@ class TestM3TrailingStopAtomicity:
 
         def _check(order_id, new_sl, trailing_peak=None):
             # At this moment _open_orders should still show the OLD stop_loss
-            memory_state_at_db_write.append(
-                ex._open_orders.get("ts-ord-1", {}).get("stop_loss")
-            )
+            memory_state_at_db_write.append(ex._open_orders.get("ts-ord-1", {}).get("stop_loss"))
 
         db.update_position_sl.side_effect = _check
         ex = _make_executor(db=db)
@@ -166,9 +166,9 @@ class TestM3TrailingStopAtomicity:
             order_info = dict(ex._open_orders["ts-ord-1"])
             ex._apply_trailing_stop(order_info)
 
-        assert ex._open_orders["ts-ord-1"]["stop_loss"] == pytest.approx(original_sl, rel=1e-6), (
-            "_open_orders stop_loss must NOT change when DB write fails"
-        )
+        assert ex._open_orders["ts-ord-1"]["stop_loss"] == pytest.approx(
+            original_sl, rel=1e-6
+        ), "_open_orders stop_loss must NOT change when DB write fails"
         assert "trailing_peak" not in ex._open_orders["ts-ord-1"] or (
             ex._open_orders["ts-ord-1"].get("trailing_peak") == entry
         ), "_open_orders trailing_peak must NOT be updated when DB write fails"
@@ -201,9 +201,7 @@ class TestM3TrailingStopAtomicity:
         current = entry * 1.05
         self._call_apply_trailing_stop(ex, entry, current)
 
-        assert "trailing_peak" in ex._open_orders.get("ts-ord-1", {}), (
-            "_open_orders must be updated when _db is None"
-        )
+        assert "trailing_peak" in ex._open_orders.get("ts-ord-1", {}), "_open_orders must be updated when _db is None"
 
     def test_trailing_stop_not_updated_below_activation(self):
         """A trade below the activation threshold must not update DB or memory."""
@@ -223,6 +221,7 @@ class TestM3TrailingStopAtomicity:
 # M4 — RiskManager state file locking
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestM4RiskStateLocking:
     """RiskManager must hold _state_lock during all file I/O to prevent corruption."""
 
@@ -230,9 +229,7 @@ class TestM4RiskStateLocking:
         """RiskManager.__init__ must create a _state_lock threading.Lock attribute."""
         rm = RiskManager(RiskConfig())
         assert hasattr(rm, "_state_lock"), "RiskManager must have a _state_lock attribute"
-        assert isinstance(rm._state_lock, type(threading.Lock())), (
-            "_state_lock must be a threading.Lock instance"
-        )
+        assert isinstance(rm._state_lock, type(threading.Lock())), "_state_lock must be a threading.Lock instance"
 
     def test_save_state_acquires_lock(self, tmp_path):
         """save_state() must acquire _state_lock before writing."""
@@ -250,9 +247,7 @@ class TestM4RiskStateLocking:
             rm.save_state(str(tmp_path / "risk_state.json"))
 
         assert lock_was_held_during_write, "open() was never called in write mode"
-        assert all(lock_was_held_during_write), (
-            "_state_lock must be held during the file write in save_state()"
-        )
+        assert all(lock_was_held_during_write), "_state_lock must be held during the file write in save_state()"
 
     def test_load_state_acquires_lock(self, tmp_path):
         """load_state() must acquire _state_lock before reading."""
@@ -274,9 +269,7 @@ class TestM4RiskStateLocking:
             rm.load_state(str(tmp_path / "risk_state.json"))
 
         assert lock_was_held_during_read, "open() was never called in read mode"
-        assert all(lock_was_held_during_read), (
-            "_state_lock must be held during the file read in load_state()"
-        )
+        assert all(lock_was_held_during_read), "_state_lock must be held during the file read in load_state()"
 
     def test_concurrent_save_state_produces_valid_json(self, tmp_path):
         """Two threads calling save_state() concurrently must not corrupt the JSON."""
@@ -303,9 +296,7 @@ class TestM4RiskStateLocking:
         # File must be valid JSON after all concurrent writes
         with open(state_file) as f:
             data = json.load(f)
-        assert "trade_count_today" in data, (
-            "risk_state.json must contain valid JSON after concurrent writes"
-        )
+        assert "trade_count_today" in data, "risk_state.json must contain valid JSON after concurrent writes"
 
     def test_save_and_load_round_trip(self, tmp_path):
         """save_state followed by load_state must restore exact state."""
@@ -370,9 +361,7 @@ class TestM4RiskStateLocking:
         result = rm.load_state(str(state_file))
 
         assert result is False
-        assert rm._trade_count_today == 0, (
-            "Corrupted state file must reset trade_count_today to safe default"
-        )
+        assert rm._trade_count_today == 0, "Corrupted state file must reset trade_count_today to safe default"
         assert rm._cooling_down is False
 
     def test_concurrent_save_and_load_no_deadlock(self, tmp_path):

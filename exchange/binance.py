@@ -5,8 +5,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import ccxt
-from pandas import DataFrame
-
 from freqtrade.constants import DEFAULT_DATAFRAME_COLUMNS
 from freqtrade.enums import TRADE_MODES, CandleType, MarginMode, PriceType, RunMode, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
@@ -22,7 +20,7 @@ from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
 from freqtrade.misc import deep_merge_dicts, json_load
 from freqtrade.util import FtTTLCache
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
-
+from pandas import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -133,10 +131,7 @@ class Binance(Exchange):
                         "\nHedge Mode is not supported by freqtrade. "
                         "Please change 'Position Mode' on your binance futures account."
                     )
-                if (
-                    assets_margin.get("multiAssetsMargin") is True
-                    and self.margin_mode != MarginMode.CROSS
-                ):
+                if assets_margin.get("multiAssetsMargin") is True and self.margin_mode != MarginMode.CROSS:
                     msg += (
                         "\nMulti-Asset Mode is not supported by freqtrade. "
                         "Please change 'Asset Mode' on your binance futures account."
@@ -169,9 +164,7 @@ class Binance(Exchange):
         """
         if is_new_pair and candle_type in (CandleType.SPOT, CandleType.FUTURES, CandleType.MARK):
             with self._loop_lock:
-                x = self.loop.run_until_complete(
-                    self._async_get_candle_history(pair, timeframe, candle_type, 0)
-                )
+                x = self.loop.run_until_complete(self._async_get_candle_history(pair, timeframe, candle_type, 0))
             if x and x[3] and x[3][0] and x[3][0][0] > since_ms:
                 # Set starting date to first available candle.
                 since_ms = x[3][0][0]
@@ -180,10 +173,7 @@ class Binance(Exchange):
                     f"{datetime.fromtimestamp(since_ms // 1000, tz=UTC).isoformat()}."
                 )
                 if until_ms and since_ms >= until_ms:
-                    logger.warning(
-                        f"No available candle-data for {pair} before "
-                        f"{dt_from_ts(until_ms).isoformat()}"
-                    )
+                    logger.warning(f"No available candle-data for {pair} before " f"{dt_from_ts(until_ms).isoformat()}")
                     return DataFrame(columns=DEFAULT_DATAFRAME_COLUMNS)
 
         if (
@@ -194,10 +184,7 @@ class Binance(Exchange):
             # otherwise fall back to rest API
             not (
                 (candle_type == CandleType.SPOT and timeframe in ["1s", "1m", "3m", "5m"])
-                or (
-                    candle_type == CandleType.FUTURES
-                    and timeframe in ["1m", "3m", "5m", "15m", "30m"]
-                )
+                or (candle_type == CandleType.FUTURES and timeframe in ["1m", "3m", "5m", "15m", "30m"])
             )
         ):
             return super().get_historic_ohlcv(
@@ -353,9 +340,7 @@ class Binance(Exchange):
                 else:
                     # Fall back to open rate for backtesting
                     mark_price = trade.open_rate
-                mm_ratio1, maint_amnt1 = self.get_maintenance_ratio_and_amt(
-                    trade.pair, trade.stake_amount
-                )
+                mm_ratio1, maint_amnt1 = self.get_maintenance_ratio_and_amt(trade.pair, trade.stake_amount)
                 maint_margin = trade.amount * mark_price * mm_ratio1 - maint_amnt1
                 mm_ex_1 += maint_margin
 
@@ -367,18 +352,15 @@ class Binance(Exchange):
 
         if maintenance_amt is None:
             raise OperationalException(
-                "Parameter maintenance_amt is required by Binance.liquidation_price"
-                f"for {self.trading_mode}"
+                "Parameter maintenance_amt is required by Binance.liquidation_price" f"for {self.trading_mode}"
             )
 
         if self.trading_mode == TradingMode.FUTURES:
-            return (
-                (wallet_balance + cross_vars + maintenance_amt) - (side_1 * amount * open_rate)
-            ) / ((amount * mm_ratio) - (side_1 * amount))
-        else:
-            raise OperationalException(
-                "Freqtrade only supports isolated futures for leverage trading"
+            return ((wallet_balance + cross_vars + maintenance_amt) - (side_1 * amount * open_rate)) / (
+                (amount * mm_ratio) - (side_1 * amount)
             )
+        else:
+            raise OperationalException("Freqtrade only supports isolated futures for leverage trading")
 
     def load_leverage_tiers(self) -> dict[str, list[dict]]:
         if self.trading_mode == TradingMode.FUTURES:
@@ -391,9 +373,7 @@ class Binance(Exchange):
         else:
             return {}
 
-    async def _async_get_trade_history_id_startup(
-        self, pair: str, since: int
-    ) -> tuple[list[list], str]:
+    async def _async_get_trade_history_id_startup(self, pair: str, since: int) -> tuple[list[list], str]:
         """
         override for initial call
 
@@ -412,10 +392,7 @@ class Binance(Exchange):
     ) -> tuple[str, list[list]]:
         logger.info(f"Fetching trades for {pair} from Binance, {from_id=}, {since=}, {until=}")
 
-        if (
-            not self._config["exchange"].get("only_from_ccxt", False)
-            and self._can_use_data_download_fast
-        ):
+        if not self._config["exchange"].get("only_from_ccxt", False) and self._can_use_data_download_fast:
             if from_id is None or not since:
                 trades = await self._api_async.fetch_trades(
                     pair,
@@ -445,15 +422,11 @@ class Binance(Exchange):
             if end_time and end_time >= until:
                 return pair, res
             else:
-                _, res2 = await super()._async_get_trade_history_id(
-                    pair, until=until, since=end_time, from_id=end_id
-                )
+                _, res2 = await super()._async_get_trade_history_id(pair, until=until, since=end_time, from_id=end_id)
                 res.extend(res2)
                 return pair, res
 
-        return await super()._async_get_trade_history_id(
-            pair, until=until, since=since, from_id=from_id
-        )
+        return await super()._async_get_trade_history_id(pair, until=until, since=since, from_id=from_id)
 
     def _check_delisting_futures(self, pair: str) -> datetime | None:
         delivery_time = self.markets.get(pair, {}).get("info", {}).get("deliveryDate", None)
@@ -463,9 +436,7 @@ class Binance(Exchange):
 
             # Binance set a very high delivery time for all perpetuals.
             # We compare with delivery time of BTC/USDT:USDT which assumed to never be delisted
-            btc_delivery_time = (
-                self.markets.get("BTC/USDT:USDT", {}).get("info", {}).get("deliveryDate", None)
-            )
+            btc_delivery_time = self.markets.get("BTC/USDT:USDT", {}).get("info", {}).get("deliveryDate", None)
 
             if delivery_time == btc_delivery_time:
                 return None
@@ -510,9 +481,7 @@ class Binance(Exchange):
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.NetworkError, ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not get delist schedule {e.__class__.__name__}. Message: {e}"
-            ) from e
+            raise TemporaryError(f"Could not get delist schedule {e.__class__.__name__}. Message: {e}") from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 
@@ -543,11 +512,7 @@ class Binance(Exchange):
             delist_dt = dt_from_ts(int(schedule["delistTime"]))
             for symbol in schedule["symbols"]:
                 ft_symbol = next(
-                    (
-                        pair
-                        for pair, market in self.markets.items()
-                        if market.get("id", None) == symbol
-                    ),
+                    (pair for pair, market in self.markets.items() if market.get("id", None) == symbol),
                     None,
                 )
                 if ft_symbol is None:

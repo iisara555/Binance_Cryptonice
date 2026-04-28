@@ -10,7 +10,6 @@ from freqtrade.misc import plural
 from freqtrade.mixins import LoggingMixin
 from freqtrade.persistence import LocalTrade
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -64,10 +63,7 @@ class IProtection(LoggingMixin, ABC):
         Output configured stop duration in either candles or minutes
         """
         if self._stop_duration_candles:
-            return (
-                f"{self._stop_duration_candles} "
-                f"{plural(self._stop_duration_candles, 'candle', 'candles')}"
-            )
+            return f"{self._stop_duration_candles} " f"{plural(self._stop_duration_candles, 'candle', 'candles')}"
         else:
             return f"{self._stop_duration} {plural(self._stop_duration, 'minute', 'minutes')}"
 
@@ -77,10 +73,7 @@ class IProtection(LoggingMixin, ABC):
         Output configured lookback period in either candles or minutes
         """
         if self._lookback_period_candles:
-            return (
-                f"{self._lookback_period_candles} "
-                f"{plural(self._lookback_period_candles, 'candle', 'candles')}"
-            )
+            return f"{self._lookback_period_candles} " f"{plural(self._lookback_period_candles, 'candle', 'candles')}"
         else:
             return f"{self._lookback_period} {plural(self._lookback_period, 'minute', 'minutes')}"
 
@@ -102,9 +95,7 @@ class IProtection(LoggingMixin, ABC):
         """
 
     @abstractmethod
-    def global_stop(
-        self, date_now: datetime, side: LongShort, starting_balance: float
-    ) -> ProtectionReturn | None:
+    def global_stop(self, date_now: datetime, side: LongShort, starting_balance: float) -> ProtectionReturn | None:
         """
         Stops trading (position entering) for all pairs
         This must evaluate to true for the whole period of the "cooldown period".

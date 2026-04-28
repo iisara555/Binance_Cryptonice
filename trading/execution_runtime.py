@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, MutableSequence
 
 from risk_management import check_pair_correlation
 from trade_executor import OrderSide
 from trading.orchestrator import BotMode, TradeDecision
-
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +71,9 @@ class ExecutionRuntimeHelper:
         rationale = getattr(decision.signal, "trade_rationale", "N/A")
         logger.info(f"[Trade Decision] {rationale}")
         side_thai = "ซื้อ" if decision.plan.side.value == "buy" else "ขาย"
-        logger.info(f"🤖 [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} quote")
+        logger.info(
+            f"🤖 [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} quote"
+        )
 
         is_new_entry_buy = decision.plan.side.value == "buy"
         is_new_entry_idle_sell = (
@@ -86,7 +87,8 @@ class ExecutionRuntimeHelper:
             else:
                 open_count = len(portfolio.get("positions", []))
             gate = deps.risk_manager.can_open_position(
-                deps.get_risk_portfolio_value(portfolio), open_count,
+                deps.get_risk_portfolio_value(portfolio),
+                open_count,
             )
             if not gate.allowed:
                 logger.warning("🚫 [RiskGate] Trade blocked for %s: %s", decision.plan.symbol, gate.reason)
@@ -95,9 +97,7 @@ class ExecutionRuntimeHelper:
             corr_threshold = float(deps.config.get("risk", {}).get("correlation_threshold", 0.75))
             if corr_threshold < 1.0:
                 open_symbols = [
-                    str(pos.get("symbol", "")).upper()
-                    for pos in deps.executor.get_open_orders()
-                    if pos.get("symbol")
+                    str(pos.get("symbol", "")).upper() for pos in deps.executor.get_open_orders() if pos.get("symbol")
                 ]
                 if open_symbols:
                     corr_gate = check_pair_correlation(
@@ -108,7 +108,9 @@ class ExecutionRuntimeHelper:
                         timeframe=deps.timeframe,
                     )
                     if not corr_gate.allowed:
-                        logger.warning("🔗 [CorrelationGate] Trade blocked for %s: %s", decision.plan.symbol, corr_gate.reason)
+                        logger.warning(
+                            "🔗 [CorrelationGate] Trade blocked for %s: %s", decision.plan.symbol, corr_gate.reason
+                        )
                         return
 
         if deps.state_machine_enabled:
@@ -129,11 +131,13 @@ class ExecutionRuntimeHelper:
             if callable(deps.register_sl_hold_entry) and result.order_id:
                 deps.register_sl_hold_entry(result.order_id)
             decision.status = "executed"
-            deps.executed_today.append({
-                "decision": decision,
-                "result": result,
-                "timestamp": datetime.now(),
-            })
+            deps.executed_today.append(
+                {
+                    "decision": decision,
+                    "result": result,
+                    "timestamp": datetime.now(),
+                }
+            )
             try:
                 ts = datetime.now(timezone.utc)
                 deps.database.insert_order(
@@ -170,7 +174,7 @@ class ExecutionRuntimeHelper:
         if callable(deps.pre_trade_gate_check) and not deps.pre_trade_gate_check(decision, portfolio):
             return
 
-        with (deps.pending_decisions_lock or _NullLock()):
+        with deps.pending_decisions_lock or _NullLock():
             deps.pending_decisions.append(decision)
 
         deps.send_pending_alert(decision, portfolio)
@@ -201,7 +205,7 @@ class ExecutionRuntimeHelper:
             logger.warning("approve_trade called but mode is not semi_auto")
             return False
 
-        with (deps.pending_decisions_lock or _NullLock()):
+        with deps.pending_decisions_lock or _NullLock():
             if decision_id < 0 or decision_id >= len(deps.pending_decisions):
                 logger.error(f"Invalid decision_id: {decision_id}")
                 return False
@@ -215,7 +219,7 @@ class ExecutionRuntimeHelper:
             nonlocal restored
             if restored:
                 return
-            with (deps.pending_decisions_lock or _NullLock()):
+            with deps.pending_decisions_lock or _NullLock():
                 insert_at = min(max(decision_id, 0), len(deps.pending_decisions))
                 deps.pending_decisions.insert(insert_at, decision)
             restored = True
@@ -250,16 +254,18 @@ class ExecutionRuntimeHelper:
             deps.register_sl_hold_entry(result.order_id)
 
         decision.status = "executed"
-        deps.executed_today.append({
-            "decision": decision,
-            "result": result,
-            "timestamp": datetime.now(),
-        })
+        deps.executed_today.append(
+            {
+                "decision": decision,
+                "result": result,
+                "timestamp": datetime.now(),
+            }
+        )
         return True
 
     @staticmethod
     def reject_trade(deps: ExecutionRuntimeDeps, decision_id: int) -> bool:
-        with (deps.pending_decisions_lock or _NullLock()):
+        with deps.pending_decisions_lock or _NullLock():
             if decision_id < 0 or decision_id >= len(deps.pending_decisions):
                 return False
             decision = deps.pending_decisions[decision_id]

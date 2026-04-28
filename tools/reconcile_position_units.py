@@ -19,13 +19,11 @@ DB_PATH = Path(__file__).resolve().parent.parent / "crypto_bot.db"
 
 def reconcile_positions(conn: sqlite3.Connection, apply_changes: bool) -> int:
     cur = conn.cursor()
-    cur.execute(
-        """
+    cur.execute("""
         SELECT id, symbol, side, amount, remaining_amount, entry_price, total_entry_cost
         FROM positions
         ORDER BY id ASC
-        """
-    )
+        """)
     rows = cur.fetchall()
 
     updated = 0
@@ -57,13 +55,11 @@ def reconcile_positions(conn: sqlite3.Connection, apply_changes: bool) -> int:
 
 def reconcile_trade_states(conn: sqlite3.Connection, apply_changes: bool) -> int:
     cur = conn.cursor()
-    cur.execute(
-        """
+    cur.execute("""
         SELECT id, symbol, state, side, requested_amount, filled_amount, entry_price, total_entry_cost
         FROM trade_states
         ORDER BY id ASC
-        """
-    )
+        """)
     rows = cur.fetchall()
 
     updated = 0

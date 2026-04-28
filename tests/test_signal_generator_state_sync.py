@@ -6,39 +6,42 @@ signal_generator.sync_state() so that check_risk() sees the real
 open-position count and today's trade count rather than permanent zeros.
 """
 
-import pytest
 from datetime import datetime
-from unittest.mock import Mock, MagicMock, patch, call
-import pandas as pd
+from unittest.mock import MagicMock, Mock, call, patch
+
 import numpy as np
+import pandas as pd
+import pytest
 
 from signal_generator import (
-    SignalGenerator,
-    AggregatedSignal,
-    get_latest_signal_flow_snapshot,
     _LATEST_SIGNAL_FLOW,
     _SIGNAL_FLOW_LOCK,
+    AggregatedSignal,
+    SignalGenerator,
+    get_latest_signal_flow_snapshot,
 )
-from strategy_base import SignalType, MarketCondition, TradingSignal
-from trade_executor import OrderSide, OrderResult, OrderStatus, ExecutionPlan
 from strategies.machete_v8b_lite import MacheteV8bLite
 from strategies.simple_scalp_plus import SimpleScalpPlus
-
+from strategy_base import MarketCondition, SignalType, TradingSignal
+from trade_executor import ExecutionPlan, OrderResult, OrderSide, OrderStatus
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_ohlcv(rows: int = 60) -> pd.DataFrame:
     """Minimal OHLCV DataFrame for strategy testing."""
     np.random.seed(42)
     close = 1_500_000.0 + np.cumsum(np.random.randn(rows) * 5_000)
-    return pd.DataFrame({
-        "open":   close * 0.999,
-        "high":   close * 1.001,
-        "low":    close * 0.998,
-        "close":  close,
-        "volume": np.abs(np.random.randn(rows)) * 100 + 50,
-        "timestamp": pd.date_range("2026-01-01", periods=rows, freq="1h"),
-    })
+    return pd.DataFrame(
+        {
+            "open": close * 0.999,
+            "high": close * 1.001,
+            "low": close * 0.998,
+            "close": close,
+            "volume": np.abs(np.random.randn(rows)) * 100 + 50,
+            "timestamp": pd.date_range("2026-01-01", periods=rows, freq="1h"),
+        }
+    )
 
 
 def _make_aggregated_signal(symbol: str = "THB_BTC", sig_type: SignalType = SignalType.BUY) -> AggregatedSignal:
@@ -78,7 +81,7 @@ def _make_sg(config: dict | None = None) -> SignalGenerator:
 
 def _build_bot(config_overrides=None, **kwargs):
     """Build a minimal TradingBotOrchestrator with mocks."""
-    from trading_bot import TradingBotOrchestrator, BotMode, SignalSource
+    from trading_bot import BotMode, SignalSource, TradingBotOrchestrator
 
     config = {
         "mode": "full_auto",
@@ -112,6 +115,7 @@ def _build_bot(config_overrides=None, **kwargs):
 # ══════════════════════════════════════════════════════════════════════════════
 # Part 1 – Unit tests for SignalGenerator.sync_state()
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestSyncStateMethod:
     """sync_state() must correctly update internal counters."""
@@ -156,6 +160,7 @@ class TestSyncStateMethod:
 # ══════════════════════════════════════════════════════════════════════════════
 # Part 2 – check_risk() uses synced state
 # ══════════════════════════════════════════════════════════════════════════════
+
 
 class TestCheckRiskUsesRealState:
     """After sync_state(), check_risk() must observe the injected values."""
@@ -206,9 +211,14 @@ class TestCheckRiskUsesRealState:
         # Intentionally do NOT call sync_state — bug scenario
 
         signal = _make_aggregated_signal()
-        portfolio = {"balance": 100_000.0, "positions": [
-            {"id": "p1"}, {"id": "p2"}, {"id": "p3"},
-        ]}
+        portfolio = {
+            "balance": 100_000.0,
+            "positions": [
+                {"id": "p1"},
+                {"id": "p2"},
+                {"id": "p3"},
+            ],
+        }
 
         result = sg.check_risk(signal, portfolio)
 
@@ -218,8 +228,7 @@ class TestCheckRiskUsesRealState:
         # the sync call is what fixes it, NOT portfolio-dict reading.)
         position_block = [r for r in result.reasons if "position" in r.lower()]
         assert len(position_block) == 0, (
-            "Expected 0 position reasons (no sync → always zero) but got: "
-            f"{position_block}"
+            "Expected 0 position reasons (no sync → always zero) but got: " f"{position_block}"
         )
 
 
@@ -275,6 +284,7 @@ class TestExecutionPlanSignalSideMapping:
 # Part 3 – Integration: bot calls sync_state before generating signals
 # ══════════════════════════════════════════════════════════════════════════════
 
+
 class TestBotSyncsStateBeforeSignals:
     """_process_pair_iteration() must call sync_state() with live counts."""
 
@@ -310,9 +320,9 @@ class TestBotSyncsStateBeforeSignals:
 
         # Patch _get_market_data_for_symbol to return valid data
         data = _make_ohlcv()
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         # sync_state must be called exactly once
@@ -323,10 +333,8 @@ class TestBotSyncsStateBeforeSignals:
         # Verify via call_args_list ordering
         all_calls = [c[0] for c in mock_sg.method_calls]
         sync_idx = next(i for i, c in enumerate(mock_sg.method_calls) if c[0] == "sync_state")
-        gen_idx  = next(i for i, c in enumerate(mock_sg.method_calls) if c[0] == "generate_signals")
-        assert sync_idx < gen_idx, (
-            f"sync_state (idx {sync_idx}) must come before generate_signals (idx {gen_idx})"
-        )
+        gen_idx = next(i for i, c in enumerate(mock_sg.method_calls) if c[0] == "generate_signals")
+        assert sync_idx < gen_idx, f"sync_state (idx {sync_idx}) must come before generate_signals (idx {gen_idx})"
 
     def test_sync_passes_correct_position_count_no_state_machine(self):
         """With state machine disabled, open_count = len(portfolio['positions'])."""
@@ -354,17 +362,15 @@ class TestBotSyncsStateBeforeSignals:
         )
 
         data = _make_ohlcv()
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         mock_sg.sync_state.assert_called_once()
         kwargs = mock_sg.sync_state.call_args.kwargs
         # open_positions_count should be 3 (from portfolio["positions"])
-        assert kwargs.get("open_positions_count") == 3, (
-            f"Expected open_positions_count=3, got {kwargs}"
-        )
+        assert kwargs.get("open_positions_count") == 3, f"Expected open_positions_count=3, got {kwargs}"
 
     def test_sync_passes_correct_daily_count_from_risk_manager(self):
         """daily_trades_count must come from risk_manager.trade_count_today."""
@@ -389,15 +395,13 @@ class TestBotSyncsStateBeforeSignals:
         )
 
         data = _make_ohlcv()
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         kwargs = mock_sg.sync_state.call_args.kwargs
-        assert kwargs.get("daily_trades_count") == 7, (
-            f"Expected daily_trades_count=7, got {kwargs}"
-        )
+        assert kwargs.get("daily_trades_count") == 7, f"Expected daily_trades_count=7, got {kwargs}"
 
     def test_with_3_open_positions_synced_signal_generator_blocks_new_buy(self):
         """End-to-end: 3 open positions → sync → check_risk blocks a 4th BUY."""
@@ -445,20 +449,21 @@ class TestBotSyncsStateBeforeSignals:
 
         # State machine will gate the symbol unless it's IDLE — bypass by setting IDLE
         from state_management import TradeLifecycleState
+
         idle_snapshot = Mock()
         idle_snapshot.state = TradeLifecycleState.IDLE
         bot._state_manager.get_state = Mock(return_value=idle_snapshot)
 
         data = _make_ohlcv()
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         kwargs = mock_sg.sync_state.call_args.kwargs
-        assert kwargs.get("open_positions_count") == 2, (
-            f"Expected open_positions_count=2 from list_active_states, got {kwargs}"
-        )
+        assert (
+            kwargs.get("open_positions_count") == 2
+        ), f"Expected open_positions_count=2 from list_active_states, got {kwargs}"
 
     def test_lifecycle_gated_pair_still_refreshes_signal_flow_but_skips_execution(self):
         """In-position pairs should still refresh diagnostics for Rich CLI while skipping trade execution."""
@@ -485,15 +490,16 @@ class TestBotSyncsStateBeforeSignals:
         )
 
         from state_management import TradeLifecycleState
+
         gated_snapshot = Mock()
         gated_snapshot.state = TradeLifecycleState.IN_POSITION
         bot._state_manager.get_state = Mock(return_value=gated_snapshot)
         bot._create_execution_plan_for_symbol = Mock()
 
         data = _make_ohlcv(rows=250)
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         mock_sg.sync_state.assert_called_once()
@@ -532,18 +538,17 @@ class TestBotSyncsStateBeforeSignals:
         )
 
         from state_management import TradeLifecycleState
+
         idle_snapshot = Mock()
         idle_snapshot.state = TradeLifecycleState.IDLE
         bot._state_manager.get_state = Mock(return_value=idle_snapshot)
-        bot._state_manager.confirm_idle_sell_signal = Mock(
-            return_value=(False, "awaiting confirmation 1/2")
-        )
+        bot._state_manager.confirm_idle_sell_signal = Mock(return_value=(False, "awaiting confirmation 1/2"))
         bot._create_execution_plan_for_symbol = Mock(return_value=None)
 
         data = _make_ohlcv(rows=250)
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         bot._state_manager.confirm_idle_sell_signal.assert_called_once()
@@ -581,35 +586,37 @@ class TestBotSyncsStateBeforeSignals:
         )
 
         from state_management import TradeLifecycleState
+
         idle_snapshot = Mock()
         idle_snapshot.state = TradeLifecycleState.IDLE
         bot._state_manager.get_state = Mock(return_value=idle_snapshot)
-        bot._state_manager.confirm_idle_sell_signal = Mock(
-            return_value=(True, "confirmed 2/2")
-        )
+        bot._state_manager.confirm_idle_sell_signal = Mock(return_value=(True, "confirmed 2/2"))
 
         from trade_executor import ExecutionPlan, OrderSide
-        bot._create_execution_plan_for_symbol = Mock(return_value=ExecutionPlan(
-            symbol="THB_BTC",
-            side=OrderSide.SELL,
-            amount=0.001,
-            entry_price=1_500_000.0,
-            stop_loss=1_530_000.0,
-            take_profit=1_440_000.0,
-            risk_reward_ratio=2.0,
-            confidence=0.7,
-            strategy_votes={"sniper_dual_ema_macd": 1},
-            signal_timestamp=datetime.now(),
-            signal_id="sell_confirmed",
-            max_price_drift_pct=1.5,
-            close_position=False,
-        ))
+
+        bot._create_execution_plan_for_symbol = Mock(
+            return_value=ExecutionPlan(
+                symbol="THB_BTC",
+                side=OrderSide.SELL,
+                amount=0.001,
+                entry_price=1_500_000.0,
+                stop_loss=1_530_000.0,
+                take_profit=1_440_000.0,
+                risk_reward_ratio=2.0,
+                confidence=0.7,
+                strategy_votes={"sniper_dual_ema_macd": 1},
+                signal_timestamp=datetime.now(),
+                signal_id="sell_confirmed",
+                max_price_drift_pct=1.5,
+                close_position=False,
+            )
+        )
         bot._process_dry_run = Mock()
 
         data = _make_ohlcv(rows=250)
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         bot._state_manager.confirm_idle_sell_signal.assert_called_once()
@@ -647,9 +654,9 @@ class TestBotSyncsStateBeforeSignals:
         bot._process_dry_run = Mock()
 
         data = _make_ohlcv(rows=250)
-        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), \
-             patch.object(bot, "_get_mtf_signal_for_symbol", return_value=None), \
-             patch.object(bot, "_maybe_trigger_sideways_rebalance"):
+        with patch.object(bot, "_get_market_data_for_symbol", return_value=data), patch.object(
+            bot, "_get_mtf_signal_for_symbol", return_value=None
+        ), patch.object(bot, "_maybe_trigger_sideways_rebalance"):
             bot._process_pair_iteration("THB_BTC")
 
         mock_sg.check_risk.assert_not_called()
@@ -836,12 +843,7 @@ class TestMacheteRejectReasonCodes:
         df = _make_ohlcv(rows=10)
         sg.generate_signals(df, "BTCUSDT", use_strategies=["machete_v8b_lite"])
         snapshot = get_latest_signal_flow_snapshot()
-        reason = (
-            snapshot.get("BTCUSDT", {})
-            .get("steps", {})
-            .get("Strategy:machete_v8b_lite", {})
-            .get("reason", "")
-        )
+        reason = snapshot.get("BTCUSDT", {}).get("steps", {}).get("Strategy:machete_v8b_lite", {}).get("reason", "")
         assert "reason_code=INSUFFICIENT_BARS" in reason
 
 
@@ -864,22 +866,26 @@ class TestMacheteRelaxedConfirmationGate:
             }
         )
         df = _make_ohlcv(rows=120)
-        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([0] * len(df))), \
-             patch("strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([0] * len(df))), \
-             patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), \
-             patch("strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([True] * len(df))), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._is_ichimoku_bullish", return_value=True), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._dynamic_sr", return_value=(100.0, 10_000_000.0)), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_ssl_channel", return_value=(self._series([2.0] * len(df)), self._series([1.0] * len(df)))), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_rmi", return_value=self._series([65.0] * len(df))), \
-             patch(
-                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx",
-                 return_value=self._series([30.0] * len(df)),
-             ), \
-             patch(
-                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
-                 return_value=self._series([2.0] * len(df)),
-             ):
+        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([0] * len(df))), patch(
+            "strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([0] * len(df))
+        ), patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), patch(
+            "strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([True] * len(df))
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._is_ichimoku_bullish", return_value=True
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._dynamic_sr", return_value=(100.0, 10_000_000.0)
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._calculate_ssl_channel",
+            return_value=(self._series([2.0] * len(df)), self._series([1.0] * len(df))),
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._calculate_rmi", return_value=self._series([65.0] * len(df))
+        ), patch(
+            "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx",
+            return_value=self._series([30.0] * len(df)),
+        ), patch(
+            "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
+            return_value=self._series([2.0] * len(df)),
+        ):
             signal = strategy.generate_signal(df, "ETHUSDT")
 
         assert signal is not None
@@ -900,22 +906,26 @@ class TestMacheteRelaxedConfirmationGate:
             }
         )
         df = _make_ohlcv(rows=120)
-        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([0] * len(df))), \
-             patch("strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([0] * len(df))), \
-             patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), \
-             patch("strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([False] * len(df))), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._is_ichimoku_bullish", return_value=False), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._dynamic_sr", return_value=(100.0, 10_000_000.0)), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_ssl_channel", return_value=(self._series([1.0] * len(df)), self._series([2.0] * len(df)))), \
-             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_rmi", return_value=self._series([40.0] * len(df))), \
-             patch(
-                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx",
-                 return_value=self._series([5.0] * len(df)),
-             ), \
-             patch(
-                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
-                 return_value=self._series([2.0] * len(df)),
-             ):
+        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([0] * len(df))), patch(
+            "strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([0] * len(df))
+        ), patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), patch(
+            "strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([False] * len(df))
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._is_ichimoku_bullish", return_value=False
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._dynamic_sr", return_value=(100.0, 10_000_000.0)
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._calculate_ssl_channel",
+            return_value=(self._series([1.0] * len(df)), self._series([2.0] * len(df))),
+        ), patch(
+            "strategies.machete_v8b_lite.MacheteV8bLite._calculate_rmi", return_value=self._series([40.0] * len(df))
+        ), patch(
+            "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx",
+            return_value=self._series([5.0] * len(df)),
+        ), patch(
+            "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
+            return_value=self._series([2.0] * len(df)),
+        ):
             signal = strategy.generate_signal(df, "ETHUSDT")
 
         assert signal is None
@@ -939,14 +949,23 @@ class TestSimpleScalpPlusStrictFilters:
             }
         )
         df = _make_ohlcv(rows=120)
-        with patch("strategies.simple_scalp_plus.hull_signal", return_value=pd.Series([1] * len(df))), \
-             patch("strategies.simple_scalp_plus.volume_confirmation", return_value=pd.Series([True] * len(df))), \
-             patch("strategies.simple_scalp_plus.vwap", return_value=self._series([100.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_rsi", return_value=self._series([60.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_adx", return_value=self._series([30.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_stochastic", return_value=(self._series([55.0] * len(df)), self._series([50.0] * len(df)))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_atr", return_value=self._series([2.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_macd", return_value=(self._series([1.0] * len(df)), self._series([0.5] * len(df)), self._series([0.3] * len(df)))):
+        with patch("strategies.simple_scalp_plus.hull_signal", return_value=pd.Series([1] * len(df))), patch(
+            "strategies.simple_scalp_plus.volume_confirmation", return_value=pd.Series([True] * len(df))
+        ), patch("strategies.simple_scalp_plus.vwap", return_value=self._series([100.0] * len(df))), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_rsi",
+            return_value=self._series([60.0] * len(df)),
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_adx",
+            return_value=self._series([30.0] * len(df)),
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_stochastic",
+            return_value=(self._series([55.0] * len(df)), self._series([50.0] * len(df))),
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_atr", return_value=self._series([2.0] * len(df))
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_macd",
+            return_value=(self._series([1.0] * len(df)), self._series([0.5] * len(df)), self._series([0.3] * len(df))),
+        ):
             signal = strategy.generate_signal(df, "BTCUSDT")
 
         assert signal is not None
@@ -964,14 +983,23 @@ class TestSimpleScalpPlusStrictFilters:
             }
         )
         df = _make_ohlcv(rows=120)
-        with patch("strategies.simple_scalp_plus.hull_signal", return_value=pd.Series([0] * len(df))), \
-             patch("strategies.simple_scalp_plus.volume_confirmation", return_value=pd.Series([False] * len(df))), \
-             patch("strategies.simple_scalp_plus.vwap", return_value=self._series([10_000_000.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_rsi", return_value=self._series([60.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_adx", return_value=self._series([10.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_stochastic", return_value=(self._series([90.0] * len(df)), self._series([95.0] * len(df)))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_atr", return_value=self._series([2.0] * len(df))), \
-             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_macd", return_value=(self._series([1.0] * len(df)), self._series([0.0] * len(df)), self._series([0.2] * len(df)))):
+        with patch("strategies.simple_scalp_plus.hull_signal", return_value=pd.Series([0] * len(df))), patch(
+            "strategies.simple_scalp_plus.volume_confirmation", return_value=pd.Series([False] * len(df))
+        ), patch("strategies.simple_scalp_plus.vwap", return_value=self._series([10_000_000.0] * len(df))), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_rsi",
+            return_value=self._series([60.0] * len(df)),
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_adx",
+            return_value=self._series([10.0] * len(df)),
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_stochastic",
+            return_value=(self._series([90.0] * len(df)), self._series([95.0] * len(df))),
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_atr", return_value=self._series([2.0] * len(df))
+        ), patch(
+            "strategies.simple_scalp_plus.TechnicalIndicators.calculate_macd",
+            return_value=(self._series([1.0] * len(df)), self._series([0.0] * len(df)), self._series([0.2] * len(df))),
+        ):
             signal = strategy.generate_signal(df, "BTCUSDT")
 
         assert signal is None
@@ -993,16 +1021,21 @@ class TestMacheteStrictGates:
             }
         )
         df = _make_ohlcv(rows=120)
-        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([1] * len(df))), \
-             patch("strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([1] * len(df))), \
-             patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), \
-             patch("strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([True] * len(df))), \
-             patch("strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx", return_value=self._series([30.0] * len(df))), \
-             patch("strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr", return_value=self._series([1_000_000.0] * len(df))):
+        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([1] * len(df))), patch(
+            "strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([1] * len(df))
+        ), patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), patch(
+            "strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([True] * len(df))
+        ), patch(
+            "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx", return_value=self._series([30.0] * len(df))
+        ), patch(
+            "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
+            return_value=self._series([1_000_000.0] * len(df)),
+        ):
             signal = strategy.generate_signal(df, "ETHUSDT")
 
         assert signal is None
         assert strategy.get_last_reject_reason() == "ATR_VOLATILITY_TOO_HIGH"
+
 
 class TestApplyRuntimeStrategyRefresh:
     def test_updates_mode_generator_and_risk_manager(self):

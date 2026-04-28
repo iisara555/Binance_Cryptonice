@@ -6,15 +6,13 @@ import logging
 from copy import deepcopy
 from datetime import timedelta
 
-from pandas import DataFrame
-
 from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.misc import plural
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import PeriodicCache, dt_floor_day, dt_now, dt_ts
-
+from pandas import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -38,17 +36,13 @@ class AgeFilter(IPairList):
             raise OperationalException("AgeFilter requires min_days_listed to be >= 1")
         if self._min_days_listed > candle_limit:
             raise OperationalException(
-                "AgeFilter requires min_days_listed to not exceed "
-                "exchange max request size "
-                f"({candle_limit})"
+                "AgeFilter requires min_days_listed to not exceed " "exchange max request size " f"({candle_limit})"
             )
         if self._max_days_listed and self._max_days_listed <= self._min_days_listed:
             raise OperationalException("AgeFilter max_days_listed <= min_days_listed not permitted")
         if self._max_days_listed and self._max_days_listed > candle_limit:
             raise OperationalException(
-                "AgeFilter requires max_days_listed to not exceed "
-                "exchange max request size "
-                f"({candle_limit})"
+                "AgeFilter requires max_days_listed to not exceed " "exchange max request size " f"({candle_limit})"
             )
 
     def short_desc(self) -> str:
@@ -100,17 +94,13 @@ class AgeFilter(IPairList):
             # Remove pairs that have been removed before
             return [p for p in pairlist if p not in self._symbolsCheckFailed]
 
-        since_days = (
-            -(self._max_days_listed if self._max_days_listed else self._min_days_listed) - 1
-        )
+        since_days = -(self._max_days_listed if self._max_days_listed else self._min_days_listed) - 1
         since_ms = dt_ts(dt_floor_day(dt_now()) + timedelta(days=since_days))
         candles = self._exchange.refresh_latest_ohlcv(needed_pairs, since_ms=since_ms, cache=False)
         if self._enabled:
             for p in deepcopy(pairlist):
                 daily_candles = (
-                    candles[(p, "1d", self._def_candletype)]
-                    if (p, "1d", self._def_candletype) in candles
-                    else None
+                    candles[(p, "1d", self._def_candletype)] if (p, "1d", self._def_candletype) in candles else None
                 )
                 if not self._validate_pair_loc(p, daily_candles):
                     pairlist.remove(p)
@@ -144,10 +134,7 @@ class AgeFilter(IPairList):
                         f"{plural(self._min_days_listed, 'day')}"
                     )
                     + (
-                        (
-                            " or more than "
-                            f"{self._max_days_listed} {plural(self._max_days_listed, 'day')}"
-                        )
+                        (" or more than " f"{self._max_days_listed} {plural(self._max_days_listed, 'day')}")
                         if self._max_days_listed
                         else ""
                     ),

@@ -6,7 +6,6 @@ import logging
 from functools import partial
 
 from cachetools import LRUCache, cached
-
 from freqtrade.constants import Config, ListPairsWithTimeframes
 from freqtrade.data.dataprovider import DataProvider
 from freqtrade.enums import CandleType
@@ -18,7 +17,6 @@ from freqtrade.plugins.pairlist.IPairList import IPairList, SupportsBacktesting
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
 from freqtrade.resolvers import PairListResolver
 from freqtrade.util import FtTTLCache
-
 
 logger = logging.getLogger(__name__)
 
@@ -91,9 +89,7 @@ class PairListManager(LoggingMixin):
                 "'winner bias'."
             )
         if pairlist_errors:
-            raise OperationalException(
-                f"Pairlist Handlers {', '.join(pairlist_errors)} do not support backtesting."
-            )
+            raise OperationalException(f"Pairlist Handlers {', '.join(pairlist_errors)} do not support backtesting.")
 
     @property
     def whitelist(self) -> list[str]:
@@ -197,9 +193,7 @@ class PairListManager(LoggingMixin):
                     pairlist.remove(pair)
         return pairlist
 
-    def verify_whitelist(
-        self, pairlist: list[str], logmethod, keep_invalid: bool = False
-    ) -> list[str]:
+    def verify_whitelist(self, pairlist: list[str], logmethod, keep_invalid: bool = False) -> list[str]:
         """
         Verify and remove items from pairlist - returning a filtered pairlist.
         Logs a warning or info depending on `aswarning`.
@@ -217,9 +211,7 @@ class PairListManager(LoggingMixin):
             return []
         return whitelist
 
-    def create_pair_list(
-        self, pairs: list[str], timeframe: str | None = None
-    ) -> ListPairsWithTimeframes:
+    def create_pair_list(self, pairs: list[str], timeframe: str | None = None) -> ListPairsWithTimeframes:
         """
         Create list of pair tuples with (pair, timeframe)
         """

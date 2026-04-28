@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, Optional
-
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +57,7 @@ class BotHealthServer:
                 if request_path in metrics_paths:
                     try:
                         from metrics import get_metrics
+
                         metrics_data = get_metrics().export().encode("utf-8")
                         self.send_response(200)
                         self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

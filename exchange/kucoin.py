@@ -6,7 +6,6 @@ from freqtrade.constants import BuySell
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas
 
-
 logger = logging.getLogger(__name__)
 
 

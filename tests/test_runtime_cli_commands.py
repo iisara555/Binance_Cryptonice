@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 import pytest
 from rich.console import Console
 
-from main import TradingBotApp
 from cli_ui import CLICommandCenter
+from main import TradingBotApp
 from signal_generator import _LATEST_SIGNAL_FLOW, _SIGNAL_FLOW_LOCK, _diag
 from trade_executor import OrderResult, OrderSide, OrderStatus
 
@@ -15,7 +15,7 @@ def _build_app(tmp_path, *, auto_detect_held_pairs: bool = False) -> TradingBotA
     whitelist_path = tmp_path / "coin_whitelist.json"
     config_path = tmp_path / "bot_config.yaml"
     config_path.write_text(
-        "strategy_mode:\n  active: \"standard\"\n",
+        'strategy_mode:\n  active: "standard"\n',
         encoding="utf-8",
     )
     return TradingBotApp(
@@ -310,14 +310,41 @@ def test_positions_panel_shows_book_summary_and_pnl_trend(tmp_path):
 
     snapshot_1 = app.get_cli_snapshot()
     snapshot_1["positions"] = [
-        {"symbol": "THB_BTC", "side": "buy", "entry_price": 100.0, "current_price": 105.0, "pnl_pct": 5.0, "sl_distance_pct": -1.5, "tp_distance_pct": 2.0, "strategy_source": "SimpleScalpPlus"},
+        {
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "entry_price": 100.0,
+            "current_price": 105.0,
+            "pnl_pct": 5.0,
+            "sl_distance_pct": -1.5,
+            "tp_distance_pct": 2.0,
+            "strategy_source": "SimpleScalpPlus",
+        },
     ]
     command_center.render(snapshot_1)
 
     snapshot_2 = json.loads(json.dumps(snapshot_1))
     snapshot_2["positions"] = [
-        {"symbol": "THB_BTC", "side": "buy", "entry_price": 100.0, "current_price": 104.0, "pnl_pct": 4.0, "sl_distance_pct": -1.0, "tp_distance_pct": 2.5, "strategy_source": "SimpleScalpPlus"},
-        {"symbol": "THB_ETH", "side": "buy", "entry_price": 200.0, "current_price": 196.0, "pnl_pct": -2.0, "sl_distance_pct": -1.2, "tp_distance_pct": 3.0, "strategy_source": "MacheteV8bLite"},
+        {
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "entry_price": 100.0,
+            "current_price": 104.0,
+            "pnl_pct": 4.0,
+            "sl_distance_pct": -1.0,
+            "tp_distance_pct": 2.5,
+            "strategy_source": "SimpleScalpPlus",
+        },
+        {
+            "symbol": "THB_ETH",
+            "side": "buy",
+            "entry_price": 200.0,
+            "current_price": 196.0,
+            "pnl_pct": -2.0,
+            "sl_distance_pct": -1.2,
+            "tp_distance_pct": 3.0,
+            "strategy_source": "MacheteV8bLite",
+        },
     ]
     command_center.render(snapshot_2)
 
@@ -536,7 +563,7 @@ def test_cli_snapshot_uses_blank_pnl_when_position_price_unavailable(tmp_path):
     }
     app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
     app._sample_api_latency = Mock(return_value=None)
-    app._get_cli_price = Mock(side_effect=[None, None])
+    app._get_cli_price = Mock(return_value=None)
     app._get_cli_position_price_hint = Mock(return_value=None)
 
     snapshot = app.get_cli_snapshot()
@@ -554,6 +581,34 @@ def test_help_includes_track_command(tmp_path):
     assert "track <PAIR> <COIN_AMOUNT> <ENTRY_PRICE>" in help_text
     assert "mode set <standard|trend_only|scalping>" in help_text
     assert "ui log <debug|info|warning|error|critical>" in help_text
+
+
+def test_cli_snapshot_shows_usdt_holding_as_thb_when_rate_available(tmp_path):
+    app = _build_app(tmp_path)
+    app.api_client = Mock()
+
+    def _fake_quote_rate(asset: str, quote: str, *_args):
+        return 35.0 if {str(asset).upper(), str(quote).upper()} == {"USDT", "THB"} else None
+
+    with patch.object(app, "_resolve_cli_asset_quote_rate", side_effect=_fake_quote_rate):
+        with patch.object(
+            app,
+            "_get_cli_balance_summary",
+            return_value={
+                "total_balance": 1000.0,
+                "breakdown": [
+                    {"asset": "USDT", "amount": 1000.0, "value_thb": 1000.0},
+                    {"asset": "BTC", "amount": 0.01, "value_thb": 500.0},
+                ],
+            },
+        ):
+            snapshot = app.get_cli_snapshot()
+    lines = list(snapshot["system"].get("balance_breakdown") or [])
+    assert any("USDT" in ln and "≈" in ln and "THB" in ln for ln in lines)
+    avail = snapshot["system"].get("available_balance", "")
+    total = snapshot["system"].get("total_balance", "")
+    assert "THB" in str(avail) and "≈" in str(avail)
+    assert "THB" in str(total) and "≈" in str(total)
 
 
 def test_cli_chat_submission_updates_snapshot_history(tmp_path):
@@ -830,13 +885,17 @@ def test_signal_alignment_prioritizes_waiting_pairs_first(tmp_path):
                         "pair": "THB_BTC",
                         "ready": True,
                         "waiting_summary": "ready",
-                        "timeframes": [{"timeframe": "1m", "count": 40, "waiting_candles": 0, "latest": "2026-04-11T15:35:00Z"}],
+                        "timeframes": [
+                            {"timeframe": "1m", "count": 40, "waiting_candles": 0, "latest": "2026-04-11T15:35:00Z"}
+                        ],
                     },
                     {
                         "pair": "THB_SOL",
                         "ready": False,
                         "waiting_summary": "1m:12",
-                        "timeframes": [{"timeframe": "1m", "count": 23, "waiting_candles": 12, "latest": "2026-04-11T15:34:00Z"}],
+                        "timeframes": [
+                            {"timeframe": "1m", "count": 23, "waiting_candles": 12, "latest": "2026-04-11T15:34:00Z"}
+                        ],
                     },
                 ]
             },

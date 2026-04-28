@@ -7,7 +7,6 @@ from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import FtTTLCache
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -104,9 +103,7 @@ class CrossMarketPairList(IPairList):
         for pair in pairlist:
             base = self._exchange.get_pair_base_currency(pair)
             if not base:
-                self.log_once(
-                    f"Unable to get base currency for pair {pair}, skipping it.", logger.warning
-                )
+                self.log_once(f"Unable to get base currency for pair {pair}, skipping it.", logger.warning)
                 filtered_pairlist.remove(pair)
                 continue
             found_in_bases = base in bases

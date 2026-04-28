@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import logging
 import os
 import time
-import html
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -211,7 +211,7 @@ class TelegramSender:
                     exc,
                 )
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
 
         assert last_error is not None
         raise last_error
@@ -577,9 +577,7 @@ class AlertSystem:
         else:
             checks_str = "  ❌ (no detail provided)"
         msg = (
-            f"🛡️ *TRADE BLOCKED* — {symbol}\n"
-            f"Confidence: `{signal_confidence:.2f}`\n"
-            f"Failed gates:\n{checks_str}"
+            f"🛡️ *TRADE BLOCKED* — {symbol}\n" f"Confidence: `{signal_confidence:.2f}`\n" f"Failed gates:\n{checks_str}"
         )
         return await self._send_event(msg, event="protection_trigger")
 
@@ -754,16 +752,16 @@ def send_status_token(
 # and dispatches authorized commands to the trading bot. Inspired by
 # Freqtrade's command set, trimmed to the surface a crypto sniper needs.
 COMMANDS: Dict[str, str] = {
-    "/status":  "แสดง open positions ทั้งหมด",
+    "/status": "แสดง open positions ทั้งหมด",
     "/balance": "แสดง USDT balance",
-    "/profit":  "แสดง P&L วันนี้ + สัปดาห์นี้",
-    "/stop":    "หยุด bot ฉุกเฉิน (close ทุก position)",
-    "/pause":   "หยุดเปิด position ใหม่ (manage เก่าต่อ)",
-    "/resume":  "กลับมาเทรดปกติ",
-    "/mode":    "ดู / เปลี่ยน trading mode",
-    "/count":   "จำนวน trades วันนี้ / สัปดาห์",
-    "/logs":    "แสดง log 10 บรรทัดล่าสุด",
-    "/help":    "แสดง commands ทั้งหมด",
+    "/profit": "แสดง P&L วันนี้ + สัปดาห์นี้",
+    "/stop": "หยุด bot ฉุกเฉิน (close ทุก position)",
+    "/pause": "หยุดเปิด position ใหม่ (manage เก่าต่อ)",
+    "/resume": "กลับมาเทรดปกติ",
+    "/mode": "ดู / เปลี่ยน trading mode",
+    "/count": "จำนวน trades วันนี้ / สัปดาห์",
+    "/logs": "แสดง log 10 บรรทัดล่าสุด",
+    "/help": "แสดง commands ทั้งหมด",
 }
 
 
@@ -1004,17 +1002,17 @@ class TelegramCommandHandler:
         cmd = parts[0].lower()
 
         handlers: Dict[str, Callable[[str], Awaitable[None]]] = {
-            "/status":  self._cmd_status,
+            "/status": self._cmd_status,
             "/balance": self._cmd_balance,
-            "/profit":  self._cmd_profit,
-            "/stop":    self._cmd_stop,
-            "/pause":   self._cmd_pause,
-            "/resume":  self._cmd_resume,
-            "/mode":    self._cmd_mode,
-            "/count":   self._cmd_count,
-            "/logs":    self._cmd_logs,
-            "/help":    self._cmd_help,
-            "/start":   self._cmd_help,
+            "/profit": self._cmd_profit,
+            "/stop": self._cmd_stop,
+            "/pause": self._cmd_pause,
+            "/resume": self._cmd_resume,
+            "/mode": self._cmd_mode,
+            "/count": self._cmd_count,
+            "/logs": self._cmd_logs,
+            "/help": self._cmd_help,
+            "/start": self._cmd_help,
         }
         handler = handlers.get(cmd)
         if handler is None:
@@ -1113,10 +1111,7 @@ class TelegramCommandHandler:
                 await self._reply(f"❌ Pause failed: `{exc}`")
                 return
         await self._reply(
-            "⏸️ *Bot Paused*\n"
-            "จะไม่เปิด position ใหม่\n"
-            "ของเก่าจะยัง manage ต่อ\n"
-            "พิมพ์ /resume เพื่อกลับมาเทรด"
+            "⏸️ *Bot Paused*\n" "จะไม่เปิด position ใหม่\n" "ของเก่าจะยัง manage ต่อ\n" "พิมพ์ /resume เพื่อกลับมาเทรด"
         )
 
     async def _cmd_resume(self, _text: str) -> None:

@@ -22,15 +22,22 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from unittest.mock import MagicMock, Mock, patch
+
 import pytest
 
 from trade_executor import (
-    TradeExecutor, ExecutionPlan, OrderRequest, OrderResult,
-    OrderSide, OrderStatus, PartialFillInfo, PartialFillTracker,
+    ExecutionPlan,
+    OrderRequest,
+    OrderResult,
+    OrderSide,
+    OrderStatus,
+    PartialFillInfo,
+    PartialFillTracker,
+    TradeExecutor,
 )
 
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_executor() -> TradeExecutor:
     api = Mock()
@@ -86,6 +93,7 @@ def _idem_key_fallback(symbol: str, side: str, price: float) -> str:
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+
 class TestInFlightGuardAttributes:
 
     def test_executor_has_in_flight_entries_set(self):
@@ -107,9 +115,12 @@ class TestIdempotencyFenceBlocking:
 
     def _successful_entry_result(self):
         return OrderResult(
-            True, OrderStatus.FILLED,
-            order_id="ord-111", filled_amount=0.001,
-            filled_price=1_500_000.0, ordered_amount=1000.0,
+            True,
+            OrderStatus.FILLED,
+            order_id="ord-111",
+            filled_amount=0.001,
+            filled_price=1_500_000.0,
+            ordered_amount=1000.0,
         )
 
     def test_duplicate_signal_id_blocked_while_in_flight(self):
@@ -127,14 +138,12 @@ class TestIdempotencyFenceBlocking:
         results = {}
 
         def _blocking_inner(*args, **kwargs):
-            inside_inner.set()         # signal: we are now holding the fence
+            inside_inner.set()  # signal: we are now holding the fence
             release.wait(timeout=5.0)  # hold until main thread releases us
             return self._successful_entry_result()
 
         with patch.object(ex, "_execute_entry_inner", side_effect=_blocking_inner):
-            t1 = threading.Thread(
-                target=lambda: results.__setitem__("t1", ex.execute_entry(plan, 10_000.0))
-            )
+            t1 = threading.Thread(target=lambda: results.__setitem__("t1", ex.execute_entry(plan, 10_000.0)))
             t1.start()
             inside_inner.wait(timeout=5.0)  # wait until t1 holds the fence
 
@@ -180,9 +189,9 @@ class TestIdempotencyFenceBlocking:
                 ex.execute_entry(plan, 10_000.0)
 
         with ex._in_flight_lock:
-            assert key not in ex._in_flight_entries, (
-                "Idempotency key not cleared after exception in _execute_entry_inner"
-            )
+            assert (
+                key not in ex._in_flight_entries
+            ), "Idempotency key not cleared after exception in _execute_entry_inner"
 
     def test_different_signal_ids_do_not_block_each_other(self):
         """Two different signals for the same symbol must not block each other."""
@@ -195,8 +204,9 @@ class TestIdempotencyFenceBlocking:
 
         def _fake_inner(p, pv, defer=False):
             time.sleep(0.05)  # simulate work
-            return OrderResult(True, OrderStatus.FILLED, order_id="ord-x",
-                               filled_amount=0.001, filled_price=1_500_000.0)
+            return OrderResult(
+                True, OrderStatus.FILLED, order_id="ord-x", filled_amount=0.001, filled_price=1_500_000.0
+            )
 
         with patch.object(ex, "_execute_entry_inner", side_effect=_fake_inner):
             t_a = threading.Thread(target=lambda: results_a.append(ex.execute_entry(plan_a, 10_000.0)))
@@ -224,11 +234,12 @@ class TestIdempotencyFenceBlocking:
         def _fake_inner(p, pv, defer=False):
             # Verify the key ended up in the set while inside the fence
             with ex._in_flight_lock:
-                assert expected_key in ex._in_flight_entries, (
-                    f"Expected fallback key {expected_key} in _in_flight_entries"
-                )
-            return OrderResult(True, OrderStatus.FILLED, order_id="ord-y",
-                               filled_amount=0.001, filled_price=1_500_000.0)
+                assert (
+                    expected_key in ex._in_flight_entries
+                ), f"Expected fallback key {expected_key} in _in_flight_entries"
+            return OrderResult(
+                True, OrderStatus.FILLED, order_id="ord-y", filled_amount=0.001, filled_price=1_500_000.0
+            )
 
         with patch.object(ex, "_execute_entry_inner", side_effect=_fake_inner):
             ex.execute_entry(plan, 10_000.0)
@@ -248,8 +259,9 @@ class TestConcurrentIdempotency:
         def _slow_inner(p, pv, defer=False):
             inner_calls.append(1)
             time.sleep(0.05)  # hold the fence long enough
-            return OrderResult(True, OrderStatus.FILLED, order_id="ord-c",
-                               filled_amount=0.001, filled_price=1_500_000.0)
+            return OrderResult(
+                True, OrderStatus.FILLED, order_id="ord-c", filled_amount=0.001, filled_price=1_500_000.0
+            )
 
         with patch.object(ex, "_execute_entry_inner", side_effect=_slow_inner):
             with ThreadPoolExecutor(max_workers=10) as pool:
@@ -260,9 +272,7 @@ class TestConcurrentIdempotency:
         successes = [r for r in results if r.success]
         rejections = [r for r in results if not r.success and r.status.value == "rejected"]
 
-        assert len(inner_calls) == 1, (
-            f"{len(inner_calls)} calls reached _execute_entry_inner — expected exactly 1"
-        )
+        assert len(inner_calls) == 1, f"{len(inner_calls)} calls reached _execute_entry_inner — expected exactly 1"
         assert len(successes) == 1, f"Expected 1 success, got {len(successes)}"
         assert len(rejections) == 9, f"Expected 9 rejections, got {len(rejections)}"
 
@@ -314,11 +324,16 @@ class TestOpenOrdersLockIntegrity:
         def _writer(i):
             try:
                 oid = f"ord-{i}"
-                ex.register_tracked_position(oid, {
-                    "order_id": oid, "symbol": "THB_BTC",
-                    "side": OrderSide.BUY, "amount": 0.001,
-                    "entry_price": 1_500_000.0,
-                })
+                ex.register_tracked_position(
+                    oid,
+                    {
+                        "order_id": oid,
+                        "symbol": "THB_BTC",
+                        "side": OrderSide.BUY,
+                        "amount": 0.001,
+                        "entry_price": 1_500_000.0,
+                    },
+                )
                 with write_lock:
                     written_ids.add(oid)
             except Exception as e:
@@ -332,10 +347,9 @@ class TestOpenOrdersLockIntegrity:
             except Exception as e:
                 errors.append(e)
 
-        threads = (
-            [threading.Thread(target=_writer, args=(i,)) for i in range(20)]
-            + [threading.Thread(target=_reader) for _ in range(5)]
-        )
+        threads = [threading.Thread(target=_writer, args=(i,)) for i in range(20)] + [
+            threading.Thread(target=_reader) for _ in range(5)
+        ]
         for t in threads:
             t.start()
         for t in threads:

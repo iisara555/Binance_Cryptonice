@@ -7,6 +7,7 @@ from freqtrade.exchange.exchange import Exchange
 from freqtrade.exchange.binance import Binance, Binanceus, Binanceusdm
 from freqtrade.exchange.bingx import Bingx
 from freqtrade.exchange.bitget import Bitget
+from freqtrade.exchange.bitkub import Bitkub
 from freqtrade.exchange.bitmart import Bitmart
 from freqtrade.exchange.bitpanda import Bitpanda
 from freqtrade.exchange.bitvavo import Bitvavo
@@ -46,7 +47,6 @@ from freqtrade.exchange.idex import Idex
 from freqtrade.exchange.kraken import Kraken
 from freqtrade.exchange.krakenfutures import Krakenfutures
 from freqtrade.exchange.kucoin import Kucoin
-from freqtrade.exchange.bitkub import Bitkub
 from freqtrade.exchange.lbank import Lbank
 from freqtrade.exchange.luno import Luno
 from freqtrade.exchange.modetrade import Modetrade

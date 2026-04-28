@@ -12,7 +12,6 @@ from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util.periodic_cache import PeriodicCache
 
-
 logger = logging.getLogger(__name__)
 
 ShuffleValues = Literal["candle", "iteration"]
@@ -35,9 +34,7 @@ class ShuffleFilter(IPairList):
 
         self._random = random.Random(self._seed)  # noqa: S311
         self._shuffle_freq: ShuffleValues = self._pairlistconfig.get("shuffle_frequency", "candle")
-        self.__pairlist_cache = PeriodicCache(
-            maxsize=1000, ttl=timeframe_to_seconds(self._config["timeframe"])
-        )
+        self.__pairlist_cache = PeriodicCache(maxsize=1000, ttl=timeframe_to_seconds(self._config["timeframe"]))
 
     def short_desc(self) -> str:
         """

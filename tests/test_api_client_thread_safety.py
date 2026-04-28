@@ -39,10 +39,7 @@ class TestRateLimiterThreadSafety:
 
         with patch("requests.request", side_effect=fake_request):
             with ThreadPoolExecutor(max_workers=8) as pool:
-                futures = [
-                    pool.submit(client._request, "GET", "/api/v1/account", signed=True)
-                    for _ in range(8)
-                ]
+                futures = [pool.submit(client._request, "GET", "/api/v1/account", signed=True) for _ in range(8)]
                 for future in futures:
                     assert future.result() == {"ok": True}
 

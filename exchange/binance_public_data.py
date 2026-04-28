@@ -13,13 +13,11 @@ from typing import Any
 import aiohttp
 import numpy as np
 import pandas as pd
-from pandas import DataFrame
-
 from freqtrade.constants import DEFAULT_TRADES_COLUMNS
 from freqtrade.enums import CandleType
 from freqtrade.misc import chunks
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_now
-
+from pandas import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +75,8 @@ async def download_archive_ohlcv(
         end = min(end, last_available_date)
         if start >= end:
             return DataFrame()
-        df = await _download_archive_ohlcv(
-            symbol, pair, timeframe, candle_type, start, end, stop_on_404
-        )
-        logger.debug(
-            f"Downloaded data for {pair} from https://data.binance.vision with length {len(df)}."
-        )
+        df = await _download_archive_ohlcv(symbol, pair, timeframe, candle_type, start, end, stop_on_404)
+        logger.debug(f"Downloaded data for {pair} from https://data.binance.vision with length {len(df)}.")
     except Exception as e:
         logger.warning(
             "An exception occurred during fast download from Binance, falling back to "
@@ -124,8 +118,7 @@ async def _download_archive_ohlcv(
         # the HTTP connections has been throttled by TCPConnector
         for dates in chunks(list(date_range(start, end)), 1000):
             tasks = [
-                asyncio.create_task(get_daily_ohlcv(symbol, timeframe, candle_type, date, session))
-                for date in dates
+                asyncio.create_task(get_daily_ohlcv(symbol, timeframe, candle_type, date, session)) for date in dates
             ]
             for task in tasks:
                 current_day += 1
@@ -199,9 +192,7 @@ def candle_type_to_url_segment(candle_type: CandleType) -> str:
         raise ValueError(f"Unsupported CandleType: {candle_type}")
 
 
-def binance_vision_ohlcv_zip_url(
-    symbol: str, timeframe: str, candle_type: CandleType, date: date
-) -> str:
+def binance_vision_ohlcv_zip_url(symbol: str, timeframe: str, candle_type: CandleType, date: date) -> str:
     """
     example urls:
     https://data.binance.vision/data/spot/daily/klines/BTCUSDT/1s/BTCUSDT-1s-2023-10-27.zip
@@ -260,9 +251,7 @@ async def get_daily_ohlcv(
     while True:
         if retry > 0:
             sleep_secs = retry * retry_delay
-            logger.debug(
-                f"[{retry}/{retry_count}] retry to download {url} after {sleep_secs} seconds"
-            )
+            logger.debug(f"[{retry}/{retry_count}] retry to download {url} after {sleep_secs} seconds")
             await asyncio.sleep(sleep_secs)
         try:
             async with session.get(url) as resp:
@@ -322,9 +311,7 @@ async def download_archive_trades(
         end = min(end, last_available_date)
         if start >= end:
             return pair, []
-        result_list = await _download_archive_trades(
-            symbol, pair, candle_type, start, end, stop_on_404
-        )
+        result_list = await _download_archive_trades(symbol, pair, candle_type, start, end, stop_on_404)
         return pair, result_list
 
     except Exception as e:
@@ -414,9 +401,7 @@ async def get_daily_trades(
     while True:
         if retry > 0:
             sleep_secs = retry * retry_delay
-            logger.debug(
-                f"[{retry}/{retry_count}] retry to download {url} after {sleep_secs} seconds"
-            )
+            logger.debug(f"[{retry}/{retry_count}] retry to download {url} after {sleep_secs} seconds")
             await asyncio.sleep(sleep_secs)
         try:
             async with session.get(url) as resp:
@@ -456,10 +441,7 @@ async def _download_archive_trades(
     async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
         # the HTTP connections has been throttled by TCPConnector
         for dates in chunks(list(date_range(start, end)), 30):
-            tasks = [
-                asyncio.create_task(get_daily_trades(symbol, candle_type, date, session))
-                for date in dates
-            ]
+            tasks = [asyncio.create_task(get_daily_trades(symbol, candle_type, date, session)) for date in dates]
             for task in tasks:
                 current_day += 1
                 try:

@@ -4,12 +4,12 @@ Auto-switches strategy mode based on multi-dimensional market analysis.
 Includes hysteresis protection to prevent rapid mode switching.
 """
 
-import time
 import logging
 import math
+import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("crypto-bot.adaptive_router")
 
@@ -17,19 +17,20 @@ logger = logging.getLogger("crypto-bot.adaptive_router")
 @dataclass
 class MarketAnalysis:
     """Multi-dimensional market analysis result."""
+
     symbol: str
     timestamp: datetime
-    
+
     # Individual dimensions
     trend_direction: str  # "UP", "DOWN", "SIDEWAYS"
     trend_strength: float  # 0-100 (ADX)
     volatility_pct: float  # ATR as % of close price
     volume_ratio: float  # current_volume / avg_volume
     btc_correlation: float  # -1 to 1
-    
+
     # Derived metrics
     market_condition: str  # "STRONG_UP", "WEAK_UP", "STRONG_DOWN", "VOLATILE", "RANGING"
-    
+
     # Metadata for diagnostics
     adx_value: float = 0.0
     atr_value: float = 0.0
@@ -39,7 +40,7 @@ class MarketAnalysis:
     avg_volume_20d: float = 0.0
     current_volume: float = 0.0
     btc_price: float = 0.0
-    
+
     def __repr__(self) -> str:
         return (
             f"MarketAnalysis({self.symbol}): "
@@ -54,6 +55,7 @@ class MarketAnalysis:
 @dataclass
 class ModeDecision:
     """Result of auto mode switching decision."""
+
     recommended_mode: str
     reasoning: str
     market_analysis: MarketAnalysis
@@ -67,7 +69,7 @@ class AdaptiveStrategyRouter:
     Routes strategy mode based on market conditions.
     Analyzes: trend strength (ADX), volatility (ATR%), volume ratio, BTC correlation.
     """
-    
+
     def __init__(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -77,36 +79,45 @@ class AdaptiveStrategyRouter:
         self.config = config or {}
         self.db = db
         self.api_client = api_client
-        
+
         # Auto-switch config
         auto_switch_cfg = self.config.get("auto_mode_switch", {})
         self.enabled = auto_switch_cfg.get("enabled", False)
         self.check_interval_seconds = auto_switch_cfg.get("check_interval_seconds", 300)
         self.min_switch_interval_seconds = auto_switch_cfg.get("min_switch_interval_seconds", 1800)
         self.persistence_threshold = auto_switch_cfg.get("persistence_threshold", 3)
-        
+
         # Market analysis config
         market_cfg = self.config.get("market_analysis", {})
-        self.adx_thresholds = market_cfg.get("adx_thresholds", {
-            "strong_trend": 40,
-            "weak_trend": 25,
-        })
-        self.volatility_thresholds = market_cfg.get("volatility_thresholds", {
-            "high_pct": 3.0,
-            "low_pct": 1.0,
-        })
-        self.volume_thresholds = market_cfg.get("volume_thresholds", {
-            "high_ratio": 1.5,
-            "low_ratio": 0.7,
-        })
-        
+        self.adx_thresholds = market_cfg.get(
+            "adx_thresholds",
+            {
+                "strong_trend": 40,
+                "weak_trend": 25,
+            },
+        )
+        self.volatility_thresholds = market_cfg.get(
+            "volatility_thresholds",
+            {
+                "high_pct": 3.0,
+                "low_pct": 1.0,
+            },
+        )
+        self.volume_thresholds = market_cfg.get(
+            "volume_thresholds",
+            {
+                "high_ratio": 1.5,
+                "low_ratio": 0.7,
+            },
+        )
+
         # BTC correlation config
         btc_cfg = self.config.get("btc_correlation", {})
         self.btc_correlation_enabled = btc_cfg.get("enabled", True)
         self.btc_lookback_bars = btc_cfg.get("lookback_bars", 100)
         self.btc_min_correlation_strong = btc_cfg.get("min_correlation_strong", 0.7)
         self.btc_min_correlation_moderate = btc_cfg.get("min_correlation_moderate", 0.5)
-        
+
         # State tracking
         self._last_check_time = 0.0
         self._last_switch_time = 0.0
@@ -114,7 +125,7 @@ class AdaptiveStrategyRouter:
         self._decision_history: List[str] = []  # Last N mode recommendations
         self._last_analysis: Optional[MarketAnalysis] = None
         self._btc_correlation_warning_keys: set[str] = set()
-        
+
         if not self.enabled:
             logger.info("[AdaptiveRouter] Auto mode switching is DISABLED in config")
         else:
@@ -144,44 +155,46 @@ class AdaptiveStrategyRouter:
         """
         Analyze market in multiple dimensions.
         Returns MarketAnalysis or None if data unavailable.
-        
+
         Requires data with OHLCV columns and sufficient history for indicators.
         """
         if data is None or len(data) < 100:
-            logger.debug(f"[AdaptiveRouter] Insufficient data for {symbol}: {len(data) if data is not None else 0} bars")
+            logger.debug(
+                f"[AdaptiveRouter] Insufficient data for {symbol}: {len(data) if data is not None else 0} bars"
+            )
             return None
-        
+
         try:
             from indicators import TechnicalIndicators
         except ImportError:
             logger.warning("[AdaptiveRouter] TechnicalIndicators import failed")
             return None
-        
+
         try:
             # Extract OHLCV
-            close = data['close']
-            high = data['high']
-            low = data['low']
-            volume = data.get('volume', None)
-            
+            close = data["close"]
+            high = data["high"]
+            low = data["low"]
+            volume = data.get("volume", None)
+
             current_price = float(close.iloc[-1])
             current_volume = float(volume.iloc[-1]) if volume is not None else 0.0
-            
+
             # Calculate indicators (use pandas Series methods)
             adx = TechnicalIndicators.calculate_adx(high, low, close, period=14)
             atr = TechnicalIndicators.calculate_atr(high, low, close, period=14)
             ema_50 = TechnicalIndicators.calculate_ema(close, period=50)
             ema_200 = TechnicalIndicators.calculate_ema(close, period=200)
-            
+
             # Latest values
             current_adx = float(adx.iloc[-1]) if not adx.empty else 25.0
             current_atr = float(atr.iloc[-1]) if not atr.empty else 0.0
             current_ema50 = float(ema_50.iloc[-1]) if not ema_50.empty else current_price
             current_ema200 = float(ema_200.iloc[-1]) if not ema_200.empty else current_price
-            
+
             # Volatility as ATR %
             volatility_pct = (current_atr / current_price * 100) if current_price > 0 else 0.0
-            
+
             # Volume ratio (current vs 20-day average)
             if volume is not None and len(volume) >= 20:
                 avg_volume_20d = float(volume.iloc[-20:].mean())
@@ -189,7 +202,7 @@ class AdaptiveStrategyRouter:
             else:
                 avg_volume_20d = current_volume
                 volume_ratio = 1.0
-            
+
             # Trend direction based on EMA
             if current_ema50 > current_ema200:
                 trend_direction = "UP"
@@ -197,10 +210,10 @@ class AdaptiveStrategyRouter:
                 trend_direction = "DOWN"
             else:
                 trend_direction = "SIDEWAYS"
-            
+
             # Trend strength from ADX
             trend_strength = current_adx
-            
+
             # BTC correlation (if enabled)
             btc_correlation = 0.0
             btc_price = 0.0
@@ -245,12 +258,10 @@ class AdaptiveStrategyRouter:
                         e,
                     )
                     btc_correlation = 0.0
-            
+
             # Classify market condition
-            market_condition = self._classify_condition(
-                trend_direction, trend_strength, volatility_pct, volume_ratio
-            )
-            
+            market_condition = self._classify_condition(trend_direction, trend_strength, volatility_pct, volume_ratio)
+
             analysis = MarketAnalysis(
                 symbol=symbol,
                 timestamp=datetime.now(),
@@ -269,11 +280,11 @@ class AdaptiveStrategyRouter:
                 current_volume=current_volume,
                 btc_price=btc_price,
             )
-            
+
             self._last_analysis = analysis
             logger.debug(f"[AdaptiveRouter] Analyzed {symbol}: {analysis}")
             return analysis
-            
+
         except Exception as e:
             logger.error(f"[AdaptiveRouter] Market analysis failed for {symbol}: {e}", exc_info=True)
             return None
@@ -336,7 +347,7 @@ class AdaptiveStrategyRouter:
         high_vol = self.volatility_thresholds["high_pct"]
         low_vol = self.volatility_thresholds["low_pct"]
         high_vol_ratio = self.volume_thresholds["high_ratio"]
-        
+
         # Classify by trend strength and direction
         if adx > strong_adx_threshold:
             if trend == "UP":
@@ -364,7 +375,7 @@ class AdaptiveStrategyRouter:
     ) -> str:
         """
         Classify market and recommend strategy mode.
-        
+
         Returns: "standard", "trend_only", "scalping", "sniper"
         """
         trend = analysis.trend_direction
@@ -372,14 +383,14 @@ class AdaptiveStrategyRouter:
         volatility = analysis.volatility_pct
         volume_ratio = analysis.volume_ratio
         condition = analysis.market_condition
-        
+
         strong_adx = self.adx_thresholds["strong_trend"]
         weak_adx = self.adx_thresholds["weak_trend"]
         high_vol = self.volatility_thresholds["high_pct"]
-        
+
         # Mode selection logic
         reasoning = ""
-        
+
         # TREND_ONLY: Strong trend detected
         if adx > strong_adx:
             if trend == "UP":
@@ -388,22 +399,22 @@ class AdaptiveStrategyRouter:
                 # Strong downtrend = high volatility opportunity but risky
                 # Could use scalping for shorts or trend_only with tight stops
                 return "trend_only"
-        
+
         # SCALPING: High volatility + high volume + no clear trend (or trending)
         if volatility > high_vol and volume_ratio > 1.3 and adx < strong_adx:
             return "scalping"
-        
+
         # SNIPER: Low volatility + weakly ranging
         if volatility < self.volatility_thresholds["low_pct"] and adx < weak_adx:
             return "sniper"
-        
+
         # STANDARD: Default multi-strategy approach
         return "standard"
 
     def should_switch_mode(self, new_mode: str) -> bool:
         """
         Check if should switch to new_mode given hysteresis constraints.
-        
+
         Returns True only if:
         1. New mode differs from current
         2. Cooldown period (min_switch_interval) has elapsed
@@ -411,9 +422,9 @@ class AdaptiveStrategyRouter:
         """
         if new_mode == self._current_mode:
             return False
-        
+
         now = time.time()
-        
+
         # Check cooldown
         if now - self._last_switch_time < self.min_switch_interval_seconds:
             elapsed = now - self._last_switch_time
@@ -423,17 +434,17 @@ class AdaptiveStrategyRouter:
                 f"Last switch {elapsed:.0f}s ago, need {remaining:.0f}s more"
             )
             return False
-        
+
         # Check persistence
         self._decision_history.append(new_mode)
         # Keep only recent history
         if len(self._decision_history) > max(self.persistence_threshold * 2, 10):
             self._decision_history = self._decision_history[-10:]
-        
+
         # Count how many recent decisions agree with new_mode
-        recent_count = self._decision_history[-self.persistence_threshold:]
+        recent_count = self._decision_history[-self.persistence_threshold :]
         agreement_count = sum(1 for decision in recent_count if decision == new_mode)
-        
+
         if agreement_count >= self.persistence_threshold:
             logger.info(
                 f"[AdaptiveRouter] Persistence check PASSED: "
@@ -450,9 +461,9 @@ class AdaptiveStrategyRouter:
     def auto_switch_mode(self, symbol: str, data: Optional[Any] = None) -> ModeDecision:
         """
         Main entry point for auto mode switching.
-        
+
         Analyzes market, classifies condition, checks hysteresis, recommends mode switch.
-        
+
         Returns ModeDecision with recommendation and switch flag.
         """
         if not self.enabled:
@@ -462,9 +473,9 @@ class AdaptiveStrategyRouter:
                 market_analysis=None,
                 should_switch=False,
             )
-        
+
         now = time.time()
-        
+
         # Skip if checked too recently
         if now - self._last_check_time < self.check_interval_seconds:
             return ModeDecision(
@@ -473,9 +484,9 @@ class AdaptiveStrategyRouter:
                 market_analysis=self._last_analysis,
                 should_switch=False,
             )
-        
+
         self._last_check_time = now
-        
+
         # Analyze market
         analysis = self.analyze_market_dimensions(symbol, "15m", data)
         if analysis is None:
@@ -485,16 +496,16 @@ class AdaptiveStrategyRouter:
                 market_analysis=None,
                 should_switch=False,
             )
-        
+
         # Get recommendation
         recommended_mode = self.classify_market_and_recommend_mode(analysis)
-        
+
         # Check if should switch
         should_switch = self.should_switch_mode(recommended_mode)
-        
+
         # Build decision
         reasoning = f"{analysis.market_condition} condition → recommending {recommended_mode}"
-        
+
         decision = ModeDecision(
             recommended_mode=recommended_mode,
             reasoning=reasoning,
@@ -503,15 +514,13 @@ class AdaptiveStrategyRouter:
             switch_reason="Hysteresis check passed" if should_switch else "Hysteresis protection active",
             confidence=min(analysis.trend_strength / 100.0, 1.0),
         )
-        
+
         # Log decision
         if should_switch:
-            logger.warning(
-                f"[AdaptiveRouter] MODE SWITCH: {self._current_mode} → {recommended_mode} | {reasoning}"
-            )
+            logger.warning(f"[AdaptiveRouter] MODE SWITCH: {self._current_mode} → {recommended_mode} | {reasoning}")
             self._last_switch_time = now
             self._current_mode = recommended_mode
         else:
             logger.debug(f"[AdaptiveRouter] {reasoning} (no switch)")
-        
+
         return decision

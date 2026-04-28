@@ -6,7 +6,6 @@ from datetime import datetime
 from typing import Any
 
 import ccxt
-
 from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, TradingMode
 from freqtrade.enums.runmode import NON_UTIL_MODES
@@ -21,7 +20,6 @@ from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import CcxtBalances, CcxtOrder, CcxtPosition, FtHas
 from freqtrade.util.datetime_helpers import dt_from_ts
-
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +112,7 @@ class Hyperliquid(Exchange):
         if self.trading_mode != TradingMode.FUTURES:
             if configured:
                 raise ConfigurationError(
-                    "HIP-3 DEXes are only supported in FUTURES trading mode. "
-                    "Please update your configuration!"
+                    "HIP-3 DEXes are only supported in FUTURES trading mode. " "Please update your configuration!"
                 )
             return
         if configured and self.margin_mode != MarginMode.ISOLATED:
@@ -194,9 +191,7 @@ class Hyperliquid(Exchange):
                 self._log_exchange_response("fetch_balance", balances, add_info="combined")
         return balances
 
-    def fetch_positions(
-        self, pair: str | None = None, params: dict | None = None
-    ) -> list[CcxtPosition]:
+    def fetch_positions(self, pair: str | None = None, params: dict | None = None) -> list[CcxtPosition]:
         """Fetch positions from default DEX and HIP-3 DEXes needed by tradable pairs."""
         positions = super().fetch_positions(pair)
         dexes = self._get_configured_hip3_dexes()
@@ -296,13 +291,9 @@ class Hyperliquid(Exchange):
         if self.trading_mode == TradingMode.FUTURES:
             return liq_price
         else:
-            raise OperationalException(
-                "Freqtrade only supports isolated futures for leverage trading"
-            )
+            raise OperationalException("Freqtrade only supports isolated futures for leverage trading")
 
-    def get_funding_fees(
-        self, pair: str, amount: float, is_short: bool, open_date: datetime
-    ) -> float:
+    def get_funding_fees(self, pair: str, amount: float, is_short: bool, open_date: datetime) -> float:
         """
         Fetch funding fees, either from the exchange (live) or calculates them
         based on funding rate/mark price history
@@ -330,24 +321,16 @@ class Hyperliquid(Exchange):
         :param order: Order response from Hyperliquid
         :return: Adjusted order response
         """
-        if (
-            order["average"] is None
-            and order["status"] in ("canceled", "closed")
-            and order["filled"] > 0
-        ):
+        if order["average"] is None and order["status"] in ("canceled", "closed") and order["filled"] > 0:
             # Hyperliquid does not fill the average price in the order response
             # Fetch trades to calculate the average price to have the actual price
             # the order was executed at
-            trades = self.get_trades_for_order(
-                order["id"], order["symbol"], since=dt_from_ts(order["timestamp"])
-            )
+            trades = self.get_trades_for_order(order["id"], order["symbol"], since=dt_from_ts(order["timestamp"]))
 
             if trades:
                 total_amount = sum(t["amount"] for t in trades)
                 order["average"] = (
-                    sum(t["price"] * t["amount"] for t in trades) / total_amount
-                    if total_amount
-                    else None
+                    sum(t["price"] * t["amount"] for t in trades) / total_amount if total_amount else None
                 )
         return order
 
@@ -359,9 +342,7 @@ class Hyperliquid(Exchange):
 
         return order
 
-    def fetch_orders(
-        self, pair: str, since: datetime, params: dict | None = None
-    ) -> list[CcxtOrder]:
+    def fetch_orders(self, pair: str, since: datetime, params: dict | None = None) -> list[CcxtOrder]:
         orders = super().fetch_orders(pair, since, params)
         for idx, order in enumerate(deepcopy(orders)):
             order2 = self._adjust_hyperliquid_order(order)

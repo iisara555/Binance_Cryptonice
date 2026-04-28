@@ -2,7 +2,6 @@ import logging
 from datetime import timedelta
 
 import ccxt
-
 from freqtrade.constants import BuySell
 from freqtrade.enums import CandleType, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import (
@@ -15,7 +14,6 @@ from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import API_RETRY_COUNT, retrier
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas
 from freqtrade.util import dt_now, dt_ts
-
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +55,7 @@ class Okx(Exchange):
 
     _ccxt_params: dict = {"options": {"brokerId": "ffb5405ad327SUDE"}}
 
-    def ohlcv_candle_limit(
-        self, timeframe: str, candle_type: CandleType, since_ms: int | None = None
-    ) -> int:
+    def ohlcv_candle_limit(self, timeframe: str, candle_type: CandleType, since_ms: int | None = None) -> int:
         """
         Exchange ohlcv candle limit
         OKX has the following behaviour:
@@ -168,9 +164,7 @@ class Okx(Exchange):
             except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
                 already_set = self.__fetch_leverage_already_set(pair, leverage, side)
                 if not already_set:
-                    raise TemporaryError(
-                        f"Could not set leverage due to {e.__class__.__name__}. Message: {e}"
-                    ) from e
+                    raise TemporaryError(f"Could not set leverage due to {e.__class__.__name__}. Message: {e}") from e
             except ccxt.BaseError as e:
                 raise OperationalException(e) from e
 
@@ -212,9 +206,7 @@ class Okx(Exchange):
         return order
 
     @retrier(retries=API_RETRY_COUNT)
-    def fetch_stoploss_order(
-        self, order_id: str, pair: str, params: dict | None = None
-    ) -> CcxtOrder:
+    def fetch_stoploss_order(self, order_id: str, pair: str, params: dict | None = None) -> CcxtOrder:
         if self._config["dry_run"]:
             return self.fetch_dry_run_order(order_id)
 
@@ -228,9 +220,7 @@ class Okx(Exchange):
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not get order due to {e.__class__.__name__}. Message: {e}"
-            ) from e
+            raise TemporaryError(f"Could not get order due to {e.__class__.__name__}. Message: {e}") from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 
@@ -254,9 +244,7 @@ class Okx(Exchange):
             except ccxt.DDoSProtection as e:
                 raise DDosProtection(e) from e
             except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-                raise TemporaryError(
-                    f"Could not get order due to {e.__class__.__name__}. Message: {e}"
-                ) from e
+                raise TemporaryError(f"Could not get order due to {e.__class__.__name__}. Message: {e}") from e
             except ccxt.BaseError as e:
                 raise OperationalException(e) from e
         raise RetryableOrderError(f"StoplossOrder not found (pair: {pair} id: {order_id}).")

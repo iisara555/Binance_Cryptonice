@@ -1,8 +1,7 @@
 from datetime import timedelta
 
-from numpy import isnan
-
 from freqtrade.constants import DECIMAL_PER_COIN_FALLBACK, DECIMALS_PER_COIN
+from numpy import isnan
 
 
 def decimals_per_coin(coin: str):
@@ -55,9 +54,7 @@ def fmt_coin(value: float, coin: str, show_coin_name=True, keep_trailing_zeros=F
     return val
 
 
-def fmt_coin2(
-    value: float, coin: str, decimals: int = 8, *, show_coin_name=True, keep_trailing_zeros=False
-) -> str:
+def fmt_coin2(value: float, coin: str, decimals: int = 8, *, show_coin_name=True, keep_trailing_zeros=False) -> str:
     """
     Format price value for this coin. Should be preferred for rate formatting
     :param value: Value to be printed

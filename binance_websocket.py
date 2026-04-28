@@ -298,9 +298,9 @@ class BinanceWebSocket:
             "reconnections": int(self._stats.get("reconnections") or 0),
             "last_error": self._stats.get("last_error"),
             "uptime_seconds": uptime,
-            "last_activity_ago": max(0.0, time.time() - float(self._last_activity_time or 0.0))
-            if self._last_activity_time
-            else None,
+            "last_activity_ago": (
+                max(0.0, time.time() - float(self._last_activity_time or 0.0)) if self._last_activity_time else None
+            ),
         }
 
     def stop(self) -> None:

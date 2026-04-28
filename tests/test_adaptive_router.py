@@ -1,11 +1,13 @@
 """Tests for Adaptive Strategy Router."""
 
 import logging
-import pytest
-import pandas as pd
-import numpy as np
 from datetime import datetime
 from unittest.mock import Mock
+
+import numpy as np
+import pandas as pd
+import pytest
+
 from strategies.adaptive_router import AdaptiveStrategyRouter, MarketAnalysis, ModeDecision
 
 
@@ -51,38 +53,40 @@ def sample_ohlcv_data():
     n_bars = 250
     base_price = 100.0
     dates = pd.date_range(start="2024-01-01", periods=n_bars, freq="1h")
-    
+
     # Create synthetic uptrend with increasing volatility
     trend = np.linspace(0, 5, n_bars)
     noise = np.random.normal(0, 0.5, n_bars)
     prices = base_price + trend + noise
-    
-    data = pd.DataFrame({
-        "timestamp": dates,
-        "open": prices + np.random.uniform(-0.5, 0, n_bars),
-        "high": prices + np.random.uniform(0, 1, n_bars),
-        "low": prices - np.random.uniform(0, 1, n_bars),
-        "close": prices,
-        "volume": np.random.uniform(100, 500, n_bars),
-    })
-    
+
+    data = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "open": prices + np.random.uniform(-0.5, 0, n_bars),
+            "high": prices + np.random.uniform(0, 1, n_bars),
+            "low": prices - np.random.uniform(0, 1, n_bars),
+            "close": prices,
+            "volume": np.random.uniform(100, 500, n_bars),
+        }
+    )
+
     # Ensure high > low and high >= close and low <= close
     data["high"] = data[["open", "high", "close"]].max(axis=1) + np.random.uniform(0, 0.5, n_bars)
     data["low"] = data[["open", "low", "close"]].min(axis=1) - np.random.uniform(0, 0.5, n_bars)
-    
+
     return data
 
 
 class TestAdaptiveRouterInitialization:
     """Test router initialization."""
-    
+
     def test_router_initialization_disabled(self):
         """Test router with auto mode switch disabled."""
         config = {"auto_mode_switch": {"enabled": False}}
         router = AdaptiveStrategyRouter(config=config)
-        
+
         assert not router.enabled
-    
+
     def test_router_initialization_enabled(self, router):
         """Test router with auto mode switch enabled."""
         assert router.enabled
@@ -90,7 +94,7 @@ class TestAdaptiveRouterInitialization:
         assert router.check_interval_seconds == 60
         assert router.min_switch_interval_seconds == 300
         assert router.persistence_threshold == 2
-    
+
     def test_current_mode_setting(self, router):
         """Test setting current mode."""
         router.set_current_mode("trend_only")
@@ -99,7 +103,7 @@ class TestAdaptiveRouterInitialization:
 
 class TestMarketAnalysis:
     """Test market dimension analysis."""
-    
+
     def test_market_analysis_creation(self):
         """Test MarketAnalysis dataclass creation."""
         now = datetime.now()
@@ -113,12 +117,12 @@ class TestMarketAnalysis:
             btc_correlation=0.75,
             market_condition="STRONG_UP",
         )
-        
+
         assert analysis.symbol == "THB_BTC"
         assert analysis.trend_direction == "UP"
         assert analysis.trend_strength == 45.0
         assert 0 <= analysis.trend_strength <= 100
-    
+
     def test_market_analysis_repr(self):
         """Test MarketAnalysis string representation."""
         analysis = MarketAnalysis(
@@ -131,7 +135,7 @@ class TestMarketAnalysis:
             btc_correlation=0.75,
             market_condition="STRONG_UP",
         )
-        
+
         repr_str = repr(analysis)
         assert "THB_BTC" in repr_str
         assert "STRONG_UP" in repr_str
@@ -139,7 +143,7 @@ class TestMarketAnalysis:
 
 class TestModeClassification:
     """Test mode classification logic."""
-    
+
     def test_strong_uptrend_recommends_trend_only(self, router):
         """Test that strong uptrend recommends TREND_ONLY mode."""
         analysis = MarketAnalysis(
@@ -152,10 +156,10 @@ class TestModeClassification:
             btc_correlation=0.0,
             market_condition="STRONG_UP",
         )
-        
+
         mode = router.classify_market_and_recommend_mode(analysis)
         assert mode == "trend_only"
-    
+
     def test_high_volatility_high_volume_recommends_scalping(self, router):
         """Test that high volatility with high volume recommends SCALPING."""
         analysis = MarketAnalysis(
@@ -168,10 +172,10 @@ class TestModeClassification:
             btc_correlation=0.0,
             market_condition="VOLATILE",
         )
-        
+
         mode = router.classify_market_and_recommend_mode(analysis)
         assert mode == "scalping"
-    
+
     def test_low_volatility_recommends_sniper(self, router):
         """Test that low volatility recommends SNIPER mode."""
         analysis = MarketAnalysis(
@@ -184,10 +188,10 @@ class TestModeClassification:
             btc_correlation=0.0,
             market_condition="RANGING",
         )
-        
+
         mode = router.classify_market_and_recommend_mode(analysis)
         assert mode == "sniper"
-    
+
     def test_default_to_standard_mode(self, router):
         """Test default fallback to STANDARD mode."""
         analysis = MarketAnalysis(
@@ -195,45 +199,45 @@ class TestModeClassification:
             timestamp=datetime.now(),
             trend_direction="UP",
             trend_strength=30.0,  # Medium ADX
-            volatility_pct=1.8,   # Medium volatility
-            volume_ratio=1.2,     # Medium volume
+            volatility_pct=1.8,  # Medium volatility
+            volume_ratio=1.2,  # Medium volume
             btc_correlation=0.0,
             market_condition="WEAK_UP",
         )
-        
+
         mode = router.classify_market_and_recommend_mode(analysis)
         assert mode == "standard"
 
 
 class TestHysteresisProtection:
     """Test hysteresis protection against rapid mode switching."""
-    
+
     def test_mode_switch_blocked_by_cooldown(self, router):
         """Test that mode switch is blocked during cooldown period."""
         router.set_current_mode("scalping")
         router._last_switch_time = 0  # Very old
-        
+
         # First two calls should be allowed (persistence threshold = 2)
         result = router.should_switch_mode("trend_only")
         assert result is False  # First call, decision history not yet persistent
-        
+
         # Second call same mode should trigger switch
         result = router.should_switch_mode("trend_only")
         assert result is True  # Now persistent
-        
+
         # Immediately after switch, cooldown should block next switch
         result = router.should_switch_mode("standard")
         assert result is False  # Blocked by cooldown
-    
+
     def test_persistence_check(self, router):
         """Test that mode change requires persistence."""
         router.set_current_mode("scalping")
         router._last_switch_time = 0  # Allow switching
-        
+
         # Single recommendation should not trigger switch
         result = router.should_switch_mode("trend_only")
         assert result is False
-        
+
         # Two recommendations should trigger switch (threshold=2)
         result = router.should_switch_mode("trend_only")
         assert result is True
@@ -241,7 +245,7 @@ class TestHysteresisProtection:
 
 class TestModeDecision:
     """Test ModeDecision structure."""
-    
+
     def test_mode_decision_structure(self):
         """Test ModeDecision dataclass."""
         decision = ModeDecision(
@@ -252,7 +256,7 @@ class TestModeDecision:
             switch_reason="Hysteresis check passed",
             confidence=0.85,
         )
-        
+
         assert decision.recommended_mode == "trend_only"
         assert decision.should_switch is True
         assert decision.confidence == 0.85
@@ -260,13 +264,13 @@ class TestModeDecision:
 
 class TestAutoSwitchMode:
     """Test main auto_switch_mode method."""
-    
+
     def test_auto_switch_disabled_returns_no_switch(self):
         """Test that disabled router returns no switch."""
         config = {"auto_mode_switch": {"enabled": False}}
         router = AdaptiveStrategyRouter(config=config)
         router.set_current_mode("scalping")
-        
+
         decision = router.auto_switch_mode("THB_BTC")
         assert decision.should_switch is False
 
@@ -296,7 +300,9 @@ class TestBtcCorrelationSeries:
         assert series == [100.5, 101.5, 102.5, 103.5, 104.5]
         api_client.get_candle.assert_called_once()
 
-    def test_analyze_market_dimensions_computes_finite_btc_correlation(self, sample_ohlcv_data, sample_config, monkeypatch):
+    def test_analyze_market_dimensions_computes_finite_btc_correlation(
+        self, sample_ohlcv_data, sample_config, monkeypatch
+    ):
         config = dict(sample_config)
         config["btc_correlation"] = {"enabled": True, "lookback_bars": 120}
 
@@ -315,10 +321,7 @@ class TestBtcCorrelationSeries:
         api_client = Mock()
         api_client.get_candle.return_value = {
             "error": 0,
-            "result": [
-                [int(i), float(v), float(v), float(v), float(v), 1000.0]
-                for i, v in enumerate(base, start=1)
-            ],
+            "result": [[int(i), float(v), float(v), float(v), float(v), 1000.0] for i, v in enumerate(base, start=1)],
         }
 
         router = AdaptiveStrategyRouter(config=config, api_client=api_client)
@@ -329,7 +332,9 @@ class TestBtcCorrelationSeries:
         assert -1.0 <= analysis.btc_correlation <= 1.0
         assert analysis.btc_price == pytest.approx(float(base[-1]))
 
-    def test_analyze_market_dimensions_warns_when_btc_correlation_unavailable(self, sample_ohlcv_data, sample_config, monkeypatch, caplog):
+    def test_analyze_market_dimensions_warns_when_btc_correlation_unavailable(
+        self, sample_ohlcv_data, sample_config, monkeypatch, caplog
+    ):
         config = dict(sample_config)
         config["btc_correlation"] = {"enabled": True, "lookback_bars": 5}
 
@@ -353,27 +358,30 @@ class TestBtcCorrelationSeries:
         assert analysis is not None
         assert analysis.btc_correlation == pytest.approx(0.0)
         assert "BTC correlation unavailable" in caplog.text
-    
+
     def test_auto_switch_insufficient_data_returns_no_switch(self, router):
         """Test that insufficient data returns no switch."""
         # Create minimal data
-        data = pd.DataFrame({
-            "open": [1, 2, 3],
-            "high": [2, 3, 4],
-            "low": [1, 2, 3],
-            "close": [1.5, 2.5, 3.5],
-            "volume": [100, 100, 100],
-        })
-        
+        data = pd.DataFrame(
+            {
+                "open": [1, 2, 3],
+                "high": [2, 3, 4],
+                "low": [1, 2, 3],
+                "close": [1.5, 2.5, 3.5],
+                "volume": [100, 100, 100],
+            }
+        )
+
         decision = router.auto_switch_mode("THB_BTC", data)
         assert decision.should_switch is False
-    
+
     def test_auto_switch_respects_check_interval(self, router):
         """Test that auto_switch respects check interval."""
         import time
+
         router.set_current_mode("scalping")
         router._last_check_time = time.time()  # Just checked
-        
+
         decision = router.auto_switch_mode("THB_BTC")
         assert decision.should_switch is False
 

@@ -10,7 +10,6 @@ from freqtrade.exchange.exchange_types import Ticker
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import format_date
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -25,8 +24,7 @@ class DelistFilter(IPairList):
             raise ConfigurationError("DelistFilter requires max_days_from_now to be >= 0")
         if not self._exchange.get_option("has_delisting"):
             raise ConfigurationError(
-                f"DelistFilter doesn't support {self._exchange.name} in "
-                f"{self._exchange.trading_mode} mode."
+                f"DelistFilter doesn't support {self._exchange.name} in " f"{self._exchange.trading_mode} mode."
             )
 
     def short_desc(self) -> str:
@@ -35,11 +33,7 @@ class DelistFilter(IPairList):
         """
         return (
             f"{self.name} - Filtering pairs that will be delisted"
-            + (
-                f" in the next {self._max_days_from_now} days"
-                if self._max_days_from_now > 0
-                else ""
-            )
+            + (f" in the next {self._max_days_from_now} days" if self._max_days_from_now > 0 else "")
             + "."
         )
 
@@ -54,9 +48,7 @@ class DelistFilter(IPairList):
                 "type": "number",
                 "default": 0,
                 "description": "Max days from now",
-                "help": (
-                    "Remove pairs that will be delisted in the next X days. Set to 0 to remove all."
-                ),
+                "help": ("Remove pairs that will be delisted in the next X days. Set to 0 to remove all."),
             },
         }
 
@@ -78,8 +70,7 @@ class DelistFilter(IPairList):
 
             if remove_pair:
                 self.log_once(
-                    f"Removed {pair} from whitelist, because it will be delisted on "
-                    f"{format_date(delist_date)}.",
+                    f"Removed {pair} from whitelist, because it will be delisted on " f"{format_date(delist_date)}.",
                     logger.info,
                 )
                 return False

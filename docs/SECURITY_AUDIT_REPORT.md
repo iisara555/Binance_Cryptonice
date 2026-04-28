@@ -11,13 +11,13 @@
 ไฟล์และระบบที่ยังอยู่ในขอบเขตจริงของ runtime ปัจจุบัน:
 
 - `main.py`
-- `trading_bot.py`
+- `trading_bot.py` และแพ็กเกจ orchestrator helpers ภายใต้ `trading/bot_runtime/`
 - `trade_executor.py`
 - `risk_management.py`
 - `api_client.py`
 - `database.py`
 - `signal_generator.py`
-- `bitkub_websocket.py`
+- adapter ราคาเรียลไทม์ (เช่น `binance_websocket.py`, `bitkub_websocket.py` ถ้ามีใน environment)
 - `portfolio_rebalancer.py`
 - `balance_monitor.py`
 - `state_management.py`

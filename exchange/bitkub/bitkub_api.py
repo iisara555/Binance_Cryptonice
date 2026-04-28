@@ -27,24 +27,22 @@ class BitkubAPI:
         self.api_key = api_key
         self.api_secret = api_secret
         self._session = requests.Session()
-        self._session.headers.update({
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        })
+        self._session.headers.update(
+            {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
 
     def _sign(self, payload: str) -> str:
         """Generate HMAC-SHA256 signature"""
-        return hmac.new(
-            self.api_secret.encode(),
-            payload.encode(),
-            hashlib.sha256
-        ).hexdigest()
+        return hmac.new(self.api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
     def _prepare_headers(self, payload: dict) -> dict:
         """Prepare headers with signature for authenticated requests"""
         payload_str = json.dumps(payload)
         signature = self._sign(payload_str)
-        
+
         return {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -72,10 +70,7 @@ class BitkubAPI:
         :param symbol: Trading pair symbol (e.g., 'THB_BTC')
         """
         params = {"sym": symbol}
-        response = self._session.get(
-            f"{self.BASE_URL}/api/v3/market/ticker",
-            params=params
-        )
+        response = self._session.get(f"{self.BASE_URL}/api/v3/market/ticker", params=params)
         response.raise_for_status()
         return response.json()
 
@@ -86,10 +81,7 @@ class BitkubAPI:
         :param limit: Order book depth (1-100)
         """
         params = {"sym": symbol, "lmt": limit}
-        response = self._session.get(
-            f"{self.BASE_URL}/api/v3/market/books",
-            params=params
-        )
+        response = self._session.get(f"{self.BASE_URL}/api/v3/market/books", params=params)
         response.raise_for_status()
         return response.json()
 
@@ -100,19 +92,12 @@ class BitkubAPI:
         :param limit: Number of recent trades
         """
         params = {"sym": symbol, "lmt": limit}
-        response = self._session.get(
-            f"{self.BASE_URL}/api/v3/market/trades",
-            params=params
-        )
+        response = self._session.get(f"{self.BASE_URL}/api/v3/market/trades", params=params)
         response.raise_for_status()
         return response.json()
 
     def get_ohlcv(
-        self,
-        symbol: str,
-        interval: str = "1H",
-        start: int | None = None,
-        end: int | None = None
+        self, symbol: str, interval: str = "1H", start: int | None = None, end: int | None = None
     ) -> dict[str, Any]:
         """
         Get OHLCV (candlestick) data
@@ -127,10 +112,7 @@ class BitkubAPI:
         if end:
             params["end"] = end
 
-        response = self._session.get(
-            f"{self.BASE_URL}/api/v3/market/ohlcv",
-            params=params
-        )
+        response = self._session.get(f"{self.BASE_URL}/api/v3/market/ohlcv", params=params)
         response.raise_for_status()
         return response.json()
 
@@ -139,16 +121,12 @@ class BitkubAPI:
     def _post_authenticated(self, endpoint: str, payload: dict) -> dict[str, Any]:
         """Make authenticated POST request"""
         headers = self._prepare_headers(payload)
-        
+
         # Add timestamp to payload
         server_time = self.get_server_time()
         payload["ts"] = server_time.get("timestamp", int(time.time() * 1000))
-        
-        response = self._session.post(
-            f"{self.BASE_URL}{endpoint}",
-            headers=headers,
-            data=json.dumps(payload)
-        )
+
+        response = self._session.post(f"{self.BASE_URL}{endpoint}", headers=headers, data=json.dumps(payload))
         response.raise_for_status()
         return response.json()
 
@@ -160,44 +138,24 @@ class BitkubAPI:
         payload: dict[str, Any] = {}
         return self._post_authenticated("/api/v3/market/balances", payload)
 
-    def place_bid(
-        self,
-        symbol: str,
-        amount: float,
-        price: float
-    ) -> dict[str, Any]:
+    def place_bid(self, symbol: str, amount: float, price: float) -> dict[str, Any]:
         """
         Place a buy order (bid)
         :param symbol: Trading pair symbol (e.g., 'THB_BTC')
         :param amount: Amount to buy
         :param price: Price per unit
         """
-        payload = {
-            "sym": symbol,
-            "amt": amount,
-            "rat": price,
-            "typ": "limit"  # Only limit orders supported
-        }
+        payload = {"sym": symbol, "amt": amount, "rat": price, "typ": "limit"}  # Only limit orders supported
         return self._post_authenticated("/api/v3/market/place-bid", payload)
 
-    def place_ask(
-        self,
-        symbol: str,
-        amount: float,
-        price: float
-    ) -> dict[str, Any]:
+    def place_ask(self, symbol: str, amount: float, price: float) -> dict[str, Any]:
         """
         Place a sell order (ask)
         :param symbol: Trading pair symbol (e.g., 'THB_BTC')
         :param amount: Amount to sell
         :param price: Price per unit
         """
-        payload = {
-            "sym": symbol,
-            "amt": amount,
-            "rat": price,
-            "typ": "limit"  # Only limit orders supported
-        }
+        payload = {"sym": symbol, "amt": amount, "rat": price, "typ": "limit"}  # Only limit orders supported
         return self._post_authenticated("/api/v3/market/place-ask", payload)
 
     def cancel_order(self, order_id: int, symbol: str, side: str) -> dict[str, Any]:
@@ -207,11 +165,7 @@ class BitkubAPI:
         :param symbol: Trading pair symbol
         :param side: Order side ('BUY' or 'SELL')
         """
-        payload = {
-            "sym": symbol,
-            "id": order_id,
-            "sd": side
-        }
+        payload = {"sym": symbol, "id": order_id, "sd": side}
         return self._post_authenticated("/api/v3/market/cancel-order", payload)
 
     def get_open_orders(self, symbol: str) -> dict[str, Any]:

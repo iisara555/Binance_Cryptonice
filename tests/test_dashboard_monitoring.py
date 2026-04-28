@@ -1,7 +1,7 @@
 import logging
 import socket
-from urllib.request import urlopen
 from unittest.mock import Mock
+from urllib.request import urlopen
 
 from health_server import BotHealthServer
 from monitoring import MonitoringService, ReconciliationState

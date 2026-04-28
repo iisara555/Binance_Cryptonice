@@ -9,18 +9,9 @@ from typing import Any, Dict, List, Optional
 from helpers import extract_base_asset, normalize_side_value
 from state_management import TradeLifecycleState
 from trade_executor import OrderSide
-
+from trading.coercion import coerce_trade_float as _coerce_trade_float
 
 logger = logging.getLogger(__name__)
-
-
-def _coerce_trade_float(val: Any, default: float = 0.0) -> float:
-    if val is None:
-        return default
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return default
 
 
 class StartupRuntimeHelper:
@@ -39,9 +30,7 @@ class StartupRuntimeHelper:
             balances = {}
 
         tracked_open_orders = {
-            str(order.get("symbol", "")).upper()
-            for order in self.bot.executor.get_open_orders()
-            if order.get("symbol")
+            str(order.get("symbol", "")).upper() for order in self.bot.executor.get_open_orders() if order.get("symbol")
         }
         backfilled: list[str] = []
 
@@ -80,9 +69,7 @@ class StartupRuntimeHelper:
                 return []
 
         tracked_symbols = {
-            str(order.get("symbol", "")).upper()
-            for order in self.bot.executor.get_open_orders()
-            if order.get("symbol")
+            str(order.get("symbol", "")).upper() for order in self.bot.executor.get_open_orders() if order.get("symbol")
         }
 
         from helpers import parse_ticker_last
@@ -212,7 +199,9 @@ class StartupRuntimeHelper:
                         fallback_cost=snapshot.total_entry_cost,
                     )
                     if filled_amount <= 0 or filled_price <= 0:
-                        logger.warning("[Reconcile] Filled BUY for %s detected but amount/price unresolved", snapshot.symbol)
+                        logger.warning(
+                            "[Reconcile] Filled BUY for %s detected but amount/price unresolved", snapshot.symbol
+                        )
                         continue
                     self.bot._register_filled_position_from_state(snapshot, filled_amount, filled_price)
                     state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
@@ -240,7 +229,9 @@ class StartupRuntimeHelper:
                         exit_price or snapshot.exit_price or snapshot.entry_price,
                         "reconcile",
                     )
-                    logger.info("[Reconcile] Pending SELL %s filled while offline -> closed trade logged", snapshot.symbol)
+                    logger.info(
+                        "[Reconcile] Pending SELL %s filled while offline -> closed trade logged", snapshot.symbol
+                    )
                 handled_order_ids.add(tracked_order_id)
                 continue
 
@@ -267,7 +258,9 @@ class StartupRuntimeHelper:
                     }
                     self.bot.executor.register_tracked_position(snapshot.entry_order_id, restore_position)
                     state_manager.restore_in_position(snapshot.symbol, "sell cancelled during downtime")
-                    logger.info("[Reconcile] Pending SELL %s cancelled while offline -> restored in_position", snapshot.symbol)
+                    logger.info(
+                        "[Reconcile] Pending SELL %s cancelled while offline -> restored in_position", snapshot.symbol
+                    )
                 handled_order_ids.add(tracked_order_id)
 
         return handled_order_ids
@@ -396,7 +389,11 @@ class StartupRuntimeHelper:
                         "timestamp": datetime.now(),
                         "is_partial_fill": ghost["remaining"] < ghost["amount"],
                         "remaining_amount": ghost["remaining"],
-                        "total_entry_cost": ghost["amount"] if ghost["side"] == OrderSide.BUY else ghost["entry_price"] * ghost["amount"],
+                        "total_entry_cost": (
+                            ghost["amount"]
+                            if ghost["side"] == OrderSide.BUY
+                            else ghost["entry_price"] * ghost["amount"]
+                        ),
                         "filled": ghost["remaining"] < ghost["amount"],
                     }
                 try:
@@ -419,7 +416,9 @@ class StartupRuntimeHelper:
                 )
                 logger.warning("[Reconcile] Ghost orders skipped by sanity check: %s", summary)
 
-            override = getattr(getattr(self.bot, "__dict__", {}), "get", lambda *_args, **_kwargs: None)("_reconcile_pending_trade_states")
+            override = getattr(getattr(self.bot, "__dict__", {}), "get", lambda *_args, **_kwargs: None)(
+                "_reconcile_pending_trade_states"
+            )
             if callable(override):
                 handled_order_ids = override(remote_order_ids)
             else:
@@ -464,8 +463,10 @@ class StartupRuntimeHelper:
                                 fallback_cost = _coerce_trade_float(local_pos.get("total_entry_cost"))
                                 filled_amount, filled_price = self.bot._extract_history_fill_details(
                                     matched,
-                                    fallback_amount=_coerce_trade_float(local_pos.get("filled_amount")) or _coerce_trade_float(local_pos.get("amount")),
-                                    fallback_price=_coerce_trade_float(local_pos.get("filled_price")) or _coerce_trade_float(local_pos.get("entry_price")),
+                                    fallback_amount=_coerce_trade_float(local_pos.get("filled_amount"))
+                                    or _coerce_trade_float(local_pos.get("amount")),
+                                    fallback_price=_coerce_trade_float(local_pos.get("filled_price"))
+                                    or _coerce_trade_float(local_pos.get("entry_price")),
                                     fallback_cost=fallback_cost,
                                 )
                                 if filled_amount > 0 and filled_price > 0:
@@ -500,14 +501,19 @@ class StartupRuntimeHelper:
                                         filled_price,
                                     )
                                 else:
-                                    logger.warning("[Reconcile] Filled BUY %s unresolved; leaving local tracking unchanged", missing_oid)
+                                    logger.warning(
+                                        "[Reconcile] Filled BUY %s unresolved; leaving local tracking unchanged",
+                                        missing_oid,
+                                    )
                             else:
                                 with self.bot.executor._orders_lock:
                                     self.bot.executor._open_orders.pop(missing_oid, None)
                                 try:
                                     self.bot.db.delete_position(missing_oid)
                                 except Exception as exc:
-                                    logger.warning("[Reconcile] Failed to delete DB position %s after fill: %s", missing_oid, exc)
+                                    logger.warning(
+                                        "[Reconcile] Failed to delete DB position %s after fill: %s", missing_oid, exc
+                                    )
                         elif self.bot._history_status_is_cancelled(matched):
                             logger.info(
                                 "🗑️ [Reconcile] Order %s was CANCELLED on exchange. Removing from local tracking",
@@ -518,7 +524,9 @@ class StartupRuntimeHelper:
                             try:
                                 self.bot.db.delete_position(missing_oid)
                             except Exception as exc:
-                                logger.warning("[Reconcile] Failed to delete cancelled DB position %s: %s", missing_oid, exc)
+                                logger.warning(
+                                    "[Reconcile] Failed to delete cancelled DB position %s: %s", missing_oid, exc
+                                )
                         else:
                             logger.warning(
                                 "[Reconcile] Order %s has unusual status '%s' — keeping in local tracking for now",

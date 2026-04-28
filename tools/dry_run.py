@@ -1,4 +1,5 @@
 """Dry Run: Simulate Rebalance Logic"""
+
 import os
 import sys
 from pathlib import Path
@@ -8,19 +9,19 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 os.chdir(PROJECT_ROOT)
 
-import yaml
 import numpy as np
+import yaml
 
 print("=" * 60)
 print("DRY RUN - REBALANCE SIMULATION")
 print("=" * 60)
 
 # Load config
-with open('bot_config.yaml', 'r', encoding='utf-8') as f:
+with open("bot_config.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
-target = config.get('rebalance', {}).get('target_allocation', {})
-min_trade = config.get('rebalance', {}).get('min_trade_value', 10.0)
+target = config.get("rebalance", {}).get("target_allocation", {})
+min_trade = config.get("rebalance", {}).get("min_trade_value", 10.0)
 min_order = 15.0  # MIN_ORDER_THB from trade_executor
 
 print(f"\n[CONFIG]")
@@ -30,13 +31,13 @@ print(f"Min order (safety): {min_order} THB")
 
 # Simulate portfolio
 btc_price = 2200000  # ~2.2M THB
-doge_price = 3.02     # THB
+doge_price = 3.02  # THB
 total_value = 500.0
 
 portfolio = {
-    'THB': 250.0,
-    'BTC': 0.000112,
-    'DOGE': 0,
+    "THB": 250.0,
+    "BTC": 0.000112,
+    "DOGE": 0,
 }
 
 print(f"\n[PORTFOLIO]")
@@ -53,8 +54,8 @@ print(f"BTC target (50%): {target_btc:.2f} THB")
 print(f"DOGE target (50%): {target_doge:.2f} THB")
 
 # Calculate imbalances
-btc_current = portfolio['BTC'] * btc_price
-doge_current = portfolio['DOGE'] * doge_price
+btc_current = portfolio["BTC"] * btc_price
+doge_current = portfolio["DOGE"] * doge_price
 
 btc_diff = target_btc - btc_current  # positive = need to buy
 doge_diff = target_doge - doge_current  # positive = need to buy
@@ -72,7 +73,7 @@ if abs(btc_diff) > min_trade:
     btc_qty = btc_diff / btc_price
     btc_val = abs(btc_diff)
     if btc_val >= min_order:
-        orders.append(('BUY', 'BTC', btc_qty, btc_val, '✅ PASS'))
+        orders.append(("BUY", "BTC", btc_qty, btc_val, "✅ PASS"))
         print(f"BUY BTC: qty={btc_qty:.8f}, value={btc_val:.2f} THB [✅ PASS]")
     else:
         print(f"BUY BTC: qty={btc_qty:.8f}, value={btc_val:.2f} THB [❌ SKIP - below {min_order} THB minimum]")
@@ -84,7 +85,7 @@ if abs(doge_diff) > min_trade:
     doge_qty = doge_diff / doge_price
     doge_val = abs(doge_diff)
     if doge_val >= min_order:
-        orders.append(('BUY', 'DOGE', doge_qty, doge_val, '✅ PASS'))
+        orders.append(("BUY", "DOGE", doge_qty, doge_val, "✅ PASS"))
         print(f"BUY DOGE: qty={doge_qty:.4f}, value={doge_val:.2f} THB [✅ PASS]")
     else:
         print(f"BUY DOGE: qty={doge_qty:.4f}, value={doge_val:.2f} THB [❌ SKIP - below {min_order} THB minimum]")

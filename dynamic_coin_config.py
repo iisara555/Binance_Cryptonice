@@ -288,43 +288,39 @@ class JsonCoinWhitelistRepository:
             warnings.append(f"assets[{index}] ignored: expected object or string, got {type(raw_entry).__name__}")
             return None, warnings
 
-        warnings.extend(self._collect_unknown_keys(raw_entry, ENTRY_SCHEMA_KEYS, f"assets[{index}]") )
+        warnings.extend(self._collect_unknown_keys(raw_entry, ENTRY_SCHEMA_KEYS, f"assets[{index}]"))
 
-        symbol = _normalize_asset(
-            raw_entry.get("symbol")
-            or raw_entry.get("asset")
-            or raw_entry.get("pair")
-        )
+        symbol = _normalize_asset(raw_entry.get("symbol") or raw_entry.get("asset") or raw_entry.get("pair"))
         if not symbol or symbol in LEGACY_QUOTE_ASSETS or symbol == DEFAULT_QUOTE_ASSET:
             warnings.append(f"assets[{index}] ignored: symbol is missing or invalid")
             return None, warnings
 
-        return CoinWhitelistEntry(
-            symbol=symbol,
-            enabled=_coerce_bool(raw_entry.get("enabled"), True),
-            min_asset_balance=max(0.0, _coerce_float(raw_entry.get("min_asset_balance"), 0.0)),
-            min_quote_balance_thb=(
-                max(0.0, _coerce_float(raw_entry.get("min_quote_balance_thb"), 0.0))
-                if raw_entry.get("min_quote_balance_thb") is not None
-                else None
+        return (
+            CoinWhitelistEntry(
+                symbol=symbol,
+                enabled=_coerce_bool(raw_entry.get("enabled"), True),
+                min_asset_balance=max(0.0, _coerce_float(raw_entry.get("min_asset_balance"), 0.0)),
+                min_quote_balance_thb=(
+                    max(0.0, _coerce_float(raw_entry.get("min_quote_balance_thb"), 0.0))
+                    if raw_entry.get("min_quote_balance_thb") is not None
+                    else None
+                ),
+                include_if_held=(
+                    _coerce_bool(raw_entry.get("include_if_held"), True)
+                    if raw_entry.get("include_if_held") is not None
+                    else None
+                ),
+                require_supported_market=(
+                    _coerce_bool(raw_entry.get("require_supported_market"), True)
+                    if raw_entry.get("require_supported_market") is not None
+                    else None
+                ),
             ),
-            include_if_held=(
-                _coerce_bool(raw_entry.get("include_if_held"), True)
-                if raw_entry.get("include_if_held") is not None
-                else None
-            ),
-            require_supported_market=(
-                _coerce_bool(raw_entry.get("require_supported_market"), True)
-                if raw_entry.get("require_supported_market") is not None
-                else None
-            ),
-        ), warnings
+            warnings,
+        )
 
     def _collect_unknown_keys(self, raw: Dict[str, Any], allowed_keys: set[str], scope: str) -> List[str]:
-        return [
-            f"{scope}: unknown key '{key}'"
-            for key in sorted(set(raw.keys()) - allowed_keys)
-        ]
+        return [f"{scope}: unknown key '{key}'" for key in sorted(set(raw.keys()) - allowed_keys)]
 
     def _default_config(self, path: Path, source_kind: str) -> HybridDynamicCoinConfig:
         return HybridDynamicCoinConfig(
@@ -420,15 +416,11 @@ class HybridDynamicPairResolver:
         config: HybridDynamicCoinConfig,
     ) -> bool:
         required_quote = (
-            entry.min_quote_balance_thb
-            if entry.min_quote_balance_thb is not None
-            else config.min_quote_balance_thb
+            entry.min_quote_balance_thb if entry.min_quote_balance_thb is not None else config.min_quote_balance_thb
         )
         asset_balance = self._extract_total_balance(balances, entry.symbol)
         include_if_held = (
-            entry.include_if_held
-            if entry.include_if_held is not None
-            else config.include_assets_with_balance
+            entry.include_if_held if entry.include_if_held is not None else config.include_assets_with_balance
         )
         has_asset_balance = include_if_held and asset_balance > entry.min_asset_balance
         has_quote_balance = quote_balance >= required_quote if required_quote > 0 else quote_balance > 0

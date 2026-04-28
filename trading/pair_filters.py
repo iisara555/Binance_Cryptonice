@@ -45,7 +45,5 @@ def filter_pairs_by_min_quote_volume(
             kept.append(raw)
         else:
             bs = getattr(client, "_to_binance_symbol", lambda x: x)(raw)
-            warnings.append(
-                f"{raw} ({bs}): quote_volume_24h={qv:.2f} below min {floor:.2f} — excluded"
-            )
+            warnings.append(f"{raw} ({bs}): quote_volume_24h={qv:.2f} below min {floor:.2f} — excluded")
     return kept, warnings

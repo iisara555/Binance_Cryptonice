@@ -2,9 +2,11 @@
 
 Use this checklist before enabling live trading on a VPS.
 
+Documentation index (this repo): [docs/README.md](README.md)
+
 ## 1. Files And Runtime
 
-- Confirm the root `.env` exists and contains real `BITKUB_API_KEY` and `BITKUB_API_SECRET` values.
+- Confirm the root `.env` exists and contains real `BINANCE_API_KEY` and `BINANCE_API_SECRET` values (see [.env.example](../.env.example)).
 - Confirm `bot_config.yaml` exists and the `monitoring.health_check_port` / `monitoring.health_check_path` values match the port you intend to probe from the VPS.
 - Confirm the SQLite database path exists locally on the VPS. By default this is `crypto_bot.db`, or `SQLITE_DB_PATH` if you override it.
 - Install root requirements into the runtime Python environment.
@@ -13,7 +15,7 @@ Use this checklist before enabling live trading on a VPS.
 
 - Keep the bot health endpoint private when possible.
 - Probe the bot health server on `monitoring.health_check_port` only from trusted networks or a private load balancer.
-- Add the VPS public IP to the Bitkub API allowlist before attempting live mode.
+- Add the VPS public IP (or egress IP your exchange expects) to the exchange API allowlist / key restrictions before attempting live mode.
 
 ## 3. Start Order
 

@@ -14,7 +14,6 @@ from freqtrade.exchange import Exchange, market_is_active
 from freqtrade.exchange.exchange_types import Ticker, Tickers
 from freqtrade.mixins import LoggingMixin
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -180,8 +179,7 @@ class IPairList(LoggingMixin, ABC):
         :return: List of pairs
         """
         raise OperationalException(
-            "This Pairlist Handler should not be used "
-            "at the first position in the list of Pairlist Handlers."
+            "This Pairlist Handler should not be used " "at the first position in the list of Pairlist Handlers."
         )
 
     def filter_pairlist(self, pairlist: list[str], tickers: Tickers) -> list[str]:
@@ -217,9 +215,7 @@ class IPairList(LoggingMixin, ABC):
         """
         return self._pairlistmanager.verify_blacklist(pairlist, logmethod)
 
-    def verify_whitelist(
-        self, pairlist: list[str], logmethod, keep_invalid: bool = False
-    ) -> list[str]:
+    def verify_whitelist(self, pairlist: list[str], logmethod, keep_invalid: bool = False) -> list[str]:
         """
         Proxy method to verify_whitelist for easy access for child classes.
         :param pairlist: Pairlist to validate
@@ -238,9 +234,7 @@ class IPairList(LoggingMixin, ABC):
         """
         markets = self._exchange.markets
         if not markets:
-            raise OperationalException(
-                "Markets not loaded. Make sure that exchange is initialized correctly."
-            )
+            raise OperationalException("Markets not loaded. Make sure that exchange is initialized correctly.")
 
         sanitized_whitelist: list[str] = []
         for pair in pairlist:

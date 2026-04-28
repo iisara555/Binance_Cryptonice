@@ -75,7 +75,8 @@ data:
 
 ไฟล์ที่เกี่ยวข้อง:
 
-- `trading_bot.py`
+- `trading_bot.py` (`TradingBotOrchestrator`) และแพ็กเกจ [`trading/bot_runtime/`](../trading/bot_runtime/) (เช่น `run_iteration_runtime` — กรองคู่จาก `held_coins_only`)
+- `trading/signal_runtime.py` — guard BUY เมื่อ `held_coins_only` และประวัติการถือเหรียญ
 - `trade_executor.py`
 
 บทบาท:
@@ -132,18 +133,21 @@ Invoke-RestMethod http://127.0.0.1:8080/health
 
 - held-coins intent ไม่ได้มาจากจุดเดียว แต่เกิดจากผลรวมของ config, runtime pair resolution, และ execution guards
 - ถ้าจะใช้งานแบบ conservative จริง ควร review ทั้ง `coin_whitelist.json`, `bot_config.yaml`, Rich terminal และ logs พร้อมกัน
-- อย่าใช้เอกสาร snapshot รุ่นเก่าที่อ้าง line numbers เป็นแหล่ง truth หลัก เพราะ codebase มีการ refactor ต่อเนื่อง
+- อย่าใช้เอกสาร snapshot รุ่นเก่าที่อ้างเลขบรรทัดโค้ดเป็นแหล่ง truth เดียว เพราะมีการ refactor — อ้างจากชื่อไฟล์และฟังก์ชัน ดูภาพรวมใน [docs/README.md](README.md) และ [ADR-001](ADR-001-domain-boundaries-and-dependencies.md)
 ✓ **Rebalancing still works**  
 
 ---
 
 ## Summary of Changes
 
-| File | Type | Lines | Impact |
-|------|------|-------|--------|
-| portfolio_rebalancer.py | Guard + Logging | 1031-1090, 1874-1884 | Rebalancer safety |
-| trading_bot.py | Guard (2x) | 1129-1141, 1708-1717 | Trade safety |
-| **Total** | **2 files** | **~40 lines** | **Portfolio protected** |
+| เขตโค้ด | ประเภท | หมายเหตุ |
+|---------|--------|-----------|
+| `trading/signal_runtime.py` | BUY + `held_coins_only` | Execution-plan path — ปฏิเสธ BUY ในคู่ที่ไม่เคย held (ดู log `[Portfolio Guard]`) |
+| `trading/bot_runtime/run_iteration_runtime.py` | กรองรายการคู่ก่อนวน `process_pair_iteration` | ข้ามคู่ที่ไม่เคย held เมื่อ guard เปิด |
+| `trading/startup_runtime.py` | bootstrap ประวัติ held | Backfill / log ที่เกี่ยวกับ held-coin history |
+| `portfolio_rebalancer.py` | Rebalancer scope | ปรับสมดุลตาม intent พอร์ต |
+
+หมายเลขบรรทัดเก่าที่ระบุไว้ใน snapshot เดิมของเอกสารนี้อาจเปลี่ยนหลัง refactor — อ้างอิงตามชื่อไฟล์และฟังก์ชันข้างต้น
 
 ---
 

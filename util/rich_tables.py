@@ -1,12 +1,10 @@
 from collections.abc import Sequence
 from typing import Any, TypeAlias
 
+from freqtrade.loggers.rich_console import get_rich_console
 from pandas import DataFrame
 from rich.table import Column, Table
 from rich.text import Text
-
-from freqtrade.loggers.rich_console import get_rich_console
-
 
 TextOrString: TypeAlias = str | Text
 
@@ -27,12 +25,7 @@ def print_rich_table(
 
     for row in tabular_data:
         if isinstance(row, dict):
-            table.add_row(
-                *[
-                    row[header] if isinstance(row[header], Text) else str(row[header])
-                    for header in headers
-                ]
-            )
+            table.add_row(*[row[header] if isinstance(row[header], Text) else str(row[header]) for header in headers])
 
         else:
             row_to_add: list[str | Text] = [r if isinstance(r, Text) else str(r) for r in row]

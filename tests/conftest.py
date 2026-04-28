@@ -2,10 +2,11 @@
 Pytest configuration for crypto bot tests.
 """
 
-import pytest
-import sys
-import os
 import logging
+import os
+import sys
+
+import pytest
 
 # Ensure the project root is in the path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -16,18 +17,10 @@ if project_root not in sys.path:
 def pytest_configure(config):
     """Configure pytest settings."""
     # Add custom markers
-    config.addinivalue_line(
-        "markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')"
-    )
-    config.addinivalue_line(
-        "markers", "integration: marks tests as integration tests"
-    )
-    config.addinivalue_line(
-        "markers", "unit: marks tests as unit tests"
-    )
-    config.addinivalue_line(
-        "markers", "api: marks tests that require API calls"
-    )
+    config.addinivalue_line("markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')")
+    config.addinivalue_line("markers", "integration: marks tests as integration tests")
+    config.addinivalue_line("markers", "unit: marks tests as unit tests")
+    config.addinivalue_line("markers", "api: marks tests that require API calls")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -35,7 +28,7 @@ def setup_logging():
     """Configure logging for tests."""
     logging.basicConfig(
         level=logging.WARNING,  # Reduce noise during tests
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
 
@@ -63,11 +56,11 @@ def pytest_collection_modifyitems(config, items):
         # Add unit marker to all strategy tests
         if "test_strategies" in str(item.fspath):
             item.add_marker(pytest.mark.unit)
-        
+
         # Add integration marker to integration tests
         if "integration" in item.nodeid.lower():
             item.add_marker(pytest.mark.integration)
-        
+
         # Add slow marker to performance tests
         if "performance" in item.nodeid.lower():
             item.add_marker(pytest.mark.slow)

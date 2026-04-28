@@ -18,7 +18,6 @@ from ccxt import (
     TRUNCATE,
     decimal_to_precision,
 )
-
 from freqtrade.exchange.common import (
     BAD_EXCHANGES,
     EXCHANGE_HAS_OPTIONAL,
@@ -30,7 +29,6 @@ from freqtrade.exchange.common import (
 from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_minutes, timeframe_to_prev_date
 from freqtrade.ft_types import TradeModeType, ValidExchangesType
 from freqtrade.util import FtPrecise
-
 
 CcxtModuleType = Any
 
@@ -64,8 +62,7 @@ def _exchange_has_helper(ex_mod: ccxt.Exchange, required: dict[str, list[str]]) 
     return [
         k
         for k, v in required.items()
-        if ex_mod.has.get(k) is not True
-        and (len(v) == 0 or not (all(ex_mod.has.get(x) for x in v)))
+        if ex_mod.has.get(k) is not True and (len(v) == 0 or not (all(ex_mod.has.get(x) for x in v)))
     ]
 
 
@@ -107,9 +104,7 @@ def validate_exchange(exchange: str) -> tuple[bool, str, str, ccxt.Exchange | No
     return result, "; ".join(reasons), reasons_fut, ex_mod
 
 
-def _build_exchange_list_entry(
-    exchange_name: str, exchangeClasses: dict[str, Any]
-) -> ValidExchangesType:
+def _build_exchange_list_entry(exchange_name: str, exchangeClasses: dict[str, Any]) -> ValidExchangesType:
     exchange_name = exchange_name.lower()
     valid, comment, comment_fut, ex_mod = validate_exchange(exchange_name)
     mapped_exchange_name = MAP_EXCHANGE_CHILDCLASS.get(exchange_name, exchange_name).lower()
@@ -123,9 +118,7 @@ def _build_exchange_list_entry(
         "comment_futures": comment_fut,
         "dex": getattr(ex_mod, "dex", False),
         "is_alias": is_alias,
-        "alias_for": inspect.getmro(ex_mod.__class__)[1]().id
-        if getattr(ex_mod, "alias", False)
-        else None,
+        "alias_for": inspect.getmro(ex_mod.__class__)[1]().id if getattr(ex_mod, "alias", False) else None,
         "trade_modes": [{"trading_mode": "spot", "margin_mode": ""}],
     }
     if resolved := exchangeClasses.get(mapped_exchange_name):
@@ -151,9 +144,7 @@ def list_available_exchanges(all_exchanges: bool) -> list[ValidExchangesType]:
 
     subclassed = {e["name"].lower(): e for e in ExchangeResolver.search_all_objects({}, False)}
 
-    exchanges_valid: list[ValidExchangesType] = [
-        _build_exchange_list_entry(e, subclassed) for e in exchanges
-    ]
+    exchanges_valid: list[ValidExchangesType] = [_build_exchange_list_entry(e, subclassed) for e in exchanges]
 
     return exchanges_valid
 
@@ -212,9 +203,7 @@ def contracts_to_amount(num_contracts: float, contract_size: float | None) -> fl
         return num_contracts
 
 
-def amount_to_precision(
-    amount: float, amount_precision: float | None, precisionMode: int | None
-) -> float:
+def amount_to_precision(amount: float, amount_precision: float | None, precisionMode: int | None) -> float:
     """
     Returns the amount to buy or sell to a precision the Exchange accepts
     Re-implementation of ccxt internal methods - ensuring we can test the result is correct
@@ -295,9 +284,7 @@ def __price_to_precision_significant_digits(
         precise = f"{res:f}"
     else:
         precise = "{:f}".format(
-            dec.quantize(
-                sigfig, rounding=dec_ROUND_DOWN if rounding_mode == ROUND_DOWN else dec_ROUND_UP
-            )
+            dec.quantize(sigfig, rounding=dec_ROUND_DOWN if rounding_mode == ROUND_DOWN else dec_ROUND_UP)
         )
     return float(precise)
 
@@ -331,9 +318,7 @@ def price_to_precision(
                 decimal_to_precision(
                     price,
                     rounding_mode,  # rounding mode
-                    int(price_precision)
-                    if precisionMode != TICK_SIZE
-                    else price_precision,  # numPrecisionDigits
+                    int(price_precision) if precisionMode != TICK_SIZE else price_precision,  # numPrecisionDigits
                     precisionMode,  # counting_mode
                 )
             )
@@ -360,9 +345,7 @@ def price_to_precision(
             raise ValueError(f"Unknown rounding_mode {rounding_mode}")
         elif precisionMode == SIGNIFICANT_DIGITS:
             if rounding_mode in (ROUND_UP, ROUND_DOWN):
-                return __price_to_precision_significant_digits(
-                    price, price_precision, rounding_mode=rounding_mode
-                )
+                return __price_to_precision_significant_digits(price, price_precision, rounding_mode=rounding_mode)
 
         raise ValueError(f"Unknown precisionMode {precisionMode}")
     return price

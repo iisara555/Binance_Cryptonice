@@ -8,7 +8,6 @@ from typing import Any, TypeVar, cast, overload
 from freqtrade.exceptions import DDosProtection, RetryableOrderError, TemporaryError
 from freqtrade.mixins import LoggingMixin
 
-
 logger = logging.getLogger(__name__)
 __logging_mixin = None
 

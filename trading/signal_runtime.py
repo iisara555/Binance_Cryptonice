@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
-from signal_generator import AggregatedSignal
 from helpers import extract_base_asset
+from signal_generator import AggregatedSignal
 from state_management import TradeLifecycleState
 from strategy_base import detect_market_condition
 from trade_executor import ExecutionPlan, OrderSide
 from trading.orchestrator import BotMode, TradeDecision
-
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,9 @@ class MultiTimeframeRuntimeDeps:
     database: Any
     last_mtf_status: Dict[str, Dict[str, Any]]
     serialize_mtf_signals_detail: Callable[[Any], Dict[str, Dict[str, Any]]]
-    merge_mtf_signals_detail: Callable[[Optional[Dict[str, Dict[str, Any]]], Optional[Dict[str, Dict[str, Any]]]], Dict[str, Dict[str, Any]]]
+    merge_mtf_signals_detail: Callable[
+        [Optional[Dict[str, Dict[str, Any]]], Optional[Dict[str, Dict[str, Any]]]], Dict[str, Dict[str, Any]]
+    ]
     mtf_confirmation_required: bool
 
 
@@ -138,11 +139,7 @@ class SignalRuntimeHelper:
             open_count = len(deps.state_manager.list_active_states())
         else:
             open_count = len(portfolio.get("positions", []))
-        daily_count = (
-            deps.risk_manager.trade_count_today
-            if deps.risk_manager is not None
-            else len(deps.executed_today)
-        )
+        daily_count = deps.risk_manager.trade_count_today if deps.risk_manager is not None else len(deps.executed_today)
         deps.signal_generator.sync_state(
             open_positions_count=open_count,
             daily_trades_count=daily_count,
@@ -188,7 +185,11 @@ class SignalRuntimeHelper:
         for signal in signals:
             try:
                 if isinstance(signal, AggregatedSignal):
-                    sig_type = signal.signal_type.value.upper() if hasattr(signal.signal_type, "value") else str(signal.signal_type).upper()
+                    sig_type = (
+                        signal.signal_type.value.upper()
+                        if hasattr(signal.signal_type, "value")
+                        else str(signal.signal_type).upper()
+                    )
                     strategy_names = ",".join(sorted(signal.strategy_votes.keys())) if signal.strategy_votes else ""
                     deps.database.insert_signal(
                         pair=signal.symbol,
@@ -206,7 +207,11 @@ class SignalRuntimeHelper:
 
             portfolio = deps.get_portfolio_state()
 
-            signal_type = signal.signal_type.value.lower() if hasattr(signal.signal_type, "value") else str(signal.signal_type).lower()
+            signal_type = (
+                signal.signal_type.value.lower()
+                if hasattr(signal.signal_type, "value")
+                else str(signal.signal_type).lower()
+            )
             if signal_type == "buy" and not deps.is_entry_signal_confirmed(data, signal_type, strategy_mode):
                 logger.debug(
                     "[ConfirmationGate] %s BUY signal pending confirmation for mode=%s",
@@ -290,7 +295,9 @@ class SignalRuntimeHelper:
     def serialize_mtf_signals_detail(mtf_result: Any) -> Dict[str, Dict[str, Any]]:
         details: Dict[str, Dict[str, Any]] = {}
         for timeframe, tf_signal in (getattr(mtf_result, "signals", {}) or {}).items():
-            signal_type = getattr(getattr(tf_signal, "signal_type", None), "value", getattr(tf_signal, "signal_type", None))
+            signal_type = getattr(
+                getattr(tf_signal, "signal_type", None), "value", getattr(tf_signal, "signal_type", None)
+            )
             indicators = getattr(tf_signal, "indicators", {}) or {}
             details[str(timeframe)] = {
                 "type": str(signal_type or "HOLD").upper(),
@@ -374,7 +381,11 @@ class SignalRuntimeHelper:
             "signals_detail": deps.serialize_mtf_signals_detail(mtf_result),
             "trend_alignment": float(getattr(mtf_result, "trend_alignment", 0.0) or 0.0),
             "consensus_strength": float(getattr(mtf_result, "consensus_strength", 0.0) or 0.0),
-            "higher_timeframe_trend": getattr(getattr(mtf_result, "higher_timeframe_trend", None), "value", getattr(mtf_result, "higher_timeframe_trend", None)),
+            "higher_timeframe_trend": getattr(
+                getattr(mtf_result, "higher_timeframe_trend", None),
+                "value",
+                getattr(mtf_result, "higher_timeframe_trend", None),
+            ),
             "higher_timeframe_confidence": float(getattr(mtf_result, "higher_timeframe_confidence", 0.0) or 0.0),
         }
 

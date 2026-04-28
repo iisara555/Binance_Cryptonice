@@ -2,7 +2,6 @@ import logging
 from datetime import datetime, timedelta
 
 import ccxt
-
 from freqtrade.constants import BuySell
 from freqtrade.enums import OPTIMIZE_MODES, MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import DDosProtection, ExchangeError, OperationalException, TemporaryError
@@ -11,7 +10,6 @@ from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import CcxtOrder, FtHas
 from freqtrade.misc import deep_merge_dicts
 from freqtrade.util import dt_from_ts, dt_ts
-
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +91,7 @@ class Bybit(Exchange):
                 # Returns a tuple of bools, first for margin, second for Account
                 if is_unified and len(is_unified) > 1 and is_unified[1]:
                     self.unified_account = True
-                    logger.info(
-                        "Bybit: Unified account. Assuming dedicated subaccount for this bot."
-                    )
+                    logger.info("Bybit: Unified account. Assuming dedicated subaccount for this bot.")
                 else:
                     self.unified_account = False
                     logger.info("Bybit: Standard account.")
@@ -153,9 +149,7 @@ class Bybit(Exchange):
         # and only in spot mode
         return (
             ordertype != "market"
-            or (
-                side == "buy" and not self.unified_account and self.trading_mode == TradingMode.SPOT
-            )
+            or (side == "buy" and not self.unified_account and self.trading_mode == TradingMode.SPOT)
             or self._ft_has.get("marketOrderRequiresPrice", False)
         )
 
@@ -236,13 +230,9 @@ class Bybit(Exchange):
                 return open_rate - margin_diff_per_contract
 
         else:
-            raise OperationalException(
-                "Freqtrade only supports isolated futures for leverage trading"
-            )
+            raise OperationalException("Freqtrade only supports isolated futures for leverage trading")
 
-    def get_funding_fees(
-        self, pair: str, amount: float, is_short: bool, open_date: datetime
-    ) -> float:
+    def get_funding_fees(self, pair: str, amount: float, is_short: bool, open_date: datetime) -> float:
         """
         Fetch funding fees, either from the exchange (live) or calculates them
         based on funding rate/mark price history
@@ -269,11 +259,7 @@ class Bybit(Exchange):
         order = super().fetch_order(order_id, pair, params)
         if not order:
             order = self.fetch_order_emulated(order_id, pair, {})
-        if (
-            order.get("status") == "canceled"
-            and order.get("filled") == 0.0
-            and order.get("remaining") == 0.0
-        ):
+        if order.get("status") == "canceled" and order.get("filled") == 0.0 and order.get("remaining") == 0.0:
             # Canceled orders will have "remaining=0" on bybit.
             order["remaining"] = None
         return order
@@ -286,9 +272,7 @@ class Bybit(Exchange):
         """
 
         # Load cached tiers
-        tiers_cached = self.load_cached_leverage_tiers(
-            self._config["stake_currency"], timedelta(days=1)
-        )
+        tiers_cached = self.load_cached_leverage_tiers(self._config["stake_currency"], timedelta(days=1))
         if tiers_cached:
             return tiers_cached
 

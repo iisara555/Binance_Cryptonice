@@ -15,13 +15,14 @@ Verifies that:
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, Mock, patch, call
+from unittest.mock import MagicMock, Mock, call, patch
+
 import pytest
 
-from trade_executor import TradeExecutor, OrderSide, OrderStatus, OrderResult
-
+from trade_executor import OrderResult, OrderSide, OrderStatus, TradeExecutor
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
 
 def _make_executor(db=None, oms_running=False) -> TradeExecutor:
     """Build a TradeExecutor whose OMS thread is NOT started (for isolation)."""
@@ -56,6 +57,7 @@ def _make_executor(db=None, oms_running=False) -> TradeExecutor:
     ex.order_type = "limit"
 
     from trade_executor import PartialFillTracker
+
     ex._fill_tracker = PartialFillTracker(max_wait_seconds=60.0)
     ex._open_orders = {}
     ex._order_history = []
@@ -96,6 +98,7 @@ def _make_pending_order(order_id: str = "ord-1", symbol: str = "THB_BTC") -> dic
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
+
 class TestReconcileGateAttribute:
 
     def test_executor_has_reconcile_done_event(self):
@@ -130,9 +133,7 @@ class TestReconcileGateAttribute:
                 db=db,
             )
 
-        assert not ex._reconcile_done.is_set(), (
-            "_reconcile_done should be unset until reconciliation completes"
-        )
+        assert not ex._reconcile_done.is_set(), "_reconcile_done should be unset until reconciliation completes"
 
     def test_set_reconcile_complete_sets_event(self):
         """set_reconcile_complete() must set _reconcile_done."""
@@ -154,9 +155,11 @@ class TestOMSLoopGatedByReconciliation:
 
         cancel_calls = []
 
-        with patch.object(ex, "cancel_order", side_effect=lambda *a, **kw: cancel_calls.append(a) or True), \
-             patch.object(ex, "check_order_status", return_value=Mock(status=OrderStatus.PENDING)), \
-             patch.object(ex, "_verify_order_fill"):
+        with patch.object(
+            ex, "cancel_order", side_effect=lambda *a, **kw: cancel_calls.append(a) or True
+        ), patch.object(ex, "check_order_status", return_value=Mock(status=OrderStatus.PENDING)), patch.object(
+            ex, "_verify_order_fill"
+        ):
 
             # Monkey-patch sleep so OMS loop runs immediately
             with patch("trade_executor.time.sleep"):
@@ -166,6 +169,7 @@ class TestOMSLoopGatedByReconciliation:
                 def _run_one_cycle():
                     # Simulate exactly one body of the while-loop
                     import trade_executor as _te
+
                     _te.time.sleep(0)  # no-op
                     if not ex._reconcile_done.is_set():
                         return  # gate fires — skips everything
@@ -174,9 +178,7 @@ class TestOMSLoopGatedByReconciliation:
 
                 _run_one_cycle()
 
-        assert not cancel_calls, (
-            "OMS processed orders before reconciliation was signalled"
-        )
+        assert not cancel_calls, "OMS processed orders before reconciliation was signalled"
 
     def test_oms_processes_orders_after_reconciliation(self):
         """After set_reconcile_complete(), the OMS must be able to process orders."""
@@ -213,11 +215,9 @@ class TestOMSLoopGatedByReconciliation:
             cancel_called.set()
             return True
 
-        with patch.object(ex, "cancel_order", side_effect=_fake_cancel), \
-             patch.object(ex, "check_order_status",
-                          return_value=Mock(status=OrderStatus.PENDING)), \
-             patch.object(ex, "_replace_order_async"), \
-             patch.object(ex, "_verify_order_fill"):
+        with patch.object(ex, "cancel_order", side_effect=_fake_cancel), patch.object(
+            ex, "check_order_status", return_value=Mock(status=OrderStatus.PENDING)
+        ), patch.object(ex, "_replace_order_async"), patch.object(ex, "_verify_order_fill"):
 
             # Plant a timed-out order (60s old — exceeds 1s timeout, under 24h limit)
             ex._open_orders["ord-timeout"] = {
@@ -239,25 +239,19 @@ class TestOMSLoopGatedByReconciliation:
 
             # Start real OMS thread — reconciliation NOT yet done
             ex._oms_running = True
-            ex._oms_thread = threading.Thread(
-                target=ex._oms_monitor_loop, daemon=True
-            )
+            ex._oms_thread = threading.Thread(target=ex._oms_monitor_loop, daemon=True)
             ex._oms_thread.start()
 
             # Give the OMS multiple sleep cycles — it must not call cancel yet
             time.sleep(0.3)
-            assert not cancel_called.is_set(), (
-                "OMS called cancel_order before reconciliation was signalled"
-            )
+            assert not cancel_called.is_set(), "OMS called cancel_order before reconciliation was signalled"
 
             # Now signal reconciliation complete
             ex.set_reconcile_complete()
 
             # OMS should now process the timed-out order within a few seconds
             fired = cancel_called.wait(timeout=12)
-            assert fired, (
-                "OMS failed to process timed-out order after reconciliation was signalled"
-            )
+            assert fired, "OMS failed to process timed-out order after reconciliation was signalled"
 
             ex.stop()
 
@@ -308,9 +302,7 @@ class TestReconciliationAndOMSNoDataRace:
             "entry_price": 80_000.0,
             "stop_loss": None,
             "take_profit": None,
-            "timestamp": MagicMock(
-                __sub__=lambda s, o: MagicMock(total_seconds=lambda: 10.0)
-            ),
+            "timestamp": MagicMock(__sub__=lambda s, o: MagicMock(total_seconds=lambda: 10.0)),
             "is_partial_fill": False,
             "remaining_amount": 0.1,
             "total_entry_cost": 8000.0,
@@ -326,9 +318,7 @@ class TestReconciliationAndOMSNoDataRace:
             snapshot = list(ex._open_orders.values())
 
         ids = [o["order_id"] for o in snapshot]
-        assert "ghost-1" in ids, (
-            "OMS did not see ghost order written by reconciliation"
-        )
+        assert "ghost-1" in ids, "OMS did not see ghost order written by reconciliation"
 
     def test_oms_removal_does_not_crash_concurrent_reconciliation_read(self):
         """
@@ -393,19 +383,17 @@ class TestStopUnblocksOMS:
 
         assert not ex._reconcile_done.is_set()
         ex.stop()
-        assert ex._reconcile_done.is_set(), (
-            "stop() must set _reconcile_done to unblock any waiting OMS thread"
-        )
+        assert ex._reconcile_done.is_set(), "stop() must set _reconcile_done to unblock any waiting OMS thread"
 
 
 class TestTradingBotStartSignalsOMS:
 
     def _build_bot_and_start(self, auth_degraded: bool):
         """Build a minimal bot, call start(), return (bot, signal_was_set)."""
-        from trading_bot import TradingBotOrchestrator
-        from signal_generator import SignalGenerator
-        from risk_management import RiskManager
         from api_client import BitkubClient
+        from risk_management import RiskManager
+        from signal_generator import SignalGenerator
+        from trading_bot import TradingBotOrchestrator
 
         mock_db = Mock()
         mock_db.get_positions.return_value = []
@@ -458,9 +446,9 @@ class TestTradingBotStartSignalsOMS:
         bot._auth_degraded = auth_degraded
         bot._auth_degraded_reason = "test" if auth_degraded else ""
 
-        with patch.object(bot, "_reconcile_on_startup"), \
-             patch.object(bot, "_bootstrap_held_coin_history"), \
-             patch.object(threading.Thread, "start"):
+        with patch.object(bot, "_reconcile_on_startup"), patch.object(
+            bot, "_bootstrap_held_coin_history"
+        ), patch.object(threading.Thread, "start"):
             bot.start()
 
         return bot, ex._reconcile_done.is_set()
@@ -468,13 +456,9 @@ class TestTradingBotStartSignalsOMS:
     def test_start_signals_oms_after_normal_reconciliation(self):
         """start() must call set_reconcile_complete() after full reconciliation."""
         _, signalled = self._build_bot_and_start(auth_degraded=False)
-        assert signalled, (
-            "start() did not call set_reconcile_complete() after normal reconciliation"
-        )
+        assert signalled, "start() did not call set_reconcile_complete() after normal reconciliation"
 
     def test_start_signals_oms_in_degraded_mode(self):
         """start() must call set_reconcile_complete() even in degraded (skip) mode."""
         _, signalled = self._build_bot_and_start(auth_degraded=True)
-        assert signalled, (
-            "start() did not call set_reconcile_complete() in auth-degraded mode"
-        )
+        assert signalled, "start() did not call set_reconcile_complete() in auth-degraded mode"

@@ -8,106 +8,35 @@ Includes dynamic SL/TP based on pair volatility (BTC vs ALT) and ATR-based stop 
 import json
 import logging
 import threading
-from pathlib import Path
-from datetime import datetime, date
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from config import MIN_RISK_REWARD_RATIO
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from financial_precision import precise_add, precise_divide, precise_multiply, precise_round, precise_subtract
+from risk_volatility import DEFAULT_SL_TP, VOLATILITY_CLASS
 
 logger = logging.getLogger(__name__)
 diag_logger = logging.getLogger("crypto-bot.signal_flow")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Financial Precision Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _safe_decimal(v: float) -> Decimal:
-    """Convert float to Decimal, treating NaN/Inf as zero."""
-    if v != v or v == float('inf') or v == float('-inf'):
-        return Decimal("0")
-    return Decimal(str(v))
-
-def precise_add(a: float, b: float) -> float:
-    """Precise addition using Decimal to avoid float accumulation errors."""
-    return float(_safe_decimal(a) + _safe_decimal(b))
-
-def precise_subtract(a: float, b: float) -> float:
-    """Precise subtraction using Decimal."""
-    return float(_safe_decimal(a) - _safe_decimal(b))
-
-def precise_multiply(a: float, b: float) -> float:
-    """Precise multiplication using Decimal."""
-    return float(_safe_decimal(a) * _safe_decimal(b))
-
-def precise_divide(a: float, b: float) -> float:
-    """Precise division using Decimal with safety check."""
-    if b == 0 or b != b:
-        return 0.0
-    return float(_safe_decimal(a) / _safe_decimal(b))
-
-def precise_round(value: float, decimals: int = 8) -> float:
-    """Precise rounding for financial calculations."""
-    quantize_str = '0.' + '0' * decimals
-    return float(_safe_decimal(value).quantize(Decimal(quantize_str), rounding=ROUND_DOWN))
-
 def _diag(pair: str, step: str, result: str, reason: str = ""):
     """Emit a standardised [SIGNAL_FLOW] diagnostic line."""
     from datetime import datetime as _dt
+
     ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
     diag_logger.info(
-        f"[SIGNAL_FLOW] {ts} | {pair} | Step: {step} | Result: {result}"
-        + (f" | Reason: {reason}" if reason else "")
+        f"[SIGNAL_FLOW] {ts} | {pair} | Step: {step} | Result: {result}" + (f" | Reason: {reason}" if reason else "")
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pair volatility classification
-# ─────────────────────────────────────────────────────────────────────────────
-# BTC pairs are considered "low volatility", ALT pairs are "high volatility".
-# Project migrated from Bitkub (THB_*) to Binance Thailand (*USDT) — both
-# formats are accepted so legacy state files / tests keep working.
-VOLATILITY_CLASS = {
-    # --- NEW: SPEC_04 — Binance Thailand symbol format -----------------
-    # BTC pair – lower vol, tighter SL/TP
-    "BTCUSDT": "low",
-    # ALT pairs – higher vol, wider SL/TP
-    "ETHUSDT": "high",
-    "SOLUSDT": "high",
-    "XRPUSDT": "high",
-    "BNBUSDT": "high",
-    "ADAUSDT": "high",
-    "DOTUSDT": "high",
-    "LINKUSDT": "high",
-    "DOGEUSDT": "high",
-    # --- Legacy (Bitkub) — kept for backward compatibility -------------
-    "THB_BTC": "low",
-    "BTC_THB": "low",
-    "THB_ETH": "high",
-    "THB_SOL": "high",
-    "THB_XRP": "high",
-    "THB_BNB": "high",
-    "THB_ADA": "high",
-    "THB_DOT": "high",
-    "THB_LINK": "high",
-    "THB_DOGE": "high",
-}
 
 # Binance Thailand trading fees: 0.1% per side, 0.2% round trip.
 BINANCE_TH_FEE_PER_SIDE = 0.001
 BINANCE_TH_FEE_ROUND_TRIP = 0.002
 
 DEFAULT_MIN_ORDER_QUOTE = 15.0
-MIN_ORDER_BUFFER = 1.10   # 10% safety buffer
-
-# Default SL/TP percentages by volatility class
-# These are NET percentages (after fees deducted)
-# SL: negative (loss), TP: positive (profit)
-DEFAULT_SL_TP = {
-    "low": {"stop_loss_pct": -2.0, "take_profit_pct": 4.0},    # BTC: tighter pair-specific default profile
-    "high": {"stop_loss_pct": -4.0, "take_profit_pct": 7.0},   # ALT: wider for volatile altcoins  net R:R≈1.63
-}
+MIN_ORDER_BUFFER = 1.10  # 10% safety buffer
 
 
 # --- NEW: SPEC_04 — Per-mode ATR profile -----------------------------------
@@ -119,9 +48,9 @@ DEFAULT_SL_TP = {
 # Falls back to RiskConfig.atr_multiplier (2.5) when no mode is supplied so
 # legacy callers stay backward compatible.
 MODE_ATR_PROFILES: Dict[str, Dict[str, float]] = {
-    "scalping":   {"atr_multiplier": 1.2, "atr_period": 14},
+    "scalping": {"atr_multiplier": 1.2, "atr_period": 14},
     "trend_only": {"atr_multiplier": 1.8, "atr_period": 14},
-    "standard":   {"atr_multiplier": 1.5, "atr_period": 14},
+    "standard": {"atr_multiplier": 1.5, "atr_period": 14},
 }
 
 
@@ -257,15 +186,15 @@ def calculate_atr(
 
 @dataclass
 class RiskConfig:
-    max_risk_per_trade_pct: float = 1.0       # % of portfolio per trade
-    max_daily_loss_pct: float = 5.0           # % of portfolio per day
+    max_risk_per_trade_pct: float = 1.0  # % of portfolio per trade
+    max_daily_loss_pct: float = 5.0  # % of portfolio per day
     max_position_per_trade_pct: float = 10.0  # % of portfolio per single order
     max_drawdown_threshold_pct: float = 12.0  # hard block new BUY entries above this drawdown
     drawdown_soft_reduce_start_pct: float = 5.0  # start reducing risk above this drawdown
-    min_drawdown_risk_multiplier: float = 0.35   # never reduce below this multiplier when soft-reducing
+    min_drawdown_risk_multiplier: float = 0.35  # never reduce below this multiplier when soft-reducing
     drawdown_block_new_entries: bool = True
-    stop_loss_pct: float = -5.0               # % from entry price (deprecated/ignored)
-    take_profit_pct: float = 12.0             # % from entry price (deprecated/ignored)
+    stop_loss_pct: float = -5.0  # % from entry price (deprecated/ignored)
+    take_profit_pct: float = 12.0  # % from entry price (deprecated/ignored)
     initial_balance: float = 1000.0
     min_balance_threshold: float = 100.0
     max_open_positions: int = 5
@@ -273,9 +202,9 @@ class RiskConfig:
     cool_down_minutes: int = 5
     min_order_amount: float = DEFAULT_MIN_ORDER_QUOTE
     # ATR-based SL settings
-    atr_multiplier: float = 2.5               # SL distance = ATR * this
-    atr_period: int = 14                      # ATR lookback period
-    use_dynamic_sl_tp: bool = True            # Use pair-specific SL/TP
+    atr_multiplier: float = 2.5  # SL distance = ATR * this
+    atr_period: int = 14  # ATR lookback period
+    use_dynamic_sl_tp: bool = True  # Use pair-specific SL/TP
 
     def __post_init__(self):
         # Hard reject anything above 8.0% (obvious misconfiguration).
@@ -500,7 +429,7 @@ class RiskManager:
         If stop_loss_price is provided, position size is capped at the amount
         that would lose `max_risk_per_trade_pct` if hit.
         Otherwise uses `max_position_per_trade_pct` as hard cap.
-        
+
         God Mode Upgrade (Phase 3): Dynamic Half-Kelly Sizing based on confidence score.
         """
         if portfolio_value <= 0:
@@ -511,36 +440,35 @@ class RiskManager:
 
         # Use the configured max risk
         effective_risk_pct = self.config.max_risk_per_trade_pct
-        
+
         # Apply Fractional Kelly if AI Confidence exists
         if confidence and confidence > 0 and stop_loss_price and take_profit_price:
             risk_dist = abs(entry_price - stop_loss_price)
             reward_dist = abs(take_profit_price - entry_price)
-            
+
             if risk_dist > 0 and reward_dist > 0:
                 p = confidence
                 q = 1.0 - p
-                b = reward_dist / risk_dist # Risk-Reward Payout Ratio
+                b = reward_dist / risk_dist  # Risk-Reward Payout Ratio
                 # Full Kelly Fraction
                 kelly_pct = p - (q / b)
                 if kelly_pct <= 0.0:
-                    reason = (
-                        f"Non-positive Kelly edge: kelly={kelly_pct:.4f} "
-                        f"(p={p:.2f}, b={b:.2f})"
-                    )
+                    reason = f"Non-positive Kelly edge: kelly={kelly_pct:.4f} " f"(p={p:.2f}, b={b:.2f})"
                     _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", reason)
                     logger.info("[Kelly Sizing] Trade rejected due to non-positive edge: %s", reason)
                     return RiskCheckResult(False, reason)
 
                 # Apply Half-Kelly (Fractional) for safety in crypto
                 half_kelly = kelly_pct / 2.0
-                
+
                 # Bound between min 0.1% and max_risk_per_trade_pct
                 # Max constraint: If Kelly wants to bet 5%, we still limit to 1.0% max
                 # A zero Kelly edge (break-even) falls back to the minimum floor.
                 dynamic_risk = max(0.1, min(half_kelly * 100, effective_risk_pct))
-                
-                logger.debug(f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%")
+
+                logger.debug(
+                    f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%"
+                )
                 effective_risk_pct = dynamic_risk
 
         drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
@@ -566,27 +494,46 @@ class RiskManager:
             risk_amount = portfolio_value * (effective_risk_pct / 100)
             risk_per_unit = abs(entry_price - stop_loss_price)
             if risk_per_unit == 0:
-                _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT",
-                      f"Stop loss too close to entry price (SL={stop_loss_price}, entry={entry_price})")
+                _diag(
+                    "GLOBAL",
+                    "RiskMgr:PositionSize",
+                    "REJECT",
+                    f"Stop loss too close to entry price (SL={stop_loss_price}, entry={entry_price})",
+                )
                 return RiskCheckResult(False, "Stop loss too close to entry price")
-            
+
             # risk_based_size is in base asset units (e.g. BTC)
             risk_based_quantity = risk_amount / risk_per_unit
             # Convert back to quote asset for the position size
             suggested_investment = risk_based_quantity * entry_price
             suggested = min(suggested_investment, hard_cap)
-            
-            _diag("GLOBAL", "RiskMgr:PositionSize", "INFO",
-                  f"portfolio={portfolio_value:.2f}, risk_pct={effective_risk_pct:.2f}%, "
-                  f"risk_amount={risk_amount:.2f}, SL_dist={risk_per_unit:.2f}, "
-                  f"suggested={suggested:.2f}, hard_cap={hard_cap:.2f}")
-            logger.debug(f"Risk Sizing: Portfolio={portfolio_value:.2f}, Risk={risk_amount:.2f} ({effective_risk_pct:.2f}%), SL_dist={risk_per_unit:.2f}, Inv={suggested:.2f}")
+
+            _diag(
+                "GLOBAL",
+                "RiskMgr:PositionSize",
+                "INFO",
+                f"portfolio={portfolio_value:.2f}, risk_pct={effective_risk_pct:.2f}%, "
+                f"risk_amount={risk_amount:.2f}, SL_dist={risk_per_unit:.2f}, "
+                f"suggested={suggested:.2f}, hard_cap={hard_cap:.2f}",
+            )
+            logger.debug(
+                f"Risk Sizing: Portfolio={portfolio_value:.2f}, Risk={risk_amount:.2f} ({effective_risk_pct:.2f}%), SL_dist={risk_per_unit:.2f}, Inv={suggested:.2f}"
+            )
         else:
             # Institutional rule: Reject trades without stop loss
-            logger.warning("\u26d4 Risk Manager: \u0e44\u0e21\u0e48\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e01\u0e32\u0e23\u0e40\u0e17\u0e23\u0e14 (\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 ATR/Stop Loss)")
-            _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT",
-                  f"No ATR/Stop Loss data (SL={stop_loss_price}, entry={entry_price})")
-            return RiskCheckResult(False, "\u0e44\u0e21\u0e48\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e01\u0e32\u0e23\u0e40\u0e17\u0e23\u0e14 (\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 ATR/Stop Loss)")
+            logger.warning(
+                "\u26d4 Risk Manager: \u0e44\u0e21\u0e48\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e01\u0e32\u0e23\u0e40\u0e17\u0e23\u0e14 (\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 ATR/Stop Loss)"
+            )
+            _diag(
+                "GLOBAL",
+                "RiskMgr:PositionSize",
+                "REJECT",
+                f"No ATR/Stop Loss data (SL={stop_loss_price}, entry={entry_price})",
+            )
+            return RiskCheckResult(
+                False,
+                "\u0e44\u0e21\u0e48\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e01\u0e32\u0e23\u0e40\u0e17\u0e23\u0e14 (\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 ATR/Stop Loss)",
+            )
 
         if suggested < self.config.min_order_amount:
             min_viable = self.config.min_order_amount * MIN_ORDER_BUFFER
@@ -605,8 +552,7 @@ class RiskManager:
                 min_viable,
             )
 
-        _diag("GLOBAL", "RiskMgr:PositionSize", "PASS",
-              f"Position size approved: {suggested:.2f} quote")
+        _diag("GLOBAL", "RiskMgr:PositionSize", "PASS", f"Position size approved: {suggested:.2f} quote")
         return RiskCheckResult(True, "Position size OK", round(suggested, 2))
 
     def validate_risk_reward(
@@ -631,39 +577,55 @@ class RiskManager:
             RiskCheckResult with allowed=True if R:R >= MIN_RISK_REWARD_RATIO
         """
         if not stop_loss or not take_profit or entry_price <= 0:
-            logger.warning("\u26d4 R:R Enforcer: \u0e44\u0e21\u0e48\u0e2a\u0e32\u0e21\u0e32\u0e23\u0e16\u0e04\u0e33\u0e19\u0e27\u0e13 R:R (\u0e02\u0e32\u0e14\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 SL/TP)")
-            _diag("GLOBAL", "RiskMgr:RiskReward", "REJECT",
-                  f"Cannot calculate R:R — missing data (SL={stop_loss}, TP={take_profit}, entry={entry_price})")
-            return RiskCheckResult(False, "\u0e44\u0e21\u0e48\u0e2a\u0e32\u0e21\u0e32\u0e23\u0e16\u0e04\u0e33\u0e19\u0e27\u0e13 R:R (\u0e02\u0e32\u0e14\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 SL/TP)")
+            logger.warning(
+                "\u26d4 R:R Enforcer: \u0e44\u0e21\u0e48\u0e2a\u0e32\u0e21\u0e32\u0e23\u0e16\u0e04\u0e33\u0e19\u0e27\u0e13 R:R (\u0e02\u0e32\u0e14\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 SL/TP)"
+            )
+            _diag(
+                "GLOBAL",
+                "RiskMgr:RiskReward",
+                "REJECT",
+                f"Cannot calculate R:R — missing data (SL={stop_loss}, TP={take_profit}, entry={entry_price})",
+            )
+            return RiskCheckResult(
+                False,
+                "\u0e44\u0e21\u0e48\u0e2a\u0e32\u0e21\u0e32\u0e23\u0e16\u0e04\u0e33\u0e19\u0e27\u0e13 R:R (\u0e02\u0e32\u0e14\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 SL/TP)",
+            )
 
         risk_distance = abs(entry_price - stop_loss)
         reward_distance = abs(take_profit - entry_price)
 
         if risk_distance == 0:
-            _diag("GLOBAL", "RiskMgr:RiskReward", "REJECT",
-                  f"SL too close to entry (risk_distance=0, SL={stop_loss}, entry={entry_price})")
-            return RiskCheckResult(False, "SL \u0e15\u0e34\u0e14\u0e23\u0e32\u0e04\u0e32\u0e40\u0e02\u0e49\u0e32\u0e21\u0e32\u0e01\u0e40\u0e01\u0e34\u0e19\u0e44\u0e1b (risk_distance = 0)")
+            _diag(
+                "GLOBAL",
+                "RiskMgr:RiskReward",
+                "REJECT",
+                f"SL too close to entry (risk_distance=0, SL={stop_loss}, entry={entry_price})",
+            )
+            return RiskCheckResult(
+                False,
+                "SL \u0e15\u0e34\u0e14\u0e23\u0e32\u0e04\u0e32\u0e40\u0e02\u0e49\u0e32\u0e21\u0e32\u0e01\u0e40\u0e01\u0e34\u0e19\u0e44\u0e1b (risk_distance = 0)",
+            )
 
         rr_ratio = reward_distance / risk_distance
 
-        _diag("GLOBAL", "RiskMgr:RiskReward", "INFO",
-              f"entry={entry_price:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f} | "
-              f"SL_dist={risk_distance:.4f}, TP_dist={reward_distance:.4f}, "
-              f"R:R={rr_ratio:.2f} vs min={MIN_RISK_REWARD_RATIO}")
+        _diag(
+            "GLOBAL",
+            "RiskMgr:RiskReward",
+            "INFO",
+            f"entry={entry_price:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f} | "
+            f"SL_dist={risk_distance:.4f}, TP_dist={reward_distance:.4f}, "
+            f"R:R={rr_ratio:.2f} vs min={MIN_RISK_REWARD_RATIO}",
+        )
 
         if rr_ratio < MIN_RISK_REWARD_RATIO:
-            logger.debug(
-                f"R:R Enforcer: reject R:R={rr_ratio:.2f} < {MIN_RISK_REWARD_RATIO}"
-            )
-            _diag("GLOBAL", "RiskMgr:RiskReward", "REJECT",
-                  f"R:R {rr_ratio:.2f} < minimum {MIN_RISK_REWARD_RATIO}")
+            logger.debug(f"R:R Enforcer: reject R:R={rr_ratio:.2f} < {MIN_RISK_REWARD_RATIO}")
+            _diag("GLOBAL", "RiskMgr:RiskReward", "REJECT", f"R:R {rr_ratio:.2f} < minimum {MIN_RISK_REWARD_RATIO}")
             return RiskCheckResult(
                 False,
                 f"R:R ratio {rr_ratio:.2f} < {MIN_RISK_REWARD_RATIO} \u2014 \u0e44\u0e21\u0e48\u0e1c\u0e48\u0e32\u0e19\u0e40\u0e01\u0e13\u0e11\u0e4c\u0e01\u0e33\u0e44\u0e23\u0e02\u0e31\u0e49\u0e19\u0e15\u0e48\u0e33",
             )
 
-        _diag("GLOBAL", "RiskMgr:RiskReward", "PASS",
-              f"R:R {rr_ratio:.2f} >= minimum {MIN_RISK_REWARD_RATIO}")
+        _diag("GLOBAL", "RiskMgr:RiskReward", "PASS", f"R:R {rr_ratio:.2f} >= minimum {MIN_RISK_REWARD_RATIO}")
         logger.debug(f"R:R Enforcer: PASS | R:R = {rr_ratio:.2f} (min {MIN_RISK_REWARD_RATIO})")
         return RiskCheckResult(True, f"R:R = {rr_ratio:.2f}")
 
@@ -673,7 +635,7 @@ class RiskManager:
         atr_value: float,
         direction: str = "long",
         risk_reward_ratio: float = 2.0,
-        mode: Optional[str] = None,   # --- NEW: SPEC_04 — per-mode ATR multiplier
+        mode: Optional[str] = None,  # --- NEW: SPEC_04 — per-mode ATR multiplier
     ) -> tuple[float, float]:
         """
         Calculate SL and TP prices purely from ATR.
@@ -731,10 +693,7 @@ class RiskManager:
         current_loss = self._daily_loss_start - current_portfolio_value
 
         if current_loss >= max_loss:
-            return RiskCheckResult(
-                False,
-                f"Daily loss limit reached: {current_loss:.2f} / {max_loss:.2f}"
-            )
+            return RiskCheckResult(False, f"Daily loss limit reached: {current_loss:.2f} / {max_loss:.2f}")
         return RiskCheckResult(True, f"Daily loss OK: {current_loss:.2f} / {max_loss:.2f}")
 
     @property
@@ -801,10 +760,7 @@ class RiskManager:
 
         drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
         if self.config.drawdown_block_new_entries and drawdown_pct >= self.config.max_drawdown_threshold_pct:
-            reason = (
-                f"Drawdown limit reached: {drawdown_pct:.2f}% / "
-                f"{self.config.max_drawdown_threshold_pct:.2f}%"
-            )
+            reason = f"Drawdown limit reached: {drawdown_pct:.2f}% / " f"{self.config.max_drawdown_threshold_pct:.2f}%"
             _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", reason)
             return RiskCheckResult(False, reason)
 
@@ -825,9 +781,13 @@ class RiskManager:
             _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", "Cooldown period active")
             return RiskCheckResult(False, "Cooldown period active")
 
-        _diag("GLOBAL", "RiskMgr:CanOpen", "PASS",
-              f"portfolio={portfolio_value:.2f}, drawdown={drawdown_pct:.2f}%, positions={open_positions_count}/{self.config.max_open_positions}, "
-              f"trades_today={self._trade_count_today}/{self.config.max_daily_trades}")
+        _diag(
+            "GLOBAL",
+            "RiskMgr:CanOpen",
+            "PASS",
+            f"portfolio={portfolio_value:.2f}, drawdown={drawdown_pct:.2f}%, positions={open_positions_count}/{self.config.max_open_positions}, "
+            f"trades_today={self._trade_count_today}/{self.config.max_daily_trades}",
+        )
         return RiskCheckResult(True, "All checks passed")
 
     def update_daily_start(self, portfolio_value: float):
@@ -861,6 +821,7 @@ class RiskManager:
 # Correlation-Aware Position Management
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def check_pair_correlation(
     candidate_symbol: str,
     open_symbols: List[str],
@@ -893,10 +854,10 @@ def check_pair_correlation(
         import pandas as _pd
 
         cand_df = db.get_candles(candidate_symbol, interval=timeframe, limit=lookback_candles)
-        if cand_df is None or (hasattr(cand_df, 'empty') and cand_df.empty) or len(cand_df) < 20:
+        if cand_df is None or (hasattr(cand_df, "empty") and cand_df.empty) or len(cand_df) < 20:
             return RiskCheckResult(True, "Insufficient data for correlation check")
 
-        cand_returns = cand_df['close'].astype(float).pct_change().dropna()
+        cand_returns = cand_df["close"].astype(float).pct_change().dropna()
 
         for held_symbol in open_symbols:
             if held_symbol.upper() == candidate_symbol.upper():
@@ -904,18 +865,20 @@ def check_pair_correlation(
 
             try:
                 held_df = db.get_candles(held_symbol, interval=timeframe, limit=lookback_candles)
-                if held_df is None or (hasattr(held_df, 'empty') and held_df.empty) or len(held_df) < 20:
+                if held_df is None or (hasattr(held_df, "empty") and held_df.empty) or len(held_df) < 20:
                     continue
 
-                held_returns = held_df['close'].astype(float).pct_change().dropna()
+                held_returns = held_df["close"].astype(float).pct_change().dropna()
 
                 # Align on the shorter series length
                 min_len = min(len(cand_returns), len(held_returns))
                 if min_len < 15:
                     continue
 
-                corr = cand_returns.iloc[-min_len:].reset_index(drop=True).corr(
-                    held_returns.iloc[-min_len:].reset_index(drop=True)
+                corr = (
+                    cand_returns.iloc[-min_len:]
+                    .reset_index(drop=True)
+                    .corr(held_returns.iloc[-min_len:].reset_index(drop=True))
                 )
 
                 if corr >= threshold:
@@ -931,8 +894,12 @@ def check_pair_correlation(
                 logger.debug("Correlation check skipped for %s vs %s: %s", candidate_symbol, held_symbol, exc)
                 continue
 
-        _diag(candidate_symbol, "RiskMgr:Correlation", "PASS",
-              f"No high correlation with {len(open_symbols)} open position(s)")
+        _diag(
+            candidate_symbol,
+            "RiskMgr:Correlation",
+            "PASS",
+            f"No high correlation with {len(open_symbols)} open position(s)",
+        )
         return RiskCheckResult(True, "Correlation check passed")
 
     except Exception as exc:
@@ -961,9 +928,9 @@ class SLHoldGuard:
     """
 
     MIN_HOLD_SECONDS: Dict[str, int] = {
-        "scalping":   30,    # 30 seconds
-        "trend_only": 300,   # 5 minutes
-        "standard":   60,    # 1 minute
+        "scalping": 30,  # 30 seconds
+        "trend_only": 300,  # 5 minutes
+        "standard": 60,  # 1 minute
     }
 
     def __init__(self) -> None:
@@ -985,7 +952,8 @@ class SLHoldGuard:
             }
         logger.debug(
             "[SLHoldGuard] Registered position_id=%s mode=%s",
-            position_id, normalized_mode,
+            position_id,
+            normalized_mode,
         )
 
     def cleanup(self, position_id: str) -> None:
@@ -1019,7 +987,9 @@ class SLHoldGuard:
             remaining = max(0.0, min_hold - elapsed)
             logger.debug(
                 "[SLHoldGuard] %s locked for %.0fs more (mode=%s)",
-                position_id, remaining, mode,
+                position_id,
+                remaining,
+                mode,
             )
         return locked
 
@@ -1050,9 +1020,9 @@ class ConfirmationGate:
     """
 
     CONFIRMATION_CANDLES: Dict[str, int] = {
-        "scalping":   1,   # need 1 candle close above signal
-        "trend_only": 2,   # need 2 candle closes
-        "standard":   1,
+        "scalping": 1,  # need 1 candle close above signal
+        "trend_only": 2,  # need 2 candle closes
+        "standard": 1,
     }
 
     @staticmethod
@@ -1091,21 +1061,20 @@ class ConfirmationGate:
         Returns:
             True if confirmed (entry allowed), False otherwise.
         """
-        n = ConfirmationGate.CONFIRMATION_CANDLES.get(
-            str(mode or "standard").strip().lower(), 1
-        )
+        n = ConfirmationGate.CONFIRMATION_CANDLES.get(str(mode or "standard").strip().lower(), 1)
         if not candles or len(candles) < n + 1:
             return False
 
-        recent = candles[-(n + 1):]
+        recent = candles[-(n + 1) :]
         signal_close = ConfirmationGate._close(recent[0])
         confirm_closes = [ConfirmationGate._close(c) for c in recent[1:]]
 
         if signal_close <= 0 or any(c <= 0 for c in confirm_closes):
             # Treat malformed data as "not yet confirmed" — fail safe.
             logger.debug(
-                "[ConfirmationGate] Skipping confirmation — non-positive close "
-                "(signal=%.6f, confirm=%s)", signal_close, confirm_closes,
+                "[ConfirmationGate] Skipping confirmation — non-positive close " "(signal=%.6f, confirm=%s)",
+                signal_close,
+                confirm_closes,
             )
             return False
 
@@ -1119,11 +1088,12 @@ class ConfirmationGate:
 
         if not confirmed:
             logger.debug(
-                "[ConfirmationGate] %s not confirmed yet (need %d candle "
-                "close(s) %s %.6f, got %s)",
-                side_upper, n,
+                "[ConfirmationGate] %s not confirmed yet (need %d candle " "close(s) %s %.6f, got %s)",
+                side_upper,
+                n,
                 "above" if side_upper == "BUY" else "below",
-                signal_close, confirm_closes,
+                signal_close,
+                confirm_closes,
             )
         return confirmed
 
@@ -1133,9 +1103,9 @@ class ConfirmationGate:
 # and the live price seen at entry. If exceeded → skip the entry instead of
 # chasing the move.
 MAX_SLIPPAGE_PCT: Dict[str, float] = {
-    "scalping":   0.15,   # 0.15% max
+    "scalping": 0.15,  # 0.15% max
     "trend_only": 0.30,
-    "standard":   0.20,
+    "standard": 0.20,
 }
 
 
@@ -1164,14 +1134,15 @@ def check_slippage(
         return False
 
     slippage_pct = abs(c - s) / s * 100.0
-    max_slip = float(MAX_SLIPPAGE_PCT.get(
-        str(mode or "standard").strip().lower(), 0.20
-    ))
+    max_slip = float(MAX_SLIPPAGE_PCT.get(str(mode or "standard").strip().lower(), 0.20))
     if slippage_pct > max_slip:
         logger.info(
-            "[Slippage] Skip entry: slippage=%.3f%% > max=%.3f%% "
-            "(mode=%s, signal=%.6f, current=%.6f)",
-            slippage_pct, max_slip, mode, s, c,
+            "[Slippage] Skip entry: slippage=%.3f%% > max=%.3f%% " "(mode=%s, signal=%.6f, current=%.6f)",
+            slippage_pct,
+            max_slip,
+            mode,
+            s,
+            c,
         )
         return True
     return False
@@ -1228,14 +1199,14 @@ class PreTradeGate:
     def check_all(
         self,
         symbol: str,
-        side: str,                        # "BUY" | "SELL"
-        proposed_amount_usdt: float,      # order size in quote (USDT)
+        side: str,  # "BUY" | "SELL"
+        proposed_amount_usdt: float,  # order size in quote (USDT)
         portfolio_value: float,
         open_positions_count: int,
         daily_trades_today: int,
         current_price: float,
-        signal_price: float,              # price observed when signal fired
-        signal_confidence: float,         # 0.0 – 1.0
+        signal_price: float,  # price observed when signal fired
+        signal_confidence: float,  # 0.0 – 1.0
         mode: str,
         config: Dict[str, Any],
         risk_manager: "RiskManager",
@@ -1253,85 +1224,90 @@ class PreTradeGate:
         mode_key = str(mode or "standard").strip().lower() or "standard"
 
         # ── 1. Portfolio value ─────────────────────────────────────
-        min_balance = float(
-            config.get("portfolio", {}).get("min_balance_threshold", 100)
+        min_balance = float(config.get("portfolio", {}).get("min_balance_threshold", 100))
+        checks.append(
+            {
+                "name": "Portfolio above minimum",
+                "passed": portfolio_value >= min_balance,
+                "reason": f"portfolio={portfolio_value:.2f} min={min_balance:.2f}",
+            }
         )
-        checks.append({
-            "name": "Portfolio above minimum",
-            "passed": portfolio_value >= min_balance,
-            "reason": f"portfolio={portfolio_value:.2f} min={min_balance:.2f}",
-        })
 
         # ── 2. Max open positions ──────────────────────────────────
         max_pos = int(config.get("risk", {}).get("max_open_positions", 6))
-        checks.append({
-            "name": "Max positions not reached",
-            "passed": open_positions_count < max_pos,
-            "reason": f"open={open_positions_count} max={max_pos}",
-        })
+        checks.append(
+            {
+                "name": "Max positions not reached",
+                "passed": open_positions_count < max_pos,
+                "reason": f"open={open_positions_count} max={max_pos}",
+            }
+        )
 
         # ── 3. Max daily trades ────────────────────────────────────
         max_daily = int(config.get("risk", {}).get("max_daily_trades", 50))
-        checks.append({
-            "name": "Daily trade limit",
-            "passed": daily_trades_today < max_daily,
-            "reason": f"today={daily_trades_today} max={max_daily}",
-        })
+        checks.append(
+            {
+                "name": "Daily trade limit",
+                "passed": daily_trades_today < max_daily,
+                "reason": f"today={daily_trades_today} max={max_daily}",
+            }
+        )
 
         # ── 4. Daily loss limit (delegated to RiskManager) ─────────
         daily_check = risk_manager.check_daily_loss_limit(portfolio_value)
-        checks.append({
-            "name": "Daily loss limit",
-            "passed": bool(daily_check.allowed),
-            "reason": daily_check.reason or ("OK" if daily_check.allowed else "blocked"),
-        })
+        checks.append(
+            {
+                "name": "Daily loss limit",
+                "passed": bool(daily_check.allowed),
+                "reason": daily_check.reason or ("OK" if daily_check.allowed else "blocked"),
+            }
+        )
 
         # ── 5. Position size ≤ max % of portfolio ──────────────────
-        max_pos_pct = float(
-            config.get("risk", {}).get("max_position_per_trade_pct", 15)
+        max_pos_pct = float(config.get("risk", {}).get("max_position_per_trade_pct", 15))
+        pos_pct = (proposed_amount_usdt / portfolio_value * 100.0) if portfolio_value > 0 else 0.0
+        checks.append(
+            {
+                "name": "Position size within limit",
+                "passed": pos_pct <= max_pos_pct,
+                "reason": f"size={pos_pct:.1f}% max={max_pos_pct:.1f}%",
+            }
         )
-        pos_pct = (
-            (proposed_amount_usdt / portfolio_value * 100.0)
-            if portfolio_value > 0 else 0.0
-        )
-        checks.append({
-            "name": "Position size within limit",
-            "passed": pos_pct <= max_pos_pct,
-            "reason": f"size={pos_pct:.1f}% max={max_pos_pct:.1f}%",
-        })
 
         # ── 6. Minimum order size (Binance.th min ≈ $10) ───────────
-        min_order = float(
-            config.get("trading", {}).get("min_order_amount", 10.0)
+        min_order = float(config.get("trading", {}).get("min_order_amount", 10.0))
+        checks.append(
+            {
+                "name": "Above minimum order size",
+                "passed": proposed_amount_usdt >= min_order,
+                "reason": f"order={proposed_amount_usdt:.2f} min={min_order:.2f}",
+            }
         )
-        checks.append({
-            "name": "Above minimum order size",
-            "passed": proposed_amount_usdt >= min_order,
-            "reason": f"order={proposed_amount_usdt:.2f} min={min_order:.2f}",
-        })
 
         # ── 7. Cooldown between trades (delegated to RiskManager) ──
         cooling = bool(risk_manager.check_cooldown())
-        checks.append({
-            "name": "Cooldown not active",
-            "passed": not cooling,
-            "reason": "Cooldown active" if cooling else "OK",
-        })
+        checks.append(
+            {
+                "name": "Cooldown not active",
+                "passed": not cooling,
+                "reason": "Cooldown active" if cooling else "OK",
+            }
+        )
 
         # ── 8. Signal confidence above mode threshold ──────────────
         mode_profiles = config.get("mode_indicator_profiles", {}) or {}
-        min_conf = float(
-            (mode_profiles.get(mode_key) or {}).get("min_confidence", 0.30)
-        )
+        min_conf = float((mode_profiles.get(mode_key) or {}).get("min_confidence", 0.30))
         try:
             conf_val = float(signal_confidence)
         except (TypeError, ValueError):
             conf_val = 0.0
-        checks.append({
-            "name": "Signal confidence threshold",
-            "passed": conf_val >= min_conf,
-            "reason": f"confidence={conf_val:.3f} min={min_conf:.3f}",
-        })
+        checks.append(
+            {
+                "name": "Signal confidence threshold",
+                "passed": conf_val >= min_conf,
+                "reason": f"confidence={conf_val:.3f} min={min_conf:.3f}",
+            }
+        )
 
         # ── 9. Slippage guard (skipped if no valid signal price) ───
         try:
@@ -1345,22 +1321,24 @@ class PreTradeGate:
         if sig_p > 0:
             slippage_pct = abs(cur_p - sig_p) / sig_p * 100.0
             max_slip = float(MAX_SLIPPAGE_PCT.get(mode_key, 0.20))
-            checks.append({
-                "name": "Slippage within limit",
-                "passed": slippage_pct <= max_slip,
-                "reason": f"slippage={slippage_pct:.3f}% max={max_slip:.3f}%",
-            })
+            checks.append(
+                {
+                    "name": "Slippage within limit",
+                    "passed": slippage_pct <= max_slip,
+                    "reason": f"slippage={slippage_pct:.3f}% max={max_slip:.3f}%",
+                }
+            )
 
         # ── 10. Drawdown limit (delegated to RiskManager) ──────────
         drawdown_pct = float(risk_manager._get_current_drawdown_pct(portfolio_value))
-        max_dd = float(
-            config.get("risk", {}).get("max_drawdown_threshold_pct", 12.0)
+        max_dd = float(config.get("risk", {}).get("max_drawdown_threshold_pct", 12.0))
+        checks.append(
+            {
+                "name": "Drawdown within limit",
+                "passed": drawdown_pct < max_dd,
+                "reason": f"drawdown={drawdown_pct:.1f}% max={max_dd:.1f}%",
+            }
         )
-        checks.append({
-            "name": "Drawdown within limit",
-            "passed": drawdown_pct < max_dd,
-            "reason": f"drawdown={drawdown_pct:.1f}% max={max_dd:.1f}%",
-        })
 
         # ── 11. Optional per-pair consecutive-loss cooldown ─────────
         if pair_loss_guard is not None:
@@ -1370,11 +1348,13 @@ class PreTradeGate:
                 if blocked and callable(getattr(pair_loss_guard, "block_reason", None))
                 else ("pair cooldown active" if blocked else "OK")
             )
-            checks.append({
-                "name": "Pair loss streak cooldown",
-                "passed": not blocked,
-                "reason": reason or ("OK" if not blocked else "blocked"),
-            })
+            checks.append(
+                {
+                    "name": "Pair loss streak cooldown",
+                    "passed": not blocked,
+                    "reason": reason or ("OK" if not blocked else "blocked"),
+                }
+            )
 
         # ── Aggregate ──────────────────────────────────────────────
         failed = [c["name"] for c in checks if not c["passed"]]

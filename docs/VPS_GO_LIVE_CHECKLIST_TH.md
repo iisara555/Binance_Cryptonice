@@ -2,6 +2,8 @@
 
 เช็กลิสต์สั้นสำหรับใช้หน้างานก่อนเปิดระบบจริงบน VPS
 
+ดัชนีเอกสาร: [README.md](./README.md)
+
 ## ก่อน start service
 
 - ยืนยันว่า Binance Thailand API key/secret ถูกต้องและ permission ตรงกับการใช้งานจริง

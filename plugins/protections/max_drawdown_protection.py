@@ -3,12 +3,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
-
 from freqtrade.constants import Config, LongShort
 from freqtrade.data.metrics import calculate_max_drawdown
 from freqtrade.persistence import Trade
 from freqtrade.plugins.protections import IProtection, ProtectionReturn
-
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +64,7 @@ class MaxDrawdown(IProtection):
                 )
 
                 trades_df = pd.DataFrame(
-                    [
-                        {"close_date": t.close_date_utc, "profit_abs": t.close_profit_abs}
-                        for t in trades_in_window
-                    ]
+                    [{"close_date": t.close_date_utc, "profit_abs": t.close_profit_abs} for t in trades_in_window]
                 )
                 actual_starting_balance = starting_balance + profit_before_window
                 drawdown_obj = calculate_max_drawdown(
@@ -82,10 +77,7 @@ class MaxDrawdown(IProtection):
             else:
                 # Legacy ratios-based calculation (default)
                 trades_df = pd.DataFrame(
-                    [
-                        {"close_date": t.close_date_utc, "close_profit": t.close_profit}
-                        for t in trades_in_window
-                    ]
+                    [{"close_date": t.close_date_utc, "close_profit": t.close_profit} for t in trades_in_window]
                 )
                 drawdown_obj = calculate_max_drawdown(trades_df, value_col="close_profit")
                 # In ratios mode, drawdown_abs is the cumulative ratio drop
@@ -110,9 +102,7 @@ class MaxDrawdown(IProtection):
 
         return None
 
-    def global_stop(
-        self, date_now: datetime, side: LongShort, starting_balance: float
-    ) -> ProtectionReturn | None:
+    def global_stop(self, date_now: datetime, side: LongShort, starting_balance: float) -> ProtectionReturn | None:
         """
         Stops trading (position entering) for all pairs
         This must evaluate to true for the whole period of the "cooldown period".

@@ -3,9 +3,7 @@ import re
 from freqtrade.constants import Config
 
 
-def expand_pairlist(
-    wildcardpl: list[str], available_pairs: list[str], keep_invalid: bool = False
-) -> list[str]:
+def expand_pairlist(wildcardpl: list[str], available_pairs: list[str], keep_invalid: bool = False) -> list[str]:
     """
     Expand pairlist potentially containing wildcards based on available markets.
     This will implicitly filter all pairs in the wildcard-list which are not in available_pairs.
@@ -28,11 +26,7 @@ def expand_pairlist(
                 raise ValueError(f"Wildcard error in {pair_wc}, {err}")
 
         # Remove wildcard pairs that didn't have a match.
-        result = [
-            element
-            for element in result
-            if re.fullmatch(r"^[\w:/-]+$", element) and "_" not in element
-        ]
+        result = [element for element in result if re.fullmatch(r"^[\w:/-]+$", element) and "_" not in element]
 
     else:
         for pair_wc in wildcardpl:

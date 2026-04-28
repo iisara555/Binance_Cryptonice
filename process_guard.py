@@ -15,14 +15,14 @@ Works cross-platform (Windows + Linux).
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import signal
 import sys
 import time
-import signal
-import logging
-import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ def _is_process_alive(pid: int) -> bool:
     if sys.platform == "win32":
         try:
             import ctypes
+
             kernel32 = ctypes.windll.kernel32
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
             STILL_ACTIVE = 259
@@ -78,14 +79,22 @@ def _is_python_bot_process(pid: int) -> bool:
     if sys.platform == "win32":
         try:
             import subprocess
+
             result = subprocess.run(
                 [
-                    "powershell", "-NoLogo", "-NoProfile",
-                    "-ExecutionPolicy", "Bypass", "-Command",
-                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" "
+                    "powershell",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    f'(Get-CimInstance Win32_Process -Filter "ProcessId={pid}" '
                     f"| Select-Object -First 1).CommandLine",
                 ],
-                capture_output=True, text=True, timeout=5, check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
             )
             cmdline = (result.stdout or "").strip()
             if not cmdline:
@@ -154,7 +163,9 @@ def _remove_lock_file(lock_path: Path) -> None:
         elif info:
             logger.debug(
                 "Lock file %s belongs to PID %s (we are %s) — leaving it",
-                lock_path, info.get("pid"), os.getpid(),
+                lock_path,
+                info.get("pid"),
+                os.getpid(),
             )
     except OSError as exc:
         logger.debug("Failed to remove lock file %s: %s", lock_path, exc)
@@ -168,8 +179,8 @@ def _force_kill_pid(pid: int, label: str = "process") -> None:
     try:
         if sys.platform == "win32":
             import subprocess as _sp
-            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                    capture_output=True, timeout=10)
+
+            _sp.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True, timeout=10)
         else:
             os.kill(pid, signal.SIGTERM)
             # Give it a short grace period then force kill
@@ -195,7 +206,8 @@ def kill_stale_bot_process(lock_path: Path = _DEFAULT_LOCK_FILE) -> bool:
     pid = info.get("pid", 0)
     if not _is_process_alive(pid):
         logger.info(
-            "Stale lock file found (PID %s is dead) — cleaning up", pid,
+            "Stale lock file found (PID %s is dead) — cleaning up",
+            pid,
         )
         try:
             lock_path.unlink(missing_ok=True)
@@ -257,9 +269,10 @@ def acquire_bot_lock(
                 started = info.get("started_at", "unknown")
                 src = info.get("source", "unknown")
                 logger.warning(
-                    "Killing existing bot instance to take over — "
-                    "PID=%s source=%s started=%s",
-                    pid, src, started,
+                    "Killing existing bot instance to take over — " "PID=%s source=%s started=%s",
+                    pid,
+                    src,
+                    started,
                 )
                 _force_kill_pid(pid, "Trading Bot")
                 # Wait a moment for the process to fully terminate
@@ -289,7 +302,9 @@ def acquire_bot_lock(
     _write_lock_file(lock_path, source)
     logger.info(
         "Bot lock acquired — PID=%s source=%s lock=%s",
-        os.getpid(), source, lock_path,
+        os.getpid(),
+        source,
+        lock_path,
     )
     return True
 

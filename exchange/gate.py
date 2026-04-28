@@ -4,14 +4,12 @@ import logging
 from datetime import datetime
 
 import ccxt
-
 from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import FtHas
-
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +104,7 @@ class Gate(Exchange):
             params.update({"timeInForce": "IOC"})
         return params
 
-    def get_trades_for_order(
-        self, order_id: str, pair: str, since: datetime, params: dict | None = None
-    ) -> list:
+    def get_trades_for_order(self, order_id: str, pair: str, since: datetime, params: dict | None = None) -> list:
         trades = super().get_trades_for_order(order_id, pair, since, params)
 
         if self.trading_mode == TradingMode.FUTURES:

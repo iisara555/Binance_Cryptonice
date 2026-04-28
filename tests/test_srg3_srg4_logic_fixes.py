@@ -1,13 +1,14 @@
 """
 Tests for SRG-3 (Negative Kelly clamp) and SRG-4 (Enum mismatch on market condition).
 """
-import pytest
+
 from unittest.mock import Mock
 
-from strategy_base import MarketCondition, SignalType, TradingSignal
-from signal_generator import SignalGenerator
-from risk_management import RiskManager, RiskConfig, RiskCheckResult
+import pytest
 
+from risk_management import RiskCheckResult, RiskConfig, RiskManager
+from signal_generator import SignalGenerator
+from strategy_base import MarketCondition, SignalType, TradingSignal
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SRG-4 — Enum mismatch on ensemble market condition
@@ -107,18 +108,20 @@ class TestSRG3NegativeKelly:
 
     @staticmethod
     def _make_rm() -> RiskManager:
-        return RiskManager(RiskConfig(
-            max_risk_per_trade_pct=1.0,
-            max_position_per_trade_pct=10.0,
-        ))
+        return RiskManager(
+            RiskConfig(
+                max_risk_per_trade_pct=1.0,
+                max_position_per_trade_pct=10.0,
+            )
+        )
 
     def test_negative_edge_trade_is_rejected(self):
         """With win-rate=30% and payoff=1:1 the full Kelly is −0.40.
         Negative Kelly implies negative expectancy and must be rejected."""
         rm = self._make_rm()
         entry = 100_000.0
-        sl = 99_000.0   # risk distance 1 000
-        tp = 101_000.0   # reward distance 1 000 → b = 1.0
+        sl = 99_000.0  # risk distance 1 000
+        tp = 101_000.0  # reward distance 1 000 → b = 1.0
         confidence = 0.30  # win rate 30%  →  Kelly = 0.30 - 0.70/1.0 = −0.40
 
         result = rm.calculate_position_size(
@@ -156,10 +159,10 @@ class TestSRG3NegativeKelly:
         Half-Kelly risk% is less than the default 1.0%."""
         rm = self._make_rm()
         entry = 100_000.0
-        sl = 99_000.0    # risk = 1 000
-        tp = 102_000.0    # reward = 2 000 → b = 2.0
+        sl = 99_000.0  # risk = 1 000
+        tp = 102_000.0  # reward = 2 000 → b = 2.0
         confidence = 0.70  # Kelly = 0.70 - 0.30/2.0 = 0.55
-                           # Half-Kelly = 0.275 → 27.5% → capped at 1.0%
+        # Half-Kelly = 0.275 → 27.5% → capped at 1.0%
 
         result = rm.calculate_position_size(
             portfolio_value=1_000_000.0,
@@ -177,8 +180,8 @@ class TestSRG3NegativeKelly:
         Must be rejected."""
         rm = self._make_rm()
         entry = 100_000.0
-        sl = 98_000.0     # risk = 2 000
-        tp = 101_000.0     # reward = 1 000 → b = 0.5
+        sl = 98_000.0  # risk = 2 000
+        tp = 101_000.0  # reward = 1 000 → b = 0.5
         confidence = 0.05  # Kelly = 0.05 - 0.95/0.5 = −1.85
 
         result = rm.calculate_position_size(

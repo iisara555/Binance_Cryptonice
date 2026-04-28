@@ -21,11 +21,11 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import threading
 import time
-from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-import threading
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -44,9 +44,21 @@ _DEFAULT_BINANCE_TH_PAIRS: List[str] = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "DOGEUS
 # --- NEW: SPEC_02 --- Valid Binance kline intervals — used for soft validation.
 _BINANCE_INTERVALS = frozenset(
     {
-        "1m", "3m", "5m", "15m", "30m",
-        "1h", "2h", "4h", "6h", "8h", "12h",
-        "1d", "3d", "1w", "1M",
+        "1m",
+        "3m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "4h",
+        "6h",
+        "8h",
+        "12h",
+        "1d",
+        "3d",
+        "1w",
+        "1M",
     }
 )
 
@@ -216,7 +228,9 @@ class BinanceThCollector:
             readiness = 35
         readiness = max(5, min(readiness, 2000))
         try:
-            target_override = int(mtf_config["backfill_target_bars"]) if "backfill_target_bars" in mtf_config else readiness
+            target_override = (
+                int(mtf_config["backfill_target_bars"]) if "backfill_target_bars" in mtf_config else readiness
+            )
         except (TypeError, ValueError, KeyError):
             target_override = readiness
         self._backfill_target_bars = max(readiness, max(1, target_override))
@@ -543,11 +557,7 @@ class BinanceThCollector:
                     except Exception:
                         continue
         else:
-            if (
-                latest_timestamp is not None
-                and latest_fetched is not None
-                and latest_fetched <= latest_timestamp
-            ):
+            if latest_timestamp is not None and latest_fetched is not None and latest_fetched <= latest_timestamp:
                 outcome["status"] = "up_to_date"
 
         paged_extra = 0
@@ -583,8 +593,7 @@ class BinanceThCollector:
             latest_stored = self._format_collection_timestamp(result.get("latest_stored"))
             latest_fetched = self._format_collection_timestamp(result.get("latest_fetched"))
             logger.info(
-                "[%s] %s: no new closed candles, already up to date "
-                "(stored=%s, fetched=%s)",
+                "[%s] %s: no new closed candles, already up to date " "(stored=%s, fetched=%s)",
                 pair,
                 timeframe,
                 latest_stored,
@@ -831,11 +840,7 @@ class BinanceThCollector:
         self._last_multi_timeframe_run = datetime.now(timezone.utc)
         self._next_multi_timeframe_collect_at = time.time() + self.multi_timeframe_interval
 
-        total = sum(
-            count
-            for pair_results in results.values()
-            for count in pair_results.values()
-        )
+        total = sum(count for pair_results in results.values() for count in pair_results.values())
         logger.info("[Backfill] ✅ Complete — %d candles stored across all pairs", total)
         return results
 
@@ -881,10 +886,7 @@ class BinanceThCollector:
                 success_count = sum(1 for v in results.values() if v)
                 logger.debug("Collected %d/%d pairs", success_count, len(current_pairs))
 
-                if (
-                    self.multi_timeframe_enabled
-                    and time.time() >= self._next_multi_timeframe_collect_at
-                ):
+                if self.multi_timeframe_enabled and time.time() >= self._next_multi_timeframe_collect_at:
                     mtf_results = self.collect_all_multi_timeframe()
                     self._last_multi_timeframe_results = mtf_results
                     self._last_multi_timeframe_run = datetime.now(timezone.utc)
@@ -1006,11 +1008,7 @@ class DataAggregator:
             "lowest_price": min(closes) if closes else 0,
             "avg_price": sum(closes) / len(closes) if closes else 0,
             "volatility": self._calculate_volatility(closes),
-            "price_change_pct": (
-                (closes[-1] - closes[0]) / closes[0] * 100
-                if closes and closes[0] > 0
-                else 0
-            ),
+            "price_change_pct": ((closes[-1] - closes[0]) / closes[0] * 100 if closes and closes[0] > 0 else 0),
         }
 
     def _calculate_volatility(self, prices: List[float]) -> float:
@@ -1029,7 +1027,7 @@ class DataAggregator:
 
         mean = sum(returns) / len(returns)
         variance = sum((r - mean) ** 2 for r in returns) / len(returns)
-        return variance ** 0.5
+        return variance**0.5
 
 
 if __name__ == "__main__":

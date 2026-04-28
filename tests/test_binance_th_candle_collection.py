@@ -1,13 +1,12 @@
+import threading
 from concurrent.futures import Future
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
-import threading
 
 import data_collector
 from api_client import BinanceThClient
-from data_collector import BinanceThCollector
-from data_collector import resolve_startup_backfill_timeframes
+from data_collector import BinanceThCollector, resolve_startup_backfill_timeframes
 
 
 def _collector_backfill_defaults(
@@ -72,10 +71,12 @@ def test_binance_th_collector_collect_ohlc_accepts_tradingview_dict_payload():
     collector.db = Mock()
     collector.db.get_latest_price.return_value = None
     collector.db.insert_prices_batch.side_effect = lambda rows: len(rows)
-    collector.get_ohlc = Mock(return_value=[
-        [1710000000000, "99.5", "102.0", "99.0", "100.0", "12.0"],
-        [1710000060000, "100.5", "103.0", "100.0", "101.0", "13.5"],
-    ])
+    collector.get_ohlc = Mock(
+        return_value=[
+            [1710000000000, "99.5", "102.0", "99.0", "100.0", "12.0"],
+            [1710000060000, "100.5", "103.0", "100.0", "101.0", "13.5"],
+        ]
+    )
 
     stored = BinanceThCollector.collect_ohlc(collector, "THB_BTC", interval=1, timeframe="1m")
 
@@ -93,9 +94,11 @@ def test_binance_th_collector_collect_ohlc_result_reports_up_to_date_for_existin
     collector.db = Mock()
     collector.db.get_latest_price.return_value = SimpleNamespace(timestamp=datetime(2026, 4, 5, 15, 45, 0))
     closed_candle_ts = int(datetime(2026, 4, 5, 15, 45, 0, tzinfo=timezone.utc).timestamp())
-    collector.get_ohlc = Mock(return_value=[
-        [closed_candle_ts * 1000, "2.9738", "2.9738", "2.9738", "2.9738", "33.54294169"],
-    ])
+    collector.get_ohlc = Mock(
+        return_value=[
+            [closed_candle_ts * 1000, "2.9738", "2.9738", "2.9738", "2.9738", "33.54294169"],
+        ]
+    )
 
     detail = BinanceThCollector._collect_ohlc_result(collector, "THB_DOGE", interval=15, timeframe="15m")
 
@@ -236,9 +239,7 @@ def test_binance_th_collector_warm_pairs_uses_dedicated_pair_executor(monkeypatc
             return future
 
     monkeypatch.setattr(data_collector, "ThreadPoolExecutor", _ImmediatePairExecutor)
-    collector.collect_multi_timeframe = Mock(
-        side_effect=lambda pair, timeframes: {tf: len(pair) for tf in timeframes}
-    )
+    collector.collect_multi_timeframe = Mock(side_effect=lambda pair, timeframes: {tf: len(pair) for tf in timeframes})
 
     results = BinanceThCollector._warm_pairs_multi_timeframe(collector, ["THB_BTC", "THB_SOL"])
 

@@ -13,7 +13,6 @@ from copy import deepcopy
 from typing import Any
 
 import websockets
-
 from freqtrade.constants import PairWithTimeframe
 from freqtrade.util import dt_ts
 
@@ -23,7 +22,7 @@ logger = logging.getLogger(__name__)
 class BitkubWS:
     """
     Bitkub WebSocket API Client for real-time data
-    
+
     WebSocket URL: wss://socket.bitkub.com
     """
 
@@ -128,12 +127,8 @@ class BitkubWS:
         """Subscribe to ticker channel"""
         if not self._websocket:
             return
-        
-        message = {
-            "type": "subscribe",
-            "channel": "ticker",
-            "symbols": symbols
-        }
+
+        message = {"type": "subscribe", "channel": "ticker", "symbols": symbols}
         await self._websocket.send(json.dumps(message))
         logger.debug(f"Subscribed to ticker: {symbols}")
 
@@ -141,12 +136,8 @@ class BitkubWS:
         """Subscribe to orderbook channel"""
         if not self._websocket:
             return
-        
-        message = {
-            "type": "subscribe",
-            "channel": "market.books",
-            "symbols": symbols
-        }
+
+        message = {"type": "subscribe", "channel": "market.books", "symbols": symbols}
         await self._websocket.send(json.dumps(message))
         logger.debug(f"Subscribed to orderbook: {symbols}")
 
@@ -154,12 +145,8 @@ class BitkubWS:
         """Subscribe to trade channel"""
         if not self._websocket:
             return
-        
-        message = {
-            "type": "subscribe",
-            "channel": "trade",
-            "symbols": symbols
-        }
+
+        message = {"type": "subscribe", "channel": "trade", "symbols": symbols}
         await self._websocket.send(json.dumps(message))
         logger.debug(f"Subscribed to trade: {symbols}")
 
@@ -167,15 +154,11 @@ class BitkubWS:
         """Subscribe to OHLCV channel"""
         if not self._websocket:
             return
-        
+
         bitkub_interval = self.TIMEFRAME_MAP.get(timeframe, "1")
         channel = f"market.ohlcv.{bitkub_interval}"
-        
-        message = {
-            "type": "subscribe",
-            "channel": channel,
-            "symbols": [symbol]
-        }
+
+        message = {"type": "subscribe", "channel": channel, "symbols": [symbol]}
         await self._websocket.send(json.dumps(message))
         logger.debug(f"Subscribed to OHLCV {timeframe}: {symbol}")
 
@@ -255,16 +238,12 @@ class BitkubWS:
             # Subscribe to ticker
             if symbol not in self._subscribed_tickers:
                 self._subscribed_tickers.add(symbol)
-                asyncio.run_coroutine_threadsafe(
-                    self._subscribe_ticker([symbol]), self._loop
-                )
+                asyncio.run_coroutine_threadsafe(self._subscribe_ticker([symbol]), self._loop)
 
             # Subscribe to OHLCV
             if symbol not in self._subscribed_ohlcvs.get(timeframe, set()):
                 self._subscribed_ohlcvs[symbol].add(timeframe)
-                asyncio.run_coroutine_threadsafe(
-                    self._subscribe_ohlcv(symbol, timeframe), self._loop
-                )
+                asyncio.run_coroutine_threadsafe(self._subscribe_ohlcv(symbol, timeframe), self._loop)
 
             # Track request time
             pair_timeframe = (symbol, timeframe, "spot")
@@ -273,7 +252,7 @@ class BitkubWS:
     def get_ohlcv(self, symbol: str, timeframe: str) -> list:
         """Get cached OHLCV data for a symbol and timeframe"""
         interval = self.TIMEFRAME_MAP.get(timeframe, "1")
-        
+
         with self._lock:
             return deepcopy(self._ohlcvs.get(symbol, {}).get(interval, []))
 
@@ -297,8 +276,7 @@ class BitkubWS:
         self._running = False
         if self._loop and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(
-                self._websocket.close() if self._websocket else asyncio.sleep(0),
-                self._loop
+                self._websocket.close() if self._websocket else asyncio.sleep(0), self._loop
             )
         if self._thread:
             self._thread.join(timeout=5)

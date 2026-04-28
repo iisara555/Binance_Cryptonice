@@ -8,41 +8,46 @@ Crypto Bot V1 คือบอทเทรด Binance Thailand แบบ standalo
 
 ## จุดเด่นของระบบ (Core Features)
 
-*   **Advanced Trading Strategy:** กลยุทธ์ Dual EMA (50/200) + MACD Crossover ตัดสินใจแม่นยำ พร้อมวิเคราะห์แนวโน้มจากหลายกรอบเวลา (Multi-Timeframe Confluence)
-*   **Dynamic Risk Management:** คำนวณจุดตัดขาดทุน (SL) และทำกำไร (TP) อัตโนมัติด้วยค่าความผันผวน (ATR) พร้อมระบบเลื่อนจุดตัดขาดทุนเพื่อล็อกกำไร (Trailing Stop)
-*   **Position Sizing & Kelly Criterion:** คำนวณขนาดไม้การเทรดแบบ Fractional Kelly ตามความเสี่ยงสูงสุดต่อไม้ (เช่น 1.5% ของพอร์ต) ช่วยปกป้องเงินต้นได้อย่างมีประสิทธิภาพ
-*   **Smart Order Management System (OMS):**
-    *   ติดตามสถานะออเดอร์แบบ Real-time และแก้ปัญหาออเดอร์ค้าง (Reprice/Cancel) อัตโนมัติ
-    *   ทนทานต่อ API ล่มด้วยระบบ Circuit Breaker และ Token Bucket Rate Limiter (ลดความเสี่ยงโดน exchange rate-limit)
-    *   กู้คืนสถานะออเดอร์เมื่อไฟดับหรือรีสตาร์ทบอท (DB-First Reconciliation)
-*   **Hybrid Dynamic Coin Selection:** สแกนหาคู่เหรียญที่ถือครองอยู่บน Binance Thailand อัตโนมัติ ผสานกับระบบ Whitelist ที่ตั้งค่าเพิ่มเองได้
-*   **Rich CLI Dashboard:** หน้าปัดควบคุมผ่าน Terminal ที่สวยงาม แสดงพอร์ตโฟลิโอ สถานะระบบ ออเดอร์ที่เปิดอยู่ พร้อมช่องแชทสำหรับพิมพ์คำสั่ง (Buy/Sell/Close/Track) สดๆ
-*   **Complete Observability:** มีระบบแจ้งเตือนเข้า Telegram ทุกการเคลื่อนไหวสำคัญ พร้อม Endpoint ตรวจสุขภาพ (`/health`) และ Endpoint สำหรับ Grafana (`/metrics`)
+- **Advanced Trading Strategy:** กลยุทธ์ Dual EMA (50/200) + MACD Crossover ตัดสินใจแม่นยำ พร้อมวิเคราะห์แนวโน้มจากหลายกรอบเวลา (Multi-Timeframe Confluence)
+- **Dynamic Risk Management:** คำนวณจุดตัดขาดทุน (SL) และทำกำไร (TP) อัตโนมัติด้วยค่าความผันผวน (ATR) พร้อมระบบเลื่อนจุดตัดขาดทุนเพื่อล็อกกำไร (Trailing Stop)
+- **Position Sizing & Kelly Criterion:** คำนวณขนาดไม้การเทรดแบบ Fractional Kelly ตามความเสี่ยงสูงสุดต่อไม้ (เช่น 1.5% ของพอร์ต) ช่วยปกป้องเงินต้นได้อย่างมีประสิทธิภาพ
+- **Smart Order Management System (OMS):**
+  - ติดตามสถานะออเดอร์แบบ Real-time และแก้ปัญหาออเดอร์ค้าง (Reprice/Cancel) อัตโนมัติ
+  - ทนทานต่อ API ล่มด้วยระบบ Circuit Breaker และ Token Bucket Rate Limiter (ลดความเสี่ยงโดน exchange rate-limit)
+  - กู้คืนสถานะออเดอร์เมื่อไฟดับหรือรีสตาร์ทบอท (DB-First Reconciliation)
+- **Hybrid Dynamic Coin Selection:** สแกนหาคู่เหรียญที่ถือครองอยู่บน Binance Thailand อัตโนมัติ ผสานกับระบบ Whitelist ที่ตั้งค่าเพิ่มเองได้
+- **Rich CLI Dashboard:** หน้าปัดควบคุมผ่าน Terminal ที่สวยงาม แสดงพอร์ตโฟลิโอ สถานะระบบ ออเดอร์ที่เปิดอยู่ พร้อมช่องแชทสำหรับพิมพ์คำสั่ง (Buy/Sell/Close/Track) สดๆ
+- **Complete Observability:** มีระบบแจ้งเตือนเข้า Telegram ทุกการเคลื่อนไหวสำคัญ พร้อม Endpoint ตรวจสุขภาพ (`/health`) และ Endpoint สำหรับ Grafana (`/metrics`)
 
 ## โครงสร้างโปรเจกต์
 
 ```text
 .
-|- main.py                          # Entry point หลักของ trading bot
-|- bot_config.yaml                  # Runtime configuration หลัก (ปรับแต่งทุกอย่างที่นี่)
-|- config.py                        # โหลด Environment Variables เชิงลึก
-|- cli_ui.py                        # UI หน้าจอ Dashboard บน Terminal (Rich)
-|- trading_bot.py                   # ตัวควบคุมลูปหลักของการเทรด (Orchestrator)
-|- trade_executor.py                # ระบบ OMS จัดการยิง/ยกเลิก/ติดตามคำสั่งซื้อขาย
-|- signal_generator.py              # ตัวสร้างและรวบรวมสัญญาณการเทรด (Sniper)
-|- risk_management.py               # ตัวจัดการความเสี่ยง (Position sizing, R:R)
-|- bitkub_websocket.py              # Legacy WebSocket adapter; Binance TH runtime uses REST until a Binance stream adapter exists
-|- database.py                      # จัดการ SQLite (เขียนแบบ WAL-mode ป้องกัน DB Lock)
-|- run_bot.bat                      # Portable Windows launcher
-|- restart_bot.bat                  # Wrapper สำหรับ restart loop
-|- activate_env.ps1                 # Portable PowerShell venv activation
-|- deploy/windows/                  # Windows NSSM service scripts
-|- deploy/systemd/                  # Linux systemd templates
-|- scripts/vps_preflight.py         # ตัวตรวจ readiness ของระบบ
-|- strategies/                      # Technical trading strategies
-|- tests/                           # Pytest suite
-\- docs/                            # เอกสารประกอบการใช้งานและ deploy
+|- main.py                          # TradingBotApp — entrypoint, โหลด config / collector / orchestrator
+|- bot_config.yaml                  # Runtime configuration หลัก
+|- config.py                        # Environment + validation
+|- cli_ui.py                        # Rich terminal dashboard + command center
+|- trading_bot.py                   # TradingBotOrchestrator (facade — logic เชิงลึกแยกใต้ trading/bot_runtime/)
+|- trade_executor.py                # OMS — คำสั่งซื้อขาย ยกเลิก reconcile
+|- signal_generator.py              # Signal pipeline / strategies
+|- risk_management.py               # Risk, SL/TP, pre-trade gates
+|- database.py                      # SQLite WAL
+|- binance_websocket.py / …         # Adapter ราคาเรียลไทม์เมื่อมี (และ legacy bitkub_websocket fallback)
+|- trading/
+|  |- orchestrator.py              # BotMode, TradeDecision, SignalSource
+|  |- bot_runtime/                 # ชิ้นที่ delegate จาก TradingBotOrchestrator (ลูป, WS, iteration, pause, …)
+|  |- signal_runtime.py            # Per-pair iteration, execution plan, guards
+|  |- execution_runtime.py          # Semi/full/dry, pending approvals
+|  |- portfolio_runtime.py          # Portfolio snapshots / marks
+|  |- startup_runtime.py           # reconcile on startup / bootstrap
+|  +- …                             # เช่น position_monitor, candle_retention, order_history_utils
+|- run_bot.bat / restart_bot.bat / activate_env.ps1
+|- deploy/windows/, deploy/systemd/
+|- scripts/vps_preflight.py
+|- strategies/, tests/, docs/
 ```
+
+ดัชนีเอกสารและสถาปัตยกรรม: [docs/README.md](docs/README.md), [docs/ADR-001-domain-boundaries-and-dependencies.md](docs/ADR-001-domain-boundaries-and-dependencies.md)
 
 ## ความต้องการของระบบ
 
@@ -109,7 +114,7 @@ default profile ปัจจุบัน:
 - `LINK`
 - `POL`
 
-รายการ bullet ด้านบนสะท้อนไฟล์ [`coin_whitelist.json`](coin_whitelist.json) — แก้ whitelist หลักที่ไฟล์นั้น
+รายการ bullet ด้านบนสะท้อนไฟล์ `[coin_whitelist.json](coin_whitelist.json)` — แก้ whitelist หลักที่ไฟล์นั้น
 
 ดูตัวอย่างไฟล์แบบเต็มและคำอธิบายเพิ่มเติมได้ที่ [docs/MANUAL_THAI.md](docs/MANUAL_THAI.md)
 
@@ -336,6 +341,8 @@ python -m pytest tests/test_integration.py tests/test_project_paths.py tests/tes
 
 ## เอกสารเพิ่มเติม
 
+- [docs/README.md](docs/README.md) — **ดัชนีเอกสารทั้งหมด** (เริ่มที่นี่)
+- [docs/ADR-001-domain-boundaries-and-dependencies.md](docs/ADR-001-domain-boundaries-and-dependencies.md) — โดเมน, `trading/bot_runtime/` module map
 - [.env.example](.env.example)
 - [docs/WINDOWS_ALWAYS_ON_SETUP_TH.md](docs/WINDOWS_ALWAYS_ON_SETUP_TH.md)
 - [docs/DAILY_QUICK_START_TH.md](docs/DAILY_QUICK_START_TH.md)
@@ -352,3 +359,4 @@ python -m pytest tests/test_integration.py tests/test_project_paths.py tests/tes
 3. เริ่มจาก `BOT_STARTUP_TEST_MODE=1` แล้วเช็ก health endpoint
 4. รัน strict preflight ให้ผ่าน
 5. ค่อยตัดสินใจว่าจะเปิด live trading หรือไม่
+

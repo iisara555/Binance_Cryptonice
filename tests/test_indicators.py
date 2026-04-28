@@ -81,7 +81,12 @@ def test_calculate_adx_uses_wilder_smoothing():
     plus_di = np.divide(100.0 * plus_dm_smoothed, atr_values, out=np.zeros_like(atr_values), where=valid_atr)
     minus_di = np.divide(100.0 * minus_dm_smoothed, atr_values, out=np.zeros_like(atr_values), where=valid_atr)
     di_sum = plus_di + minus_di
-    dx = np.divide(100.0 * np.abs(plus_di - minus_di), di_sum, out=np.zeros_like(di_sum), where=np.isfinite(di_sum) & (di_sum > 0.0))
+    dx = np.divide(
+        100.0 * np.abs(plus_di - minus_di),
+        di_sum,
+        out=np.zeros_like(di_sum),
+        where=np.isfinite(di_sum) & (di_sum > 0.0),
+    )
     expected = pd.Series(dx).ewm(alpha=1.0 / 14.0, adjust=False, min_periods=14).mean().fillna(0.0).clip(0.0, 100.0)
 
     np.testing.assert_allclose(result.to_numpy(), expected.to_numpy())

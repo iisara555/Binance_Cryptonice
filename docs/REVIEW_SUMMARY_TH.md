@@ -178,7 +178,7 @@ pytest tests/test_position_manager.py -q --tb=short ✓
 - Dead code cleanup แล้ว
 
 **จุดที่ต้องระวัง:**
-- `trading_bot.py` ยาว 3675 lines (ควร split)
+- โค้ด orchestrator ถูกแยกออกเป็นแพ็กเกจ [`trading/bot_runtime/`](../trading/bot_runtime/) และ helper ใต้ `trading/` — `trading_bot.py` ทำหน้าที่ facade / wiring เป็นหลัก (ดู [ADR-001](ADR-001-domain-boundaries-and-dependencies.md))
 - BalanceMonitor shutdown latency อาจเกิน 10s ถ้า API ช้า
 
 **การดูแลรักษา:**

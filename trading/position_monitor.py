@@ -5,10 +5,10 @@ import threading
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
-from trade_executor import OrderSide
 from state_management import TradeLifecycleState
+from trade_executor import OrderSide
+from trading.coercion import coerce_trade_float
 from trading.cost_basis import resolve_sane_entry_cost
-
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,7 @@ def _resolve_sane_entry_cost(
     )
 
 
-def _coerce_trade_float(val: Any, default: float = 0.0) -> float:
-    if val is None:
-        return default
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return default
+_coerce_trade_float = coerce_trade_float
 
 
 def _coerce_trade_datetime(val: Any) -> Optional[datetime]:
@@ -164,7 +158,16 @@ class PositionMonitorHelper:
             try:
                 threading.Thread(
                     target=self.bot._ws_sltp_exit_wrapper,
-                    args=(position_id, pos_symbol, side, amount, current_price, triggered, entry_price, total_entry_cost),
+                    args=(
+                        position_id,
+                        pos_symbol,
+                        side,
+                        amount,
+                        current_price,
+                        triggered,
+                        entry_price,
+                        total_entry_cost,
+                    ),
                     daemon=True,
                 ).start()
             except Exception as exc:
@@ -258,26 +261,32 @@ class PositionMonitorHelper:
                 total_fees = entry_fee + exit_fee
                 net_pnl = net_exit - entry_cost - entry_fee
                 net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
-                trigger_label = "Take Profit" if triggered == "TP" else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
+                trigger_label = (
+                    "Take Profit"
+                    if triggered == "TP"
+                    else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
+                )
 
                 try:
-                    self.bot.db.log_closed_trade({
-                        "symbol": symbol,
-                        "side": side,
-                        "amount": amount,
-                        "entry_price": entry_price,
-                        "exit_price": current_price,
-                        "entry_cost": entry_cost,
-                        "gross_exit": gross_exit,
-                        "entry_fee": entry_fee,
-                        "exit_fee": exit_fee,
-                        "total_fees": total_fees,
-                        "net_pnl": net_pnl,
-                        "net_pnl_pct": net_pnl_pct,
-                        "trigger": triggered,
-                        "price_source": "ws",
-                        "closed_at": now,
-                    })
+                    self.bot.db.log_closed_trade(
+                        {
+                            "symbol": symbol,
+                            "side": side,
+                            "amount": amount,
+                            "entry_price": entry_price,
+                            "exit_price": current_price,
+                            "entry_cost": entry_cost,
+                            "gross_exit": gross_exit,
+                            "entry_fee": entry_fee,
+                            "exit_fee": exit_fee,
+                            "total_fees": total_fees,
+                            "net_pnl": net_pnl,
+                            "net_pnl_pct": net_pnl_pct,
+                            "trigger": triggered,
+                            "price_source": "ws",
+                            "closed_at": now,
+                        }
+                    )
                 except Exception as exc:
                     logger.error(f"[WS-SLTP] Failed to log closed trade: {exc}", exc_info=True)
 
@@ -389,7 +398,11 @@ class PositionMonitorHelper:
 
             if not triggered and self.bot._scalping_mode_enabled:
                 is_bootstrap = str(position_id).startswith("bootstrap_")
-                timeout_minutes = getattr(self.bot, "_bootstrap_position_timeout_minutes", None) if is_bootstrap else getattr(self.bot, "_scalping_position_timeout_minutes", None)
+                timeout_minutes = (
+                    getattr(self.bot, "_bootstrap_position_timeout_minutes", None)
+                    if is_bootstrap
+                    else getattr(self.bot, "_scalping_position_timeout_minutes", None)
+                )
                 if opened_at is not None and timeout_minutes and float(timeout_minutes) > 0:
                     hold_seconds = (datetime.now() - opened_at).total_seconds()
                     if hold_seconds >= (float(timeout_minutes) * 60):
@@ -459,27 +472,33 @@ class PositionMonitorHelper:
                 total_fees = entry_fee + exit_fee
                 net_pnl = net_exit - entry_cost - entry_fee
                 net_pnl_pct = (net_pnl / entry_cost * 100) if entry_cost > 0 else 0
-                trigger_label = "Take Profit" if triggered == "TP" else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
+                trigger_label = (
+                    "Take Profit"
+                    if triggered == "TP"
+                    else ("Stop Loss" if triggered == "SL" else (triggered or "Exit"))
+                )
 
                 try:
-                    self.bot.db.log_closed_trade({
-                        "symbol": pos_symbol,
-                        "side": side,
-                        "amount": amount,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "entry_cost": entry_cost,
-                        "gross_exit": gross_exit,
-                        "entry_fee": entry_fee,
-                        "exit_fee": exit_fee,
-                        "total_fees": total_fees,
-                        "net_pnl": net_pnl,
-                        "net_pnl_pct": net_pnl_pct,
-                        "trigger": triggered,
-                        "price_source": price_source,
-                        "opened_at": pos.get("timestamp"),
-                        "closed_at": now,
-                    })
+                    self.bot.db.log_closed_trade(
+                        {
+                            "symbol": pos_symbol,
+                            "side": side,
+                            "amount": amount,
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "entry_cost": entry_cost,
+                            "gross_exit": gross_exit,
+                            "entry_fee": entry_fee,
+                            "exit_fee": exit_fee,
+                            "total_fees": total_fees,
+                            "net_pnl": net_pnl,
+                            "net_pnl_pct": net_pnl_pct,
+                            "trigger": triggered,
+                            "price_source": price_source,
+                            "opened_at": pos.get("timestamp"),
+                            "closed_at": now,
+                        }
+                    )
                 except Exception as exc:
                     logger.error(f"Failed to log closed trade: {exc}", exc_info=True)
 

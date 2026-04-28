@@ -34,7 +34,6 @@ from freqtrade.util.rich_progress import CustomProgress
 from freqtrade.util.rich_tables import print_df_rich_table, print_rich_table
 from freqtrade.util.template_renderer import render_template, render_template_with_fallback  # noqa
 
-
 __all__ = [
     "dt_floor_day",
     "dt_from_ts",

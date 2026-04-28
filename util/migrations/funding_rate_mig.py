@@ -4,7 +4,6 @@ from freqtrade.constants import Config
 from freqtrade.enums import TradingMode
 from freqtrade.exchange import Exchange
 
-
 logger = logging.getLogger(__name__)
 
 

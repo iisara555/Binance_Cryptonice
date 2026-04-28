@@ -4,20 +4,22 @@ Prometheus Metrics Module
 Prometheus metrics collection for monitoring trading bot performance.
 Provides counters, gauges, and histograms for observability.
 """
+
 from __future__ import annotations
 
 import logging
 import time
-from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class MetricType(Enum):
     """Metric types supported"""
+
     COUNTER = "counter"
     GAUGE = "gauge"
     HISTOGRAM = "histogram"
@@ -27,6 +29,7 @@ class MetricType(Enum):
 @dataclass
 class Metric:
     """Base metric definition"""
+
     name: str
     description: str
     metric_type: MetricType
@@ -38,31 +41,31 @@ class Metric:
 class PrometheusMetrics:
     """
     Lightweight Prometheus metrics collector.
-    
+
     Features:
     - Counters for discrete events (orders, trades, errors)
     - Gauges for current values (balance, positions)
     - Histograms for distributions (latency, duration)
     - Exportable to Prometheus scrape format
-    
+
     Usage:
         metrics = PrometheusMetrics()
-        
+
         # Counters
         metrics.increment_counter("orders_placed_total", labels={"symbol": "BTC_THB"})
         metrics.increment_counter("orders_filled_total", labels={"side": "buy"})
-        
+
         # Gauges
         metrics.set_gauge("portfolio_value_thb", 100000.0)
         metrics.set_gauge("open_positions", 3)
-        
+
         # Histograms
         metrics.observe_histogram("order_latency_seconds", 0.5)
-        
+
         # Export for Prometheus
         output = metrics.export()
     """
-    
+
     def __init__(self):
         self._counters: Dict[str, float] = {}
         self._counter_labels: Dict[str, Dict[tuple, float]] = {}
@@ -72,25 +75,25 @@ class PrometheusMetrics:
         self._histogram_labels: Dict[str, Dict[tuple, list]] = {}
         self._metadata: Dict[str, str] = {}
         self._last_export: float = time.time()
-        
+
         logger.info("PrometheusMetrics initialized")
-    
+
     def _make_label_tuple(self, labels: Dict[str, str]) -> tuple:
         """Convert label dict to sortable tuple"""
         return tuple(sorted(labels.items()))
-    
+
     def _format_labels(self, labels: Dict[str, str]) -> str:
         """Format labels for Prometheus output"""
         if not labels:
             return ""
         return "{" + ",".join(f'{k}="{v}"' for k, v in sorted(labels.items())) + "}"
-    
+
     # ── Counter Operations ────────────────────────────────────────────────────
-    
+
     def increment_counter(self, name: str, value: float = 1.0, labels: Optional[Dict[str, str]] = None) -> None:
         """
         Increment a counter metric.
-        
+
         Args:
             name: Metric name (e.g., 'orders_total')
             value: Amount to increment (default: 1)
@@ -103,7 +106,7 @@ class PrometheusMetrics:
                 self._counter_labels[name] = {}
             label_tuple = self._make_label_tuple(labels)
             self._counter_labels[name][label_tuple] = self._counter_labels[name].get(label_tuple, 0.0) + value
-    
+
     def get_counter(self, name: str, labels: Optional[Dict[str, str]] = None) -> float:
         """Get current counter value"""
         if labels is None:
@@ -112,13 +115,13 @@ class PrometheusMetrics:
             label_tuple = self._make_label_tuple(labels)
             return self._counter_labels[name].get(label_tuple, 0.0)
         return 0.0
-    
+
     # ── Gauge Operations ──────────────────────────────────────────────────────
-    
+
     def set_gauge(self, name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
         """
         Set a gauge metric value.
-        
+
         Args:
             name: Metric name (e.g., 'portfolio_value')
             value: New value
@@ -131,7 +134,7 @@ class PrometheusMetrics:
                 self._gauge_labels[name] = {}
             label_tuple = self._make_label_tuple(labels)
             self._gauge_labels[name][label_tuple] = value
-    
+
     def get_gauge(self, name: str, labels: Optional[Dict[str, str]] = None) -> float:
         """Get current gauge value"""
         if labels is None:
@@ -140,23 +143,23 @@ class PrometheusMetrics:
             label_tuple = self._make_label_tuple(labels)
             return self._gauge_labels[name].get(label_tuple, 0.0)
         return 0.0
-    
+
     def increment_gauge(self, name: str, value: float = 1.0, labels: Optional[Dict[str, str]] = None) -> None:
         """Increment a gauge value"""
         current = self.get_gauge(name, labels)
         self.set_gauge(name, current + value, labels)
-    
+
     def decrement_gauge(self, name: str, value: float = 1.0, labels: Optional[Dict[str, str]] = None) -> None:
         """Decrement a gauge value"""
         current = self.get_gauge(name, labels)
         self.set_gauge(name, current - value, labels)
-    
+
     # ── Histogram Operations ─────────────────────────────────────────────────
-    
+
     def observe_histogram(self, name: str, value: float, labels: Optional[Dict[str, str]] = None) -> None:
         """
         Observe a value for histogram.
-        
+
         Args:
             name: Metric name (e.g., 'order_latency_seconds')
             value: Observed value
@@ -178,7 +181,7 @@ class PrometheusMetrics:
             self._histogram_labels[name][label_tuple].append(value)
             if len(self._histogram_labels[name][label_tuple]) > 1000:
                 self._histogram_labels[name][label_tuple] = self._histogram_labels[name][label_tuple][-1000:]
-    
+
     def get_histogram_stats(self, name: str, labels: Optional[Dict[str, str]] = None) -> Dict[str, float]:
         """Get histogram statistics (count, sum, mean, p50, p95, p99)"""
         if labels is None:
@@ -189,13 +192,13 @@ class PrometheusMetrics:
                 values = self._histogram_labels[name].get(label_tuple, [])
             else:
                 values = []
-        
+
         if not values:
             return {"count": 0, "sum": 0, "mean": 0, "p50": 0, "p95": 0, "p99": 0}
-        
+
         sorted_values = sorted(values)
         n = len(sorted_values)
-        
+
         return {
             "count": n,
             "sum": sum(sorted_values),
@@ -206,25 +209,25 @@ class PrometheusMetrics:
             "min": sorted_values[0],
             "max": sorted_values[-1],
         }
-    
+
     # ── Metadata ─────────────────────────────────────────────────────────────
-    
+
     def set_help(self, name: str, description: str) -> None:
         """Set metric help/description"""
         self._metadata[f"{name}_help"] = description
-    
+
     # ── Export ────────────────────────────────────────────────────────────────
-    
+
     def export(self) -> str:
         """
         Export all metrics in Prometheus text format.
-        
+
         Returns:
             String in Prometheus scrape format
         """
         lines = []
         timestamp = int(time.time() * 1000)
-        
+
         # Export counters
         for name, value in sorted(self._counters.items()):
             help_text = self._metadata.get(f"{name}_help", "")
@@ -232,7 +235,7 @@ class PrometheusMetrics:
                 lines.append(f"# HELP {name} {help_text}")
             lines.append(f"# TYPE {name} counter")
             lines.append(f"{name} {value} {timestamp}")
-        
+
         # Export labeled counters
         for name, label_values in sorted(self._counter_labels.items()):
             help_text = self._metadata.get(f"{name}_help", "")
@@ -243,7 +246,7 @@ class PrometheusMetrics:
                 labels = dict(label_tuple)
                 label_str = self._format_labels(labels)
                 lines.append(f"{name}{label_str} {value} {timestamp}")
-        
+
         # Export gauges
         for name, value in sorted(self._gauges.items()):
             help_text = self._metadata.get(f"{name}_help", "")
@@ -251,7 +254,7 @@ class PrometheusMetrics:
                 lines.append(f"# HELP {name} {help_text}")
             lines.append(f"# TYPE {name} gauge")
             lines.append(f"{name} {value} {timestamp}")
-        
+
         # Export labeled gauges
         for name, label_values in sorted(self._gauge_labels.items()):
             help_text = self._metadata.get(f"{name}_help", "")
@@ -262,7 +265,7 @@ class PrometheusMetrics:
                 labels = dict(label_tuple)
                 label_str = self._format_labels(labels)
                 lines.append(f"{name}{label_str} {value} {timestamp}")
-        
+
         # Export histograms
         for name in sorted(self._histograms.keys()):
             stats = self.get_histogram_stats(name)
@@ -277,10 +280,10 @@ class PrometheusMetrics:
             lines.append(f'{name}_bucket{{le="+Inf"}} {stats["count"]} {timestamp}')
             lines.append(f"{name}_sum {stats['sum']} {timestamp}")
             lines.append(f"{name}_count {stats['count']} {timestamp}")
-        
+
         self._last_export = time.time()
         return "\n".join(lines)
-    
+
     def reset(self) -> None:
         """Reset all metrics"""
         self._counters.clear()
@@ -290,7 +293,7 @@ class PrometheusMetrics:
         self._histograms.clear()
         self._histogram_labels.clear()
         logger.info("PrometheusMetrics reset")
-    
+
     def get_summary(self) -> Dict[str, Any]:
         """Get summary of all metrics"""
         return {
@@ -303,10 +306,11 @@ class PrometheusMetrics:
 
 # ── Predefined Trading Metrics ───────────────────────────────────────────────
 
+
 def create_trading_metrics(metrics: PrometheusMetrics) -> None:
     """
     Initialize predefined trading metrics with descriptions.
-    
+
     Call this once at startup to register all metric metadata.
     """
     # Order metrics
@@ -314,34 +318,34 @@ def create_trading_metrics(metrics: PrometheusMetrics) -> None:
     metrics.set_help("orders_filled_total", "Total number of orders filled")
     metrics.set_help("orders_cancelled_total", "Total number of orders cancelled")
     metrics.set_help("orders_failed_total", "Total number of failed orders")
-    
+
     # Latency metrics
     metrics.set_help("order_latency_seconds", "Order placement latency in seconds")
     metrics.set_help("api_latency_seconds", "API request latency in seconds")
     metrics.set_help("websocket_latency_seconds", "WebSocket message processing latency")
-    
+
     # Balance metrics
     metrics.set_help("portfolio_value_thb", "Total portfolio value in THB")
     metrics.set_help("available_balance_thb", "Available THB balance")
     metrics.set_help("reserved_balance_thb", "Reserved balance in orders")
-    
+
     # Position metrics
     metrics.set_help("open_positions", "Number of open positions")
     metrics.set_help("position_value_thb", "Total value of open positions")
-    
+
     # PnL metrics
     metrics.set_help("daily_pnl_thb", "Daily profit/loss in THB")
     metrics.set_help("total_pnl_thb", "Total profit/loss in THB")
     metrics.set_help("win_rate", "Percentage of winning trades")
-    
+
     # Circuit breaker metrics
     metrics.set_help("circuit_breaker_state", "Circuit breaker state (0=closed, 1=open, 2=half)")
     metrics.set_help("api_errors_total", "Total API errors")
-    
+
     # Signal metrics
     metrics.set_help("signals_generated_total", "Total signals generated")
     metrics.set_help("signals_executed_total", "Total signals that led to execution")
-    
+
     logger.info("Trading metrics initialized")
 
 
@@ -359,6 +363,7 @@ def get_metrics() -> PrometheusMetrics:
 
 
 # ── Convenience Functions ────────────────────────────────────────────────────
+
 
 def record_order_placed(symbol: str, side: str, amount: float) -> None:
     """Record an order placement"""

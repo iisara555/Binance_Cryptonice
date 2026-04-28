@@ -72,21 +72,21 @@ MIN_TRADES_FOR_SCORE: int = 10
 # expand/contract the search space without changing any other code.
 PARAM_SPACE: Dict[str, Dict[str, List[Any]]] = {
     "scalping": {
-        "fast_ema":         [5, 7, 9, 12],
-        "slow_ema":         [17, 21, 26, 34],
-        "rsi_period":       [7, 9, 14],
-        "rsi_oversold":     [28, 30, 34, 38],
-        "rsi_overbought":   [62, 66, 70, 72],
-        "stop_loss_pct":    [0.8, 1.0, 1.2, 1.5],
-        "take_profit_pct":  [2.0, 2.5, 3.0, 3.5],
-        "atr_multiplier":   [1.0, 1.2, 1.5, 1.8],
+        "fast_ema": [5, 7, 9, 12],
+        "slow_ema": [17, 21, 26, 34],
+        "rsi_period": [7, 9, 14],
+        "rsi_oversold": [28, 30, 34, 38],
+        "rsi_overbought": [62, 66, 70, 72],
+        "stop_loss_pct": [0.8, 1.0, 1.2, 1.5],
+        "take_profit_pct": [2.0, 2.5, 3.0, 3.5],
+        "atr_multiplier": [1.0, 1.2, 1.5, 1.8],
     },
     "trend_only": {
-        "fast_ema":         [9, 12, 15, 20],
-        "slow_ema":         [26, 34, 50, 65],
-        "stop_loss_pct":    [3.0, 4.0, 4.5, 5.0],
-        "take_profit_pct":  [8.0, 10.0, 12.0, 15.0],
-        "atr_multiplier":   [1.5, 1.8, 2.0, 2.5],
+        "fast_ema": [9, 12, 15, 20],
+        "slow_ema": [26, 34, 50, 65],
+        "stop_loss_pct": [3.0, 4.0, 4.5, 5.0],
+        "take_profit_pct": [8.0, 10.0, 12.0, 15.0],
+        "atr_multiplier": [1.5, 1.8, 2.0, 2.5],
     },
 }
 
@@ -98,10 +98,10 @@ class OptimizationResult:
     params: Dict[str, Any]
 
     sharpe_ratio: float
-    win_rate: float       # 0.0–1.0 fraction
-    total_return: float   # percentage (e.g. 12.5 = +12.5%)
+    win_rate: float  # 0.0–1.0 fraction
+    total_return: float  # percentage (e.g. 12.5 = +12.5%)
 
-    max_drawdown: float   # percentage (e.g. 7.2 = 7.2% peak-to-trough)
+    max_drawdown: float  # percentage (e.g. 7.2 = 7.2% peak-to-trough)
     profit_factor: float
     total_trades: int
     avg_trade_pct: float  # mean per-trade net return (percentage)
@@ -118,6 +118,7 @@ class OptimizationResult:
 # ---------------------------------------------------------------------------
 # Indicator helpers (vectorised — one pass per parameter set)
 # ---------------------------------------------------------------------------
+
 
 def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=max(int(span), 1), adjust=False).mean()
@@ -155,7 +156,9 @@ def _atr(
 
 
 def _bollinger(
-    series: pd.Series, period: int = 20, std_dev: float = 2.0,
+    series: pd.Series,
+    period: int = 20,
+    std_dev: float = 2.0,
 ) -> Tuple[pd.Series, pd.Series]:
     rolling_mean = series.rolling(window=period).mean()
     rolling_std = series.rolling(window=period).std(ddof=0)
@@ -167,6 +170,7 @@ def _bollinger(
 # ---------------------------------------------------------------------------
 # HyperoptRunner
 # ---------------------------------------------------------------------------
+
 
 class HyperoptRunner:
     """Grid-search + walk-forward optimiser over ``PARAM_SPACE``.
@@ -189,12 +193,8 @@ class HyperoptRunner:
 
         hyperopt_cfg = self.config.get("hyperopt", {}) or {}
         self.timeframe: str = str(hyperopt_cfg.get("timeframe", DEFAULT_TIMEFRAME))
-        self.fee_pct: float = float(
-            hyperopt_cfg.get("fee_pct", BINANCE_TH_ROUND_TRIP_FEE)
-        )
-        self.initial_capital: float = float(
-            hyperopt_cfg.get("initial_capital", DEFAULT_INITIAL_CAPITAL)
-        )
+        self.fee_pct: float = float(hyperopt_cfg.get("fee_pct", BINANCE_TH_ROUND_TRIP_FEE))
+        self.initial_capital: float = float(hyperopt_cfg.get("initial_capital", DEFAULT_INITIAL_CAPITAL))
         self.atr_period: int = int(hyperopt_cfg.get("atr_period", DEFAULT_ATR_PERIOD))
 
     # ────────────────────────── Public API ──────────────────────────
@@ -215,8 +215,7 @@ class HyperoptRunner:
         """
         param_grid = PARAM_SPACE.get(mode)
         if not param_grid:
-            logger.error("[Hyperopt] Unknown mode '%s' — supported: %s",
-                         mode, sorted(PARAM_SPACE.keys()))
+            logger.error("[Hyperopt] Unknown mode '%s' — supported: %s", mode, sorted(PARAM_SPACE.keys()))
             return []
 
         combinations = self._generate_combinations(param_grid)
@@ -230,17 +229,22 @@ class HyperoptRunner:
             logger.error(
                 "[Hyperopt] Insufficient candles for %s %s (have %d, need %d) — "
                 "did the data collector backfill this range?",
-                symbol, self.timeframe,
+                symbol,
+                self.timeframe,
                 0 if candles is None else len(candles),
                 MIN_CANDLES_REQUIRED,
             )
             return []
 
         logger.info(
-            "[Hyperopt] %s/%s: testing %d combinations × %d splits "
-            "(%d candles, %s → %s)",
-            symbol, mode, len(combinations), n_splits,
-            len(candles), start_date, end_date,
+            "[Hyperopt] %s/%s: testing %d combinations × %d splits " "(%d candles, %s → %s)",
+            symbol,
+            mode,
+            len(combinations),
+            n_splits,
+            len(candles),
+            start_date,
+            end_date,
         )
 
         started_at = time.time()
@@ -252,7 +256,10 @@ class HyperoptRunner:
                 pct = (i / len(combinations)) * 100.0
                 logger.info(
                     "[Hyperopt] Progress: %d/%d (%.1f%%) — %.1fs elapsed",
-                    i, len(combinations), pct, elapsed,
+                    i,
+                    len(combinations),
+                    pct,
+                    elapsed,
                 )
 
             wf_scores = self._walk_forward(candles, mode, params, n_splits)
@@ -266,12 +273,14 @@ class HyperoptRunner:
         elapsed_total = time.time() - started_at
         logger.info(
             "[Hyperopt] Completed %d/%d combinations in %.1fs (%.2fs avg)",
-            len(results), len(combinations), elapsed_total,
+            len(results),
+            len(combinations),
+            elapsed_total,
             elapsed_total / max(len(combinations), 1),
         )
 
         results.sort(key=lambda r: r.score, reverse=True)
-        return results[:max(int(top_n), 1)]
+        return results[: max(int(top_n), 1)]
 
     def apply_best_params(
         self,
@@ -287,17 +296,13 @@ class HyperoptRunner:
         try:
             import yaml
         except ImportError as exc:
-            raise RuntimeError(
-                "PyYAML is required to apply hyperopt results to bot_config.yaml"
-            ) from exc
+            raise RuntimeError("PyYAML is required to apply hyperopt results to bot_config.yaml") from exc
 
         target = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
         if not target.exists():
             raise FileNotFoundError(f"Config not found at {target}")
 
-        backup = target.with_name(
-            f"{target.stem}.backup.{datetime.now():%Y%m%d_%H%M%S}{target.suffix}"
-        )
+        backup = target.with_name(f"{target.stem}.backup.{datetime.now():%Y%m%d_%H%M%S}{target.suffix}")
         shutil.copy(target, backup)
         logger.info("[Hyperopt] Backup saved → %s", backup)
 
@@ -383,10 +388,7 @@ class HyperoptRunner:
 
             oversold = params.get("rsi_oversold")
             overbought = params.get("rsi_overbought")
-            if (
-                oversold is not None and overbought is not None
-                and oversold >= overbought
-            ):
+            if oversold is not None and overbought is not None and oversold >= overbought:
                 continue
 
             sl = params.get("stop_loss_pct")
@@ -428,9 +430,7 @@ class HyperoptRunner:
         cols_needed = {"timestamp", "open", "high", "low", "close", "volume"}
         missing = cols_needed - set(df.columns)
         if missing:
-            logger.error(
-                "[Hyperopt] Candle frame missing required columns: %s", sorted(missing)
-            )
+            logger.error("[Hyperopt] Candle frame missing required columns: %s", sorted(missing))
             return None
 
         df = df.sort_values("timestamp").reset_index(drop=True)
@@ -514,8 +514,7 @@ class HyperoptRunner:
         ema_slow = _ema(close, slow)
         rsi = _rsi(close, rsi_period)
         upper, lower = _bollinger(close, bb_period, bb_std)
-        atr = _atr(candles["high"].astype(float), candles["low"].astype(float),
-                   close, self.atr_period)
+        atr = _atr(candles["high"].astype(float), candles["low"].astype(float), close, self.atr_period)
 
         prev_fast = ema_fast.shift(1)
         prev_slow = ema_slow.shift(1)
@@ -632,14 +631,16 @@ class HyperoptRunner:
                 if exit_price is not None:
                     gross = (exit_price - entry_price) / entry_price
                     net = gross - fee_pct
-                    equity *= (1.0 + net)
-                    trades.append({
-                        "entry": entry_price,
-                        "exit": exit_price,
-                        "pnl_pct": net,
-                        "bars": i - entry_idx,
-                        "reason": exit_reason,
-                    })
+                    equity *= 1.0 + net
+                    trades.append(
+                        {
+                            "entry": entry_price,
+                            "exit": exit_price,
+                            "pnl_pct": net,
+                            "bars": i - entry_idx,
+                            "reason": exit_reason,
+                        }
+                    )
                     in_position = False
 
                     peak_equity = max(peak_equity, equity)
@@ -667,14 +668,16 @@ class HyperoptRunner:
             last_close = float(closes[-1])
             gross = (last_close - entry_price) / entry_price
             net = gross - fee_pct
-            equity *= (1.0 + net)
-            trades.append({
-                "entry": entry_price,
-                "exit": last_close,
-                "pnl_pct": net,
-                "bars": (n - 1) - entry_idx,
-                "reason": "EOT",
-            })
+            equity *= 1.0 + net
+            trades.append(
+                {
+                    "entry": entry_price,
+                    "exit": last_close,
+                    "pnl_pct": net,
+                    "bars": (n - 1) - entry_idx,
+                    "reason": "EOT",
+                }
+            )
             peak_equity = max(peak_equity, equity)
             if peak_equity > 0:
                 dd = (peak_equity - equity) / peak_equity
@@ -811,18 +814,14 @@ class HyperoptRunner:
         dd_term = 1.0 - min(max(max_dd, 0.0) / 20.0, 1.0)
         pf_term = min(max(pf, 0.0) / 3.0, 1.0)
 
-        score = (
-            sharpe * 0.40
-            + win_rate * 0.30
-            + dd_term * 0.20
-            + pf_term * 0.10
-        )
+        score = sharpe * 0.40 + win_rate * 0.30 + dd_term * 0.20 + pf_term * 0.10
         return round(float(score), 4)
 
 
 # ---------------------------------------------------------------------------
 # Pretty printer (console "box" output described in SPEC_07)
 # ---------------------------------------------------------------------------
+
 
 def _format_results_table(
     symbol: str,
@@ -846,14 +845,8 @@ def _format_results_table(
     out = [
         border_top,
         line(f" HYPEROPT RESULTS"),
-        line(
-            f" Symbol: {symbol.upper()}  |  Mode: {mode}  |  "
-            f"Period: {start_date} -> {end_date}"
-        ),
-        line(
-            f" Combinations tested: {combinations_tested}  |  "
-            f"Walk-forward splits: {n_splits}"
-        ),
+        line(f" Symbol: {symbol.upper()}  |  Mode: {mode}  |  " f"Period: {start_date} -> {end_date}"),
+        line(f" Combinations tested: {combinations_tested}  |  " f"Walk-forward splits: {n_splits}"),
         border_mid,
         line(" RANK   SCORE   SHARPE  WIN%    MAX_DD  PF    TRADES"),
     ]
@@ -862,12 +855,14 @@ def _format_results_table(
         out.append(line(" (no results — try widening the search window)"))
     else:
         for rank, res in enumerate(results, start=1):
-            out.append(line(
-                f" #{rank:<4} {res.score:>5.3f}  {res.sharpe_ratio:>5.2f}  "
-                f"{res.win_rate * 100:>5.1f}%  "
-                f"{-abs(res.max_drawdown):>5.1f}%  "
-                f"{res.profit_factor:>4.2f}  {res.total_trades:>4d}"
-            ))
+            out.append(
+                line(
+                    f" #{rank:<4} {res.score:>5.3f}  {res.sharpe_ratio:>5.2f}  "
+                    f"{res.win_rate * 100:>5.1f}%  "
+                    f"{-abs(res.max_drawdown):>5.1f}%  "
+                    f"{res.profit_factor:>4.2f}  {res.total_trades:>4d}"
+                )
+            )
             param_str = _format_params(res.params)
             # Wrap long parameter strings across multiple table rows.
             for chunk in _wrap_text(param_str, width - 6):
@@ -925,6 +920,7 @@ def _write_stdout_safe(text: str) -> None:
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def _parse_date(raw: str, end_of_day: bool = False) -> datetime:
     raw = (raw or "").strip()
@@ -989,37 +985,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         prog="hyperopt",
         description="Crypto_Sniper grid-search + walk-forward optimiser (SPEC_07).",
     )
-    parser.add_argument("--symbol", type=str, default=None,
-                        help="Trading pair, e.g. BTCUSDT (omit when --all is set)")
-    parser.add_argument("--mode", type=str, default="scalping",
-                        choices=sorted(PARAM_SPACE.keys()) + ["all"],
-                        help="Strategy mode to optimise")
-    parser.add_argument("--start", type=str, required=True,
-                        help="Window start (YYYY-MM-DD, UTC)")
-    parser.add_argument("--end", type=str, required=True,
-                        help="Window end (YYYY-MM-DD, UTC)")
-    parser.add_argument("--splits", type=int, default=5,
-                        help="Walk-forward window count (default 5)")
-    parser.add_argument("--top", type=int, default=5,
-                        help="Number of top combinations to keep (default 5)")
-    parser.add_argument("--all", action="store_true",
-                        help="Run every pair from config.data.pairs against every mode")
-    parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH),
-                        help="Path to bot_config.yaml")
-    parser.add_argument("--db", type=str, default=None,
-                        help="Override SQLite database path")
-    parser.add_argument("--results-dir", type=str, default=str(DEFAULT_RESULTS_DIR),
-                        help="Output directory for ranked JSON results")
-    parser.add_argument("--apply", action="store_true",
-                        help="Apply the best parameters to bot_config.yaml without prompting")
-    parser.add_argument("--no-prompt", action="store_true",
-                        help="Skip the interactive 'Apply best params? [y/n]' prompt")
-    parser.add_argument("--no-save", action="store_true",
-                        help="Skip writing the JSON results file")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Suppress the ranked table output to stdout")
-    parser.add_argument("--log-level", type=str, default="INFO",
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--symbol", type=str, default=None, help="Trading pair, e.g. BTCUSDT (omit when --all is set)")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="scalping",
+        choices=sorted(PARAM_SPACE.keys()) + ["all"],
+        help="Strategy mode to optimise",
+    )
+    parser.add_argument("--start", type=str, required=True, help="Window start (YYYY-MM-DD, UTC)")
+    parser.add_argument("--end", type=str, required=True, help="Window end (YYYY-MM-DD, UTC)")
+    parser.add_argument("--splits", type=int, default=5, help="Walk-forward window count (default 5)")
+    parser.add_argument("--top", type=int, default=5, help="Number of top combinations to keep (default 5)")
+    parser.add_argument("--all", action="store_true", help="Run every pair from config.data.pairs against every mode")
+    parser.add_argument("--config", type=str, default=str(DEFAULT_CONFIG_PATH), help="Path to bot_config.yaml")
+    parser.add_argument("--db", type=str, default=None, help="Override SQLite database path")
+    parser.add_argument(
+        "--results-dir", type=str, default=str(DEFAULT_RESULTS_DIR), help="Output directory for ranked JSON results"
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Apply the best parameters to bot_config.yaml without prompting"
+    )
+    parser.add_argument(
+        "--no-prompt", action="store_true", help="Skip the interactive 'Apply best params? [y/n]' prompt"
+    )
+    parser.add_argument("--no-save", action="store_true", help="Skip writing the JSON results file")
+    parser.add_argument("--quiet", action="store_true", help="Suppress the ranked table output to stdout")
+    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -1047,7 +1039,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     logger.info(
         "[Hyperopt] Plan: pairs=%s modes=%s window=%s..%s splits=%d top=%d",
-        pairs, modes, args.start, args.end, args.splits, args.top,
+        pairs,
+        modes,
+        args.start,
+        args.end,
+        args.splits,
+        args.top,
     )
 
     overall_status = 0
@@ -1102,24 +1099,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             best = results[0]
             should_apply = args.apply
             if not should_apply and not args.no_prompt and not args.all:
-                should_apply = _prompt_yes_no(
-                    f"\nApply best params for {symbol}/{mode}? [y/n]: "
-                )
+                should_apply = _prompt_yes_no(f"\nApply best params for {symbol}/{mode}? [y/n]: ")
 
             if should_apply:
                 try:
                     runner.apply_best_params(best, mode, Path(args.config))
                     logger.info(
                         "[Hyperopt] Applied %s/%s best params (score=%.3f)",
-                        symbol, mode, best.score,
+                        symbol,
+                        mode,
+                        best.score,
                     )
                 except Exception as exc:
                     logger.error("[Hyperopt] Failed to apply params: %s", exc)
                     overall_status = 1
             else:
                 logger.info(
-                    "[Hyperopt] Skipping config update for %s/%s "
-                    "(use --apply to persist)", symbol, mode,
+                    "[Hyperopt] Skipping config update for %s/%s " "(use --apply to persist)",
+                    symbol,
+                    mode,
                 )
 
     return overall_status

@@ -1,0 +1,8 @@
+[tool.black]
+line-length = 120
+extend-exclude = "deploy/vps_snapshots"
+
+[tool.isort]
+profile = "black"
+line_length = 120
+extend_skip_glob = ["deploy/vps_snapshots/**", ".venv/**", "**/__pycache__/**"]

@@ -5,7 +5,6 @@ from datetime import datetime
 from typing import Any
 
 import ccxt
-
 from freqtrade.enums import MarginMode, PriceType, TradingMode
 from freqtrade.exceptions import (
     DDosProtection,
@@ -19,7 +18,6 @@ from freqtrade.exchange.exchange import Exchange
 from freqtrade.exchange.exchange_types import CcxtBalances, CcxtOrder, FtHas
 from freqtrade.misc import safe_value_nested
 from freqtrade.util.datetime_helpers import dt_from_ts
-
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +87,7 @@ class Krakenfutures(Exchange):
                 if flex:
                     usd_free = self._safe_float(flex.get("availableMargin"))
                     # Prefer marginEquity for consistency (same basis as availableMargin)
-                    raw_total = (
-                        flex.get("marginEquity")
-                        or flex.get("portfolioValue")
-                        or flex.get("balanceValue")
-                    )
+                    raw_total = flex.get("marginEquity") or flex.get("portfolioValue") or flex.get("balanceValue")
                     usd_total = self._safe_float(raw_total)
                     if usd_free is not None or usd_total is not None:
                         # Use available value for both if only one is present
@@ -118,9 +112,7 @@ class Krakenfutures(Exchange):
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not get balance due to {e.__class__.__name__}. Message: {e}"
-            ) from e
+            raise TemporaryError(f"Could not get balance due to {e.__class__.__name__}. Message: {e}") from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 
@@ -154,9 +146,7 @@ class Krakenfutures(Exchange):
         filled = self._safe_float(order.get("filled")) or 0.0
         if order.get("status") in ("canceled", "closed") and filled > 0:
             # Compute VWAP and cost for filled orders.
-            trades = self.get_trades_for_order(
-                order["id"], order["symbol"], since=dt_from_ts(order["timestamp"])
-            )
+            trades = self.get_trades_for_order(order["id"], order["symbol"], since=dt_from_ts(order["timestamp"]))
             if trades:
                 total_amount = sum(t["amount"] for t in trades)
                 if total_amount:
@@ -167,9 +157,7 @@ class Krakenfutures(Exchange):
                         order["cost"] = sum(trade_costs)
         return order
 
-    def get_trades_for_order(
-        self, order_id: str, pair: str, since: datetime, params: dict | None = None
-    ) -> list:
+    def get_trades_for_order(self, order_id: str, pair: str, since: datetime, params: dict | None = None) -> list:
         """Fetch trades and enrich with calculated fees.
 
         Kraken Futures' /fills endpoint does not include fee amounts — only
@@ -193,9 +181,7 @@ class Krakenfutures(Exchange):
         return trades
 
     @retrier(retries=API_FETCH_ORDER_RETRY_COUNT)
-    def fetch_order(
-        self, order_id: str, pair: str, params: dict[str, Any] | None = None
-    ) -> CcxtOrder:
+    def fetch_order(self, order_id: str, pair: str, params: dict[str, Any] | None = None) -> CcxtOrder:
         """Fetch order with direct CCXT call and fallback to history endpoints."""
         if self._config.get("dry_run"):
             return self.fetch_dry_run_order(order_id)
@@ -226,13 +212,9 @@ class Krakenfutures(Exchange):
 
         # Order not in status, open, closed, or canceled endpoints - genuinely gone.
         # Raise non-retrying InvalidOrderException (Kraken has limited history retention).
-        raise InvalidOrderException(
-            f"Order not found in any endpoint (pair: {pair} id: {order_id})"
-        )
+        raise InvalidOrderException(f"Order not found in any endpoint (pair: {pair} id: {order_id})")
 
-    def _fetch_order_fallback(
-        self, order_id: str, pair: str, params: dict[str, Any]
-    ) -> CcxtOrder | None:
+    def _fetch_order_fallback(self, order_id: str, pair: str, params: dict[str, Any]) -> CcxtOrder | None:
         """Search open, closed, and canceled order endpoints for order_id.
 
         Kraken Futures' orders/status endpoint only returns currently open orders.
@@ -246,9 +228,7 @@ class Krakenfutures(Exchange):
         # Open orders include triggers by default. Avoid passing trigger/stop flags
         # to prevent endpoint/filter mismatches.
         open_params = {k: v for k, v in params.items() if k not in ("trigger", "stop")}
-        order = self._find_order_in_list(
-            self._api.fetch_open_orders, pair, open_params, order_id_str
-        )
+        order = self._find_order_in_list(self._api.fetch_open_orders, pair, open_params, order_id_str)
         if order is not None:
             return order
 
@@ -283,9 +263,7 @@ class Krakenfutures(Exchange):
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not get order due to {e.__class__.__name__}. Message: {e}"
-            ) from e
+            raise TemporaryError(f"Could not get order due to {e.__class__.__name__}. Message: {e}") from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
         return None

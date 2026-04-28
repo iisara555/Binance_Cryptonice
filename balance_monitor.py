@@ -285,7 +285,11 @@ class BalanceMonitor:
                 self._endpoint_health[label] = {
                     "healthy": True,
                     "last_error": "",
-                    "restored_at": datetime.now().isoformat() if previous is False else self._endpoint_health.get(label, {}).get("restored_at"),
+                    "restored_at": (
+                        datetime.now().isoformat()
+                        if previous is False
+                        else self._endpoint_health.get(label, {}).get("restored_at")
+                    ),
                 }
                 if previous is False:
                     logger.info("Balance monitor connection restored for %s", label)
@@ -488,9 +492,7 @@ class BalanceMonitor:
 
         tracked_coins = set(self.coin_min_thresholds)
         tracked_coins.update(
-            asset
-            for asset, payload in balances.items()
-            if asset != self.quote_asset and payload.get("total", 0.0) > 0
+            asset for asset, payload in balances.items() if asset != self.quote_asset and payload.get("total", 0.0) > 0
         )
         for coin in tracked_coins:
             minimum = self.coin_min_thresholds.get(coin, self.global_coin_min_threshold)
@@ -550,7 +552,7 @@ class BalanceMonitor:
             "WITHDRAWAL_INITIATED": "ถอนเงิน (รอดำเนินการ)",
             "WITHDRAWAL_COMPLETED": "ถอนเงินสำเร็จ",
         }
-        label = event_labels.get(event.event_type, event.event_type.replace('_', ' '))
+        label = event_labels.get(event.event_type, event.event_type.replace("_", " "))
         emoji = "🟢" if "DEPOSIT" in event.event_type else "🔴"
         return (
             f"{emoji} <b>{label}</b>  {event.coin}\n"

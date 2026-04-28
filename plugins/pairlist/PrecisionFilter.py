@@ -9,7 +9,6 @@ from freqtrade.exchange import ROUND_UP
 from freqtrade.exchange.exchange_types import Ticker
 from freqtrade.plugins.pairlist.IPairList import IPairList, SupportsBacktesting
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -69,15 +68,12 @@ class PrecisionFilter(IPairList):
         # Adjust stop-prices to precision
         sp = self._exchange.price_to_precision(pair, stop_price, rounding_mode=ROUND_UP)
 
-        stop_gap_price = self._exchange.price_to_precision(
-            pair, stop_price * 0.99, rounding_mode=ROUND_UP
-        )
+        stop_gap_price = self._exchange.price_to_precision(pair, stop_price * 0.99, rounding_mode=ROUND_UP)
         logger.debug(f"{pair} - {sp} : {stop_gap_price}")
 
         if sp <= stop_gap_price:
             self.log_once(
-                f"Removed {pair} from whitelist, because "
-                f"stop price {sp} would be <= stop limit {stop_gap_price}",
+                f"Removed {pair} from whitelist, because " f"stop price {sp} would be <= stop limit {stop_gap_price}",
                 logger.info,
             )
             return False

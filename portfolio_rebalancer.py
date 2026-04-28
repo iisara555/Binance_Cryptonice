@@ -11,15 +11,15 @@ Data-Aware: Skips rebalancing for assets with insufficient candle data.
 Author: Memo 🐕
 """
 
-import logging
 import json
+import logging
 import os
 import sqlite3
-from datetime import datetime, date, timedelta, timezone
-from typing import Optional, Dict, Any, List, Tuple, Sequence
-from dataclasses import dataclass, field
-from enum import Enum
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from enum import Enum
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def _load_target_allocation(config: Dict[str, Any]) -> Dict[str, float]:
     for key, value in os.environ.items():
         if not key.startswith("REBALANCE_TARGET_") or key == "REBALANCE_TARGET_ALLOCATION":
             continue
-        asset = key[len("REBALANCE_TARGET_"):].strip().upper()
+        asset = key[len("REBALANCE_TARGET_") :].strip().upper()
         pct = _coerce_float(str(value).strip().rstrip("%"), 0.0)
         if asset and pct > 0:
             env_prefixed[asset] = pct
@@ -161,20 +161,21 @@ def _apply_sideways_target_allocation(
 # Helper Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, bool, str]:
     """
     Check how many candles an asset has in the database.
-    
+
     Args:
         symbol: Trading pair symbol (e.g. "BTCUSDT" or "BTC")
         db_path: Path to SQLite database
-    
+
     Returns:
         (candle_count, data_ready, status_message)
     """
     if not os.path.exists(db_path):
         return 0, False, "DB not found"
-    
+
     try:
         # Config often uses "BTC"; DB stores exchange pairs like "BTCUSDT".
         raw_symbol = str(symbol or "").upper()
@@ -183,7 +184,7 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
             db_symbols.extend([f"{raw_symbol}{DEFAULT_QUOTE_ASSET}", f"THB_{raw_symbol}"])
         if not db_symbols:
             return 0, False, "No symbol"
-        
+
         conn = sqlite3.connect(db_path)
         try:
             cur = conn.cursor()
@@ -192,7 +193,7 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
             count = cur.fetchone()[0]
         finally:
             conn.close()
-        
+
         if count >= MIN_CANDLES_FOR_TRADING:
             return count, True, "ready"
         elif count > 0:
@@ -200,7 +201,7 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
             return count, False, f"collecting ({pct:.0f}%)"
         else:
             return 0, False, "no data"
-    
+
     except Exception as e:
         logger.warning(f"Error checking candle count for {symbol}: {e}")
         return 0, False, f"error: {e}"
@@ -216,10 +217,7 @@ def has_ever_held(symbol: str, db_path: str = DEFAULT_DB_PATH) -> bool:
         conn = sqlite3.connect(db_path)
         try:
             cur = conn.cursor()
-            cur.execute(
-                'SELECT 1 FROM held_coins_history WHERE UPPER(symbol) = ? LIMIT 1',
-                (db_symbol,)
-            )
+            cur.execute("SELECT 1 FROM held_coins_history WHERE UPPER(symbol) = ? LIMIT 1", (db_symbol,))
             exists = cur.fetchone() is not None
         finally:
             conn.close()
@@ -230,10 +228,10 @@ def has_ever_held(symbol: str, db_path: str = DEFAULT_DB_PATH) -> bool:
 
 
 class RebalanceStrategy(Enum):
-    THRESHOLD = "threshold"    # Rebalance when drift > threshold
-    CALENDAR = "calendar"     # Rebalance on schedule
-    RISK = "risk"             # Adjust based on volatility
-    COMBINED = "combined"     # All of the above
+    THRESHOLD = "threshold"  # Rebalance when drift > threshold
+    CALENDAR = "calendar"  # Rebalance on schedule
+    RISK = "risk"  # Adjust based on volatility
+    COMBINED = "combined"  # All of the above
 
 
 class RebalanceTrigger(Enum):
@@ -250,18 +248,19 @@ class RebalanceTrigger(Enum):
 @dataclass
 class AllocationTarget:
     """Target allocation for a single asset."""
+
     symbol: str
-    target_pct: float          # Target percentage (0-100)
+    target_pct: float  # Target percentage (0-100)
     current_price: float = 0.0
     current_quantity: float = 0.0
     current_value: float = 0.0
-    current_pct: float = 0.0   # Current allocation %
-    drift_pct: float = 0.0      # Difference from target %
+    current_pct: float = 0.0  # Current allocation %
+    drift_pct: float = 0.0  # Difference from target %
     imbalance_value: float = 0.0  # Value to trade to rebalance
     # Data readiness fields (added in v1.2)
-    candle_count: int = 0        # Number of candles in database
-    data_ready: bool = True      # True if has enough data for ML trading
-    data_status: str = "ready"   # "ready" | "collecting" | "unknown"
+    candle_count: int = 0  # Number of candles in database
+    data_ready: bool = True  # True if has enough data for ML trading
+    data_status: str = "ready"  # "ready" | "collecting" | "unknown"
 
     def calculate(self, total_portfolio_value: float):
         """Calculate current allocation metrics."""
@@ -306,18 +305,20 @@ def create_rebalance_order(
 @dataclass
 class RebalanceOrder:
     """A single rebalance trade order."""
+
     symbol: str
-    side: str           # "buy" or "sell"
+    side: str  # "buy" or "sell"
     quantity: float
     estimated_value: float
     current_price: float
     reason: str
-    priority: int = 0   # Higher = more urgent
+    priority: int = 0  # Higher = more urgent
 
 
 @dataclass
 class RebalancePlan:
     """Complete rebalancing plan."""
+
     trigger: RebalanceTrigger
     strategy: RebalanceStrategy
     timestamp: datetime
@@ -333,10 +334,7 @@ class RebalancePlan:
 
     def should_execute(self, min_trade_value: float = 1.0) -> bool:
         """Check if plan has actionable orders."""
-        return (
-            len(self.orders) > 0
-            and any(o.estimated_value >= min_trade_value for o in self.orders)
-        )
+        return len(self.orders) > 0 and any(o.estimated_value >= min_trade_value for o in self.orders)
 
     def get_data_status_summary(self) -> str:
         """Get a summary of data readiness across all assets."""
@@ -392,6 +390,7 @@ class RebalancePlan:
 # Base Strategy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class RebalanceStrategyBase(ABC):
     """Abstract base class for rebalancing strategies."""
 
@@ -399,11 +398,7 @@ class RebalanceStrategyBase(ABC):
         self.config = config
 
     @abstractmethod
-    def should_rebalance(
-        self,
-        allocations: List[AllocationTarget],
-        context: Dict[str, Any]
-    ) -> Tuple[bool, str]:
+    def should_rebalance(self, allocations: List[AllocationTarget], context: Dict[str, Any]) -> Tuple[bool, str]:
         """
         Determine if rebalancing is needed.
         Returns (should_rebalance, reason).
@@ -412,10 +407,7 @@ class RebalanceStrategyBase(ABC):
 
     @abstractmethod
     def generate_orders(
-        self,
-        allocations: List[AllocationTarget],
-        total_value: float,
-        context: Dict[str, Any]
+        self, allocations: List[AllocationTarget], total_value: float, context: Dict[str, Any]
     ) -> List[RebalanceOrder]:
         """Generate rebalance orders."""
         pass
@@ -425,10 +417,11 @@ class RebalanceStrategyBase(ABC):
 # Threshold-Based Strategy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class ThresholdRebalanceStrategy(RebalanceStrategyBase):
     """
     Rebalance when any single asset drifts beyond threshold %.
-    
+
     Config:
         threshold_pct: 10.0  # Rebalance if any asset drifts > 10%
         min_rebalance_pct: 1.0  # Minimum drift to trigger (avoid noise)
@@ -439,14 +432,10 @@ class ThresholdRebalanceStrategy(RebalanceStrategyBase):
         self.threshold_pct = config.get("threshold_pct", 10.0)
         self.min_rebalance_pct = config.get("min_rebalance_pct", 1.0)
 
-    def should_rebalance(
-        self,
-        allocations: List[AllocationTarget],
-        context: Dict[str, Any]
-    ) -> Tuple[bool, str]:
+    def should_rebalance(self, allocations: List[AllocationTarget], context: Dict[str, Any]) -> Tuple[bool, str]:
         # Check if any asset exceeds threshold drift
         worst_drift = max(abs(a.drift_pct) for a in allocations)
-        
+
         if worst_drift > self.threshold_pct:
             worst_asset = max(allocations, key=lambda a: abs(a.drift_pct))
             return True, (
@@ -454,46 +443,36 @@ class ThresholdRebalanceStrategy(RebalanceStrategyBase):
                 f"drifted {worst_asset.drift_pct:+.2f}% "
                 f"(threshold: {self.threshold_pct}%)"
             )
-        
+
         if worst_drift > self.min_rebalance_pct:
             # Check if sum of all drifts suggests systematic imbalance
             total_positive = sum(a.drift_pct for a in allocations if a.drift_pct > 0)
             total_negative = sum(a.drift_pct for a in allocations if a.drift_pct < 0)
             net_drift = abs(total_positive + total_negative)
-            
+
             if net_drift > self.threshold_pct:
-                return True, (
-                    f"Net drift {net_drift:.2f}% exceeds threshold {self.threshold_pct}%"
-                )
-        
-        return False, (
-            f"Within threshold: max drift {worst_drift:.2f}% "
-            f"(threshold: {self.threshold_pct}%)"
-        )
+                return True, (f"Net drift {net_drift:.2f}% exceeds threshold {self.threshold_pct}%")
+
+        return False, (f"Within threshold: max drift {worst_drift:.2f}% " f"(threshold: {self.threshold_pct}%)")
 
     def generate_orders(
-        self,
-        allocations: List[AllocationTarget],
-        total_value: float,
-        context: Dict[str, Any]
+        self, allocations: List[AllocationTarget], total_value: float, context: Dict[str, Any]
     ) -> List[RebalanceOrder]:
         orders = []
-        
+
         # Sort by absolute drift (largest first) to prioritize most imbalanced
-        sorted_allocations = sorted(
-            allocations, key=lambda a: abs(a.drift_pct), reverse=True
-        )
-        
+        sorted_allocations = sorted(allocations, key=lambda a: abs(a.drift_pct), reverse=True)
+
         for alloc in sorted_allocations:
             if abs(alloc.drift_pct) < self.min_rebalance_pct:
                 continue
-            
+
             # Calculate trade value needed
             trade_value = abs(alloc.imbalance_value)
-            
+
             if trade_value < context.get("min_trade_value", 1.0):
                 continue
-            
+
             side = "sell" if alloc.drift_pct > 0 else "buy"
             reason = (
                 f"{side.upper()} {alloc.symbol} to reach {alloc.target_pct:.2f}% allocation "
@@ -508,7 +487,7 @@ class ThresholdRebalanceStrategy(RebalanceStrategyBase):
             )
             if order:
                 orders.append(order)
-        
+
         return orders
 
 
@@ -516,10 +495,11 @@ class ThresholdRebalanceStrategy(RebalanceStrategyBase):
 # Calendar-Based Strategy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class CalendarRebalanceStrategy(RebalanceStrategyBase):
     """
     Rebalance on a fixed schedule.
-    
+
     Config:
         frequency: "daily" | "weekly" | "monthly"
         day_of_week: 0-6 (for weekly, 0=Monday)
@@ -532,7 +512,7 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
         self.day_of_week = config.get("day_of_week", 0)  # Monday
         self.hour_of_day = config.get("hour_of_day", 0)
         self._last_rebalance: Optional[datetime] = None
-        
+
         # Load last rebalance time from context if available
         if context := config.get("_last_rebalance"):
             try:
@@ -544,7 +524,7 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
         """Check if scheduled rebalance is due."""
         now = datetime.now(timezone.utc)
         today = now.date()
-        
+
         if self.frequency == "daily":
             # Rebalance once per day at specified hour
             if self._last_rebalance:
@@ -552,59 +532,51 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
                 if last_date == today:
                     return False, f"Daily rebalance already done today ({today})"
             return True, f"Daily rebalance due (hour: {self.hour_of_day} UTC)"
-        
+
         elif self.frequency == "weekly":
             # Rebalance once per week on specified day/hour
             days_since_monday = today.weekday()
             target_date = today - timedelta(days=days_since_monday)
-            
+
             if self._last_rebalance:
                 last_date = self._last_rebalance.date()
                 if last_date >= target_date:
                     days_until_next = 7 - days_since_monday
                     return False, f"Weekly rebalance next in {days_until_next} days"
-            
+
             # Check if today is the target day and hour
             if today.weekday() == self.day_of_week and now.hour >= self.hour_of_day:
                 return True, f"Weekly rebalance due today (day {self.day_of_week}, hour {self.hour_of_day} UTC)"
-            
+
             return False, f"Weekly rebalance scheduled for day {self.day_of_week}"
-        
+
         elif self.frequency == "monthly":
             if self._last_rebalance:
                 last_month = self._last_rebalance.month
                 if last_month == now.month and self._last_rebalance.day >= now.day:
                     return False, "Monthly rebalance already done this month"
             return True, "Monthly rebalance due"
-        
+
         return False, "Unknown frequency"
 
-    def should_rebalance(
-        self,
-        allocations: List[AllocationTarget],
-        context: Dict[str, Any]
-    ) -> Tuple[bool, str]:
+    def should_rebalance(self, allocations: List[AllocationTarget], context: Dict[str, Any]) -> Tuple[bool, str]:
         return self._is_due()
 
     def generate_orders(
-        self,
-        allocations: List[AllocationTarget],
-        total_value: float,
-        context: Dict[str, Any]
+        self, allocations: List[AllocationTarget], total_value: float, context: Dict[str, Any]
     ) -> List[RebalanceOrder]:
         """Generate orders to restore target allocation."""
         orders = []
-        
+
         for alloc in allocations:
             trade_value = abs(alloc.imbalance_value)
-            
+
             if trade_value < context.get("min_trade_value", 1.0):
                 continue
-            
+
             side = "sell" if alloc.drift_pct > 0 else "buy"
             reason = (
-                f"[Calendar] {'Sell' if side == 'sell' else 'Buy'} {alloc.symbol} "
-                f"to reach {alloc.target_pct:.2f}%"
+                f"[Calendar] {'Sell' if side == 'sell' else 'Buy'} {alloc.symbol} " f"to reach {alloc.target_pct:.2f}%"
             )
             order = create_rebalance_order(
                 alloc,
@@ -615,10 +587,10 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
             )
             if order:
                 orders.append(order)
-        
+
         # Update last rebalance time
         self._last_rebalance = datetime.now(timezone.utc)
-        
+
         return orders
 
 
@@ -626,12 +598,13 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
 # Risk-Based Strategy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class RiskRebalanceStrategy(RebalanceStrategyBase):
     """
     Adjust allocations based on asset volatility.
     High-volatility assets get smaller allocations.
     Low-volatility assets get larger allocations.
-    
+
     Config:
         volatility_window: 20        # Candles to use for volatility calc
         risk_adjustment_factor: 0.5  # How much to adjust (0-1)
@@ -655,12 +628,13 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
         """Calculate volatility as coefficient of variation (std/mean * 100)."""
         if len(prices) < 2:
             return 0.0
-        
+
         import statistics
+
         mean = statistics.mean(prices)
         if mean == 0:
             return 0.0
-        
+
         std = statistics.stdev(prices)
         return (std / mean) * 100
 
@@ -677,26 +651,22 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
         """
         if current_volatility == 0:
             return base_target
-        
+
         # Calculate volatility rank across all tracked assets
         avg_volatility = 30.0  # Baseline
-        
+
         # Scale adjustment: if volatility is higher than avg, reduce allocation
         volatility_ratio = avg_volatility / max(current_volatility, 1)
         adjustment = 1 + (volatility_ratio - 1) * self.risk_adjustment_factor
-        
+
         adjusted = base_target * adjustment
-        
+
         # Apply floor and ceiling
         adjusted = max(self.min_allocation_pct, min(self.max_allocation_pct, adjusted))
-        
+
         return adjusted
 
-    def should_rebalance(
-        self,
-        allocations: List[AllocationTarget],
-        context: Dict[str, Any]
-    ) -> Tuple[bool, str]:
+    def should_rebalance(self, allocations: List[AllocationTarget], context: Dict[str, Any]) -> Tuple[bool, str]:
         """
         Check if volatility-based rebalancing is needed.
         Compares current vs last known volatility.
@@ -705,23 +675,23 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
         """
         price_data = context.get("price_data", {})  # symbol -> list of prices
         threshold = self.volatility_threshold_pct
-        
+
         for alloc in allocations:
             raw_prices = price_data.get(alloc.symbol, [])
-            
+
             # If we got a single float (current price) instead of a list,
             # we can't calculate volatility - risk strategy can't trigger
             if isinstance(raw_prices, (int, float)):
                 return False, ""
-            
+
             if not isinstance(raw_prices, list) or len(raw_prices) < self.volatility_window:
                 # Not enough history to calculate volatility
                 continue
-            
-            prices = raw_prices[-self.volatility_window:]
+
+            prices = raw_prices[-self.volatility_window :]
             current_vol = self._calculate_volatility(prices)
             last_vol = self._last_volatility.get(alloc.symbol, 0)
-            
+
             if last_vol > 0:
                 vol_change = abs(current_vol - last_vol) / last_vol * 100
                 if vol_change > threshold:
@@ -730,30 +700,27 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
                         f"{last_vol:.1f}% -> {current_vol:.1f}% "
                         f"(change: {vol_change:.1f}%, threshold: {threshold}%)"
                     )
-        
+
         return False, ""
 
     def generate_orders(
-        self,
-        allocations: List[AllocationTarget],
-        total_value: float,
-        context: Dict[str, Any]
+        self, allocations: List[AllocationTarget], total_value: float, context: Dict[str, Any]
     ) -> List[RebalanceOrder]:
         """Generate orders to match risk-adjusted targets."""
         orders = []
         price_data = context.get("price_data", {})
-        
+
         for alloc in allocations:
             # price_data can be list of historical prices (for volatility calc)
             # or a single float (current price only) - skip if not list
             raw_prices = price_data.get(alloc.symbol, [])
-            
+
             # If we got a single float (current price), wrap in list or skip
             if isinstance(raw_prices, (int, float)):
                 if raw_prices == 0.0:
                     continue
                 raw_prices = [raw_prices]
-            
+
             if not isinstance(raw_prices, list) or len(raw_prices) < self.volatility_window:
                 # Cannot calculate volatility without enough history
                 # Fall back to threshold-based order for this asset
@@ -774,19 +741,17 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
                 if order and order.estimated_value >= context.get("min_trade_value", 1.0):
                     orders.append(order)
                 continue
-            
-            prices = raw_prices[-self.volatility_window:]
+
+            prices = raw_prices[-self.volatility_window :]
             current_vol = self._calculate_volatility(prices)
-            
+
             # Calculate risk-adjusted target
-            adjusted_target = self._calculate_target_adjustment(
-                alloc.symbol, current_vol, prices, alloc.target_pct
-            )
-            
+            adjusted_target = self._calculate_target_adjustment(alloc.symbol, current_vol, prices, alloc.target_pct)
+
             # Calculate difference
             drift = adjusted_target - alloc.target_pct
             drift_value = (drift / 100) * total_value
-            
+
             if abs(drift_value) < context.get("min_trade_value", 1.0):
                 continue
 
@@ -808,7 +773,7 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
 
             # Update stored volatility
             self._last_volatility[alloc.symbol] = current_vol
-        
+
         return orders
 
 
@@ -816,23 +781,24 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
 # Main Portfolio Rebalancer
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class PortfolioRebalancer:
     """
     Main portfolio rebalancing engine.
-    
+
     Usage:
         rebalancer = PortfolioRebalancer(config)
-        
+
         # Check if rebalance needed
         should_rebalance, reason = rebalancer.check_rebalance_needed(
             portfolio_manager, price_data
         )
-        
+
         # Generate and execute rebalance plan
         plan = rebalancer.create_rebalance_plan(
             portfolio_manager, price_data, strategy="threshold"
         )
-        
+
         if plan.should_execute():
             for order in plan.orders:
                 execute_trade(order)
@@ -859,40 +825,30 @@ class PortfolioRebalancer:
             ),
             0.5,
         )
-        
+
         # Strategy configuration
-        self.strategy_type = RebalanceStrategy(
-            self.config.get("strategy", "combined")
-        )
-        
+        self.strategy_type = RebalanceStrategy(self.config.get("strategy", "combined"))
+
         # Load strategies
-        self.threshold_strategy = ThresholdRebalanceStrategy(
-            self.config.get("threshold", {})
-        )
-        self.calendar_strategy = CalendarRebalanceStrategy(
-            self.config.get("calendar", {})
-        )
-        self.risk_strategy = RiskRebalanceStrategy(
-            self.config.get("risk", {})
-        )
-        
+        self.threshold_strategy = ThresholdRebalanceStrategy(self.config.get("threshold", {}))
+        self.calendar_strategy = CalendarRebalanceStrategy(self.config.get("calendar", {}))
+        self.risk_strategy = RiskRebalanceStrategy(self.config.get("risk", {}))
+
         # Global settings
-        self.rebalance_threshold = self.config.get("threshold", {}).get(
-            "threshold_pct", 10.0
-        )
+        self.rebalance_threshold = self.config.get("threshold", {}).get("threshold_pct", 10.0)
         self.min_trade_value = self.config.get("min_trade_value", 1.0)
         self.estimated_cost_pct = self.config.get("estimated_cost_pct", 0.2)  # Binance TH 0.1% x 2 round trip
         self._cooldown_minutes = max(0, _coerce_float(self.config.get("cooldown_minutes", 60), 60))
-        
+
         # State
         self._iteration_counter = 0
         self._check_interval = self.config.get("check_interval", 1)  # Check every N iterations
         self._last_rebalance_time: Optional[datetime] = None
         self._rebalance_count = 0
-        
+
         # Load persisted state
         self._load_state()
-        
+
         logger.info(
             f"PortfolioRebalancer initialized | "
             f"Enabled: {self.enabled} | "
@@ -920,9 +876,7 @@ class PortfolioRebalancer:
             path = self.persist_path.replace(".json", "_rebalancer_state.json")
             with open(path, "r") as f:
                 data = json.load(f)
-            self._last_rebalance_time = datetime.fromisoformat(
-                data.get("last_rebalance_time", "2000-01-01T00:00:00")
-            )
+            self._last_rebalance_time = datetime.fromisoformat(data.get("last_rebalance_time", "2000-01-01T00:00:00"))
             self._rebalance_count = data.get("rebalance_count", 0)
             self._iteration_counter = data.get("iteration_counter", 0)
             logger.info(f"Rebalancer state loaded. Count: {self._rebalance_count}")
@@ -938,10 +892,7 @@ class PortfolioRebalancer:
         try:
             path = self.persist_path.replace(".json", "_rebalancer_state.json")
             data = {
-                "last_rebalance_time": (
-                    self._last_rebalance_time.isoformat()
-                    if self._last_rebalance_time else None
-                ),
+                "last_rebalance_time": (self._last_rebalance_time.isoformat() if self._last_rebalance_time else None),
                 "rebalance_count": self._rebalance_count,
                 "iteration_counter": self._iteration_counter,
             }
@@ -971,12 +922,12 @@ class PortfolioRebalancer:
     ) -> Tuple[bool, str]:
         """
         Quick check if rebalancing is needed.
-        
+
         Args:
             portfolio_manager: PortfolioManager instance
             price_data: dict of {symbol: current_price}
             skip_cooldown: bypass cooldown gate (e.g. manual trigger)
-        
+
         Returns:
             (should_rebalance, reason)
         """
@@ -984,39 +935,32 @@ class PortfolioRebalancer:
             return False, "Rebalancing disabled"
 
         # Anti-whipsaw cooldown: block if last rebalance was too recent
-        if (
-            not skip_cooldown
-            and self._cooldown_minutes > 0
-            and self._last_rebalance_time is not None
-        ):
+        if not skip_cooldown and self._cooldown_minutes > 0 and self._last_rebalance_time is not None:
             elapsed = (datetime.now() - self._last_rebalance_time).total_seconds() / 60
             remaining = self._cooldown_minutes - elapsed
             if remaining > 0:
                 return False, (
-                    f"Cooldown active: {remaining:.0f} min remaining "
-                    f"(last rebalance {elapsed:.0f} min ago)"
+                    f"Cooldown active: {remaining:.0f} min remaining " f"(last rebalance {elapsed:.0f} min ago)"
                 )
 
         context = dict(context or {})
-        
+
         # Get target allocation from config
         target_allocation = context.get("target_allocation") or self.get_target_allocation(
             context.get("market_condition")
         )
         if not target_allocation:
             return False, "No target allocation configured"
-        
+
         # Get DB path for candle count checks
         db_path = self.config.get("db_path", DEFAULT_DB_PATH)
-        
+
         # Build allocation objects (with data readiness check)
-        allocations, skipped = self._build_allocations(
-            portfolio_manager, price_data, target_allocation, db_path
-        )
-        
+        allocations, skipped = self._build_allocations(portfolio_manager, price_data, target_allocation, db_path)
+
         if not allocations:
             return False, "No assets to rebalance"
-        
+
         # Build context
         total_value = portfolio_manager.total_portfolio_value()
         context = {
@@ -1027,39 +971,33 @@ class PortfolioRebalancer:
             "skipped_assets": skipped,
             "target_allocation": target_allocation,
         }
-        
+
         # Check each strategy
         if self.strategy_type == RebalanceStrategy.THRESHOLD:
             return self.threshold_strategy.should_rebalance(allocations, context)
-        
+
         elif self.strategy_type == RebalanceStrategy.CALENDAR:
             return self.calendar_strategy.should_rebalance(allocations, context)
-        
+
         elif self.strategy_type == RebalanceStrategy.RISK:
             return self.risk_strategy.should_rebalance(allocations, context)
-        
+
         else:  # COMBINED - use any that triggers
             # Check threshold first
-            should_thresh, reason_thresh = (
-                self.threshold_strategy.should_rebalance(allocations, context)
-            )
+            should_thresh, reason_thresh = self.threshold_strategy.should_rebalance(allocations, context)
             if should_thresh:
                 return True, reason_thresh
-            
+
             # Check calendar
-            should_cal, reason_cal = (
-                self.calendar_strategy.should_rebalance(allocations, context)
-            )
+            should_cal, reason_cal = self.calendar_strategy.should_rebalance(allocations, context)
             if should_cal:
                 return True, reason_cal
-            
+
             # Check risk
-            should_risk, reason_risk = (
-                self.risk_strategy.should_rebalance(allocations, context)
-            )
+            should_risk, reason_risk = self.risk_strategy.should_rebalance(allocations, context)
             if should_risk:
                 return True, reason_risk
-            
+
             return False, "No rebalance trigger activated"
 
     def create_rebalance_plan(
@@ -1073,12 +1011,12 @@ class PortfolioRebalancer:
     ) -> RebalancePlan:
         """
         Create a complete rebalancing plan.
-        
+
         Args:
             portfolio_manager: PortfolioManager instance
             price_data: dict of {symbol: current_price}
             strategy: override strategy type
-        
+
         Returns:
             RebalancePlan with orders ready for execution
         """
@@ -1087,31 +1025,29 @@ class PortfolioRebalancer:
             context.get("market_condition")
         )
         total_value = portfolio_manager.total_portfolio_value()
-        
+
         # Get DB path for candle count checks
         db_path = self.config.get("db_path", DEFAULT_DB_PATH)
-        
+
         # Build allocations (with data readiness check & held-coins filter)
         # ✓ NOTE: Only processes coins that are currently held in the portfolio
-        allocations, skipped = self._build_allocations(
-            portfolio_manager, price_data, target_allocation, db_path
-        )
-        
+        allocations, skipped = self._build_allocations(portfolio_manager, price_data, target_allocation, db_path)
+
         # Log rebalancing scope
         held_coins = [a.symbol for a in allocations if a.data_ready]
         not_held_coins = [s["symbol"] for s in skipped if s["reason"].startswith("Not currently held")]
         insufficient_data_coins = [s["symbol"] for s in skipped if not s["reason"].startswith("Not currently held")]
-        
+
         if held_coins:
             logger.info(f"📊 Rebalancing held coins: {held_coins}")
         if not_held_coins:
             logger.info(f"💤 Skipping coins not in portfolio: {not_held_coins}")
         if insufficient_data_coins:
             logger.info(f"⏰ Skipping coins without sufficient data: {insufficient_data_coins}")
-        
+
         # Determine strategy to use (needed before skip check for aborted plan)
         strat_type = RebalanceStrategy(strategy) if strategy else self.strategy_type
-        
+
         # ABORT ENTIRE PLAN if ANY asset is skipped (v1.2 fix)
         # Don't try to rebalance partial assets while waiting for data
         if skipped:
@@ -1135,7 +1071,7 @@ class PortfolioRebalancer:
                 skipped_assets=skipped,
             )
             return plan
-        
+
         context = {
             **context,
             "price_data": price_data,
@@ -1144,41 +1080,29 @@ class PortfolioRebalancer:
             "skipped_assets": skipped,
             "target_allocation": target_allocation,
         }
-        
+
         # Generate orders based on strategy (all assets have sufficient data!)
         if strat_type == RebalanceStrategy.THRESHOLD:
-            should_rebal, reason = (
-                self.threshold_strategy.should_rebalance(allocations, context)
-            )
+            should_rebal, reason = self.threshold_strategy.should_rebalance(allocations, context)
             orders = self.threshold_strategy.generate_orders(allocations, total_value, context)
             trigger = RebalanceTrigger.THRESHOLD_BREACH
-        
+
         elif strat_type == RebalanceStrategy.CALENDAR:
-            should_rebal, reason = (
-                self.calendar_strategy.should_rebalance(allocations, context)
-            )
+            should_rebal, reason = self.calendar_strategy.should_rebalance(allocations, context)
             orders = self.calendar_strategy.generate_orders(allocations, total_value, context)
             trigger = RebalanceTrigger.SCHEDULE_DUE
-        
+
         elif strat_type == RebalanceStrategy.RISK:
-            should_rebal, reason = (
-                self.risk_strategy.should_rebalance(allocations, context)
-            )
+            should_rebal, reason = self.risk_strategy.should_rebalance(allocations, context)
             orders = self.risk_strategy.generate_orders(allocations, total_value, context)
             trigger = RebalanceTrigger.VOLATILITY_ADJUSTMENT
-        
+
         else:  # COMBINED
             # Check each strategy in priority order
-            should_thresh, reason_thresh = (
-                self.threshold_strategy.should_rebalance(allocations, context)
-            )
-            should_cal, reason_cal = (
-                self.calendar_strategy.should_rebalance(allocations, context)
-            )
-            should_risk, reason_risk = (
-                self.risk_strategy.should_rebalance(allocations, context)
-            )
-            
+            should_thresh, reason_thresh = self.threshold_strategy.should_rebalance(allocations, context)
+            should_cal, reason_cal = self.calendar_strategy.should_rebalance(allocations, context)
+            should_risk, reason_risk = self.risk_strategy.should_rebalance(allocations, context)
+
             # Determine primary trigger and reason
             if should_thresh:
                 should_rebal = True
@@ -1196,21 +1120,15 @@ class PortfolioRebalancer:
                 should_rebal = False
                 reason = "No rebalance trigger activated"
                 trigger = RebalanceTrigger.MANUAL
-            
+
             if not should_rebal:
                 orders = []
             else:
                 # Collect orders from all strategies
                 orders = []
-                orders.extend(
-                    self.threshold_strategy.generate_orders(allocations, total_value, context)
-                )
-                orders.extend(
-                    self.calendar_strategy.generate_orders(allocations, total_value, context)
-                )
-                orders.extend(
-                    self.risk_strategy.generate_orders(allocations, total_value, context)
-                )
+                orders.extend(self.threshold_strategy.generate_orders(allocations, total_value, context))
+                orders.extend(self.calendar_strategy.generate_orders(allocations, total_value, context))
+                orders.extend(self.risk_strategy.generate_orders(allocations, total_value, context))
                 # Deduplicate by symbol+side, keep largest quantity
                 seen = {}
                 for o in orders:
@@ -1223,14 +1141,14 @@ class PortfolioRebalancer:
 
         if trigger_override is not None:
             trigger = trigger_override
-        
+
         # Calculate max drift
         max_drift = max(abs(a.drift_pct) for a in allocations) if allocations else 0.0
-        
+
         # Estimate cost
         total_trade_value = sum(o.estimated_value for o in orders)
         estimated_cost = total_trade_value * (self.estimated_cost_pct / 100)
-        
+
         plan = RebalancePlan(
             trigger=trigger,
             strategy=strat_type,
@@ -1244,13 +1162,13 @@ class PortfolioRebalancer:
             reasons=[item for item in [reason_override, reason] if item],
             skipped_assets=skipped,  # Data-aware: assets skipped due to insufficient data
         )
-        
+
         # Update state
         if plan.should_execute(self.min_trade_value):
             self._last_rebalance_time = datetime.now()
             self._rebalance_count += 1
             self._save_state()
-        
+
         return plan
 
     def _build_allocations(
@@ -1261,22 +1179,22 @@ class PortfolioRebalancer:
         db_path: str = DEFAULT_DB_PATH,
     ) -> Tuple[List[AllocationTarget], List[Dict[str, Any]]]:
         """Build allocation targets from portfolio and config.
-        
+
         Args:
             portfolio_manager: PortfolioManager instance
             price_data: dict of {symbol: current_price}
             target_allocation: dict of {symbol: target_pct}
             db_path: path to SQLite database
-        
+
         Returns:
             List of AllocationTarget with data readiness populated
-        
+
         NOTE: configured cash assets are treated as quote assets with price = 1.
         """
         allocations = []
         skipped = []
         total_value = portfolio_manager.total_portfolio_value()
-        
+
         # Process configured allocations
         for symbol, target_pct in target_allocation.items():
             asset = str(symbol or "").upper()
@@ -1289,35 +1207,36 @@ class PortfolioRebalancer:
                     f"💤 Skipping {asset} for rebalance: "
                     f"Coin has never been held by this bot. Only historically held coins are rebalanced."
                 )
-                skipped.append({
-                    "symbol": asset,
-                    "candle_count": 0,
-                    "reason": "Coin has never been held (history guard)",
-                })
+                skipped.append(
+                    {
+                        "symbol": asset,
+                        "candle_count": 0,
+                        "reason": "Coin has never been held (history guard)",
+                    }
+                )
                 continue
 
             if not is_cash_asset and current_price <= 0:
-                logger.debug(
-                    f"💤 Skipping {asset} for rebalance: "
-                    f"Missing or invalid market price"
+                logger.debug(f"💤 Skipping {asset} for rebalance: " f"Missing or invalid market price")
+                skipped.append(
+                    {
+                        "symbol": asset,
+                        "candle_count": 0,
+                        "reason": "Missing or invalid market price",
+                    }
                 )
-                skipped.append({
-                    "symbol": asset,
-                    "candle_count": 0,
-                    "reason": "Missing or invalid market price",
-                })
                 continue
 
             quantity = _coerce_float(getattr(pos, "quantity", 0.0), 0.0) if pos else 0.0
-            
+
             current_value = current_price * quantity
-            
+
             # Check data readiness
             if is_cash_asset:
                 candle_count, data_ready, status_msg = MIN_CANDLES_FOR_TRADING, True, "cash"
             else:
                 candle_count, data_ready, status_msg = get_candle_count(asset, db_path)
-            
+
             alloc = AllocationTarget(
                 symbol=asset,
                 target_pct=target_pct,
@@ -1330,19 +1249,21 @@ class PortfolioRebalancer:
             )
             alloc.calculate(total_value)
             allocations.append(alloc)
-            
+
             if not data_ready:
                 logger.info(
                     f"⏳ Skipping {asset} for rebalance: "
                     f"Insufficient data ({candle_count}/{MIN_CANDLES_FOR_TRADING} candles). "
                     f"Status: {status_msg}"
                 )
-                skipped.append({
-                    "symbol": asset,
-                    "candle_count": candle_count,
-                    "reason": f"Insufficient data ({candle_count}/{MIN_CANDLES_FOR_TRADING}). {status_msg}",
-                })
-        
+                skipped.append(
+                    {
+                        "symbol": asset,
+                        "candle_count": candle_count,
+                        "reason": f"Insufficient data ({candle_count}/{MIN_CANDLES_FOR_TRADING}). {status_msg}",
+                    }
+                )
+
         return allocations, skipped
 
     # ── Simulation / Backtest ────────────────────────────────────────────────
@@ -1351,68 +1272,70 @@ class PortfolioRebalancer:
         self,
         initial_portfolio: Dict[str, float],  # symbol -> value
         target_allocation: Dict[str, float],  # symbol -> target %
-        price_data: Dict[str, float],           # symbol -> price
+        price_data: Dict[str, float],  # symbol -> price
         trade_cost_pct: float = 0.1,
     ) -> Dict[str, Any]:
         """
         Simulate a rebalance operation (no real trades).
-        
+
         Returns simulation results with before/after comparison.
         """
         initial_value = sum(initial_portfolio.values())
-        
+
         # Calculate current allocation
         current_alloc = {}
         for symbol, value in initial_portfolio.items():
             pct = (value / initial_value * 100) if initial_value > 0 else 0
             current_alloc[symbol] = pct
-        
+
         # Calculate target values
         target_values = {}
         for symbol, target_pct in target_allocation.items():
             target_values[symbol] = (target_pct / 100) * initial_value
-        
+
         # Calculate trades
         trades = []
         total_cost = 0.0
-        
+
         for symbol, target_val in target_values.items():
             current_val = initial_portfolio.get(symbol, 0.0)
             diff = target_val - current_val
-            
+
             if abs(diff) < self.min_trade_value:
                 continue
-            
+
             price = price_data.get(symbol, 0.0)
             if price <= 0:
                 continue
-            
+
             quantity = abs(diff) / price
             side = "buy" if diff > 0 else "sell"
             cost = abs(diff) * (trade_cost_pct / 100)
             total_cost += cost
-            
-            trades.append({
-                "symbol": symbol,
-                "side": side,
-                "quantity": round(quantity, 8),
-                "value": round(abs(diff), 2),
-                "cost": round(cost, 2),
-            })
-        
+
+            trades.append(
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "quantity": round(quantity, 8),
+                    "value": round(abs(diff), 2),
+                    "cost": round(cost, 2),
+                }
+            )
+
         # Final portfolio
         final_portfolio = {}
         for symbol, current_val in initial_portfolio.items():
             target_val = target_values.get(symbol, 0.0)
             final_portfolio[symbol] = target_val
-        
+
         # Final allocation
         final_alloc = {}
         final_value = initial_value - total_cost
         for symbol, value in final_portfolio.items():
             pct = (value / final_value * 100) if final_value > 0 else 0
             final_alloc[symbol] = pct
-        
+
         return {
             "initial_value": round(initial_value, 2),
             "final_value": round(final_value, 2),
@@ -1433,4 +1356,3 @@ class PortfolioRebalancer:
 # ─────────────────────────────────────────────────────────────────────────────
 # Quick Test
 # ─────────────────────────────────────────────────────────────────────────────
-

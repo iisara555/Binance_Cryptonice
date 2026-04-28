@@ -17,6 +17,7 @@ from project_paths import PROJECT_ROOT
 # Load .env file if python-dotenv is available
 try:
     from dotenv import load_dotenv
+
     # Prefer the project-root .env so the bot stays portable when launched elsewhere.
     _env_paths = [
         PROJECT_ROOT / ".env",
@@ -51,7 +52,7 @@ MIN_RISK_REWARD_RATIO: float = 1.1  # ADJUSTED v2.1 - loosened for signal genera
 
 def _get_env(key: str, default: Optional[str] = None) -> str:
     """Get environment variable with optional default.
-    
+
     For CRITICAL env vars, pass default=None to enforce fail-fast.
     """
     value = os.environ.get(key)
@@ -68,7 +69,7 @@ def _get_env(key: str, default: Optional[str] = None) -> str:
 
 def _get_env_strict(key: str) -> str:
     """Get environment variable with STRICT validation - fails if missing.
-    
+
     Use this for critical credentials that must be present.
     """
     value = os.environ.get(key, "").strip()
@@ -151,7 +152,7 @@ def _load_binance_config() -> BinanceConfig:
         print("\nGet your API keys from: https://www.binance.th")
         print("=" * 60 + "\n")
         raise
-    
+
     return BinanceConfig(
         api_key=api_key,
         api_secret=api_secret,
@@ -179,29 +180,29 @@ BOT = BotConfig(
 
 def validate_config() -> tuple[list[str], list[str]]:
     """Return (critical_errors, warnings). Empty critical = all good.
-    
+
     This function performs post-load validation and warnings.
     The actual env var loading already failed at import time if keys were missing.
     """
     critical = []
     warnings = []
-    
+
     # These are already validated at import time, but we check anyway
     if not BINANCE.api_key:
         critical.append("BINANCE_API_KEY is empty (should not happen)")
     if not BINANCE.api_secret:
         critical.append("BINANCE_API_SECRET is empty (should not happen)")
-    
+
     # Trading mode warnings
     if TRADING.live_trading:
         warnings.append("⚠️ LIVE_TRADING is enabled — real orders WILL be placed!")
-    
+
     # Telegram config check (optional but recommended)
     telegram_bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     telegram_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
     if not telegram_bot_token or not telegram_chat_id:
         warnings.append("Telegram notifications disabled (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set)")
-    
+
     return critical, warnings
 
 
@@ -216,18 +217,19 @@ def check_env_file_exists() -> bool:
 
 # ── Runtime Validation ────────────────────────────────────────────────────────
 
+
 def enforce_critical_config():
     """Enforce that critical configuration is present.
-    
+
     Call this at bot startup before any trading operations.
     Raises SystemExit if configuration is invalid.
     """
     critical, warnings = validate_config()
-    
+
     # Log warnings
     for warning in warnings:
         print(f"[WARNING] {warning}")
-    
+
     # Check for critical errors (should not happen if module loaded successfully)
     if critical:
         print("\n[ERROR] Critical configuration errors:")

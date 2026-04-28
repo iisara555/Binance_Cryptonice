@@ -6,7 +6,6 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import available_exchanges, is_exchange_known_ccxt, validate_exchange
 from freqtrade.exchange.common import MAP_EXCHANGE_CHILDCLASS, SUPPORTED_EXCHANGES
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -25,7 +24,9 @@ def check_exchange(config: Config, check_for_bad: bool = True) -> bool:
         RunMode.PLOT,
         RunMode.UTIL_NO_EXCHANGE,
         RunMode.OTHER,
-    ] and not config.get("exchange", {}).get("name"):
+    ] and not config.get(
+        "exchange", {}
+    ).get("name"):
         # Skip checking exchange in plot mode, since it requires no exchange
         return True
     logger.info("Checking exchange...")
@@ -50,16 +51,12 @@ def check_exchange(config: Config, check_for_bad: bool = True) -> bool:
     valid, reason, _, _ = validate_exchange(exchange)
     if not valid:
         if check_for_bad:
-            raise OperationalException(
-                f'Exchange "{exchange}" will not work with Freqtrade. Reason: {reason}.'
-            )
+            raise OperationalException(f'Exchange "{exchange}" will not work with Freqtrade. Reason: {reason}.')
         else:
             logger.warning(f'Exchange "{exchange}" will not work with Freqtrade. Reason: {reason}.')
 
     if MAP_EXCHANGE_CHILDCLASS.get(exchange, exchange) in SUPPORTED_EXCHANGES:
-        logger.info(
-            f'Exchange "{exchange}" is officially supported by the Freqtrade development team.'
-        )
+        logger.info(f'Exchange "{exchange}" is officially supported by the Freqtrade development team.')
     else:
         logger.warning(
             f'Exchange "{exchange}" is known to the ccxt library, '

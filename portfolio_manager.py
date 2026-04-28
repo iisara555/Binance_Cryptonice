@@ -6,13 +6,14 @@ Tracks balances, open positions, P&L, and portfolio value.
 
 import json
 import logging
+from dataclasses import asdict, dataclass, field
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, date
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, field, asdict
+
 from helpers import extract_base_asset
-from risk_management import precise_subtract, precise_multiply, precise_divide
+from risk_management import precise_divide, precise_multiply, precise_subtract
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +37,17 @@ def _to_float(value: Decimal) -> float:
 
 # Decimal display precision by asset.
 ASSET_DECIMALS = {
-    "THB": 2,    # Thai Baht: 2 decimal places
-    "BTC": 8,    # Bitcoin: 8 decimal places
-    "ETH": 8,    # Ethereum: 8 decimal places
-    "XRP": 0,    # Ripple: 0 decimal places
-    "ADA": 0,    # Cardano: 0 decimal places
-    "DOGE": 0,   # Dogecoin: 0 decimal places
-    "BNB": 8,    # Binance Coin: 8 decimal places
-    "XAUT": 8,   # Tether Gold: 8 decimal places
-    "SOL": 8,    # Solana: 8 decimal places
-    "SHIB": 0,   # Shiba Inu: 0 decimal places
-    "USDT": 2,   # Tether: 2 decimal places
+    "THB": 2,  # Thai Baht: 2 decimal places
+    "BTC": 8,  # Bitcoin: 8 decimal places
+    "ETH": 8,  # Ethereum: 8 decimal places
+    "XRP": 0,  # Ripple: 0 decimal places
+    "ADA": 0,  # Cardano: 0 decimal places
+    "DOGE": 0,  # Dogecoin: 0 decimal places
+    "BNB": 8,  # Binance Coin: 8 decimal places
+    "XAUT": 8,  # Tether Gold: 8 decimal places
+    "SOL": 8,  # Solana: 8 decimal places
+    "SHIB": 0,  # Shiba Inu: 0 decimal places
+    "USDT": 2,  # Tether: 2 decimal places
 }
 
 
@@ -57,11 +58,11 @@ def get_asset_decimals(symbol: str) -> int:
 
 def format_amount(amount: float, symbol: str) -> str:
     """Format an amount with the correct number of decimal places for the asset.
-    
+
     Args:
         amount: The numeric amount to format
         symbol: The asset symbol (e.g., 'BTC', 'USDT', 'XRP')
-        
+
     Returns:
         Formatted string with appropriate decimal places
     """
@@ -74,11 +75,11 @@ def format_amount(amount: float, symbol: str) -> str:
 
 def format_quantity_for_display(quantity: float, symbol: str) -> str:
     """Format a quantity with proper decimal places for logging.
-    
+
     Args:
         quantity: The quantity to format
         symbol: The asset symbol
-        
+
     Returns:
         Formatted string suitable for terminal display
     """
@@ -89,21 +90,21 @@ def format_quantity_for_display(quantity: float, symbol: str) -> str:
     # For display, use up to 8 decimal places but strip trailing zeros
     formatted = f"{quantity_dec:.{decimals}f}"
     # Strip trailing zeros after decimal point
-    if '.' in formatted:
-        formatted = formatted.rstrip('0').rstrip('.')
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
     return formatted
 
 
 @dataclass
 class Position:
     symbol: str
-    side: str           # "long" or "short"
+    side: str  # "long" or "short"
     entry_price: float
     quantity: float
     current_price: float
     stop_loss: float
     take_profit: float
-    opened_at: str      # ISO datetime string
+    opened_at: str  # ISO datetime string
     entry_value: float  # quantity * entry_price (USD)
     unrealized_pnl: float = 0.0
     unrealized_pnl_pct: float = 0.0
@@ -115,10 +116,18 @@ class Position:
         quantity_dec = _to_decimal(self.quantity)
         if self.side == "long":
             pnl_dec = (new_price_dec - entry_price_dec) * quantity_dec
-            pnl_pct_dec = ((new_price_dec - entry_price_dec) / entry_price_dec) * Decimal("100") if entry_price_dec else Decimal("0")
+            pnl_pct_dec = (
+                ((new_price_dec - entry_price_dec) / entry_price_dec) * Decimal("100")
+                if entry_price_dec
+                else Decimal("0")
+            )
         else:  # short
             pnl_dec = (entry_price_dec - new_price_dec) * quantity_dec
-            pnl_pct_dec = ((entry_price_dec - new_price_dec) / entry_price_dec) * Decimal("100") if entry_price_dec else Decimal("0")
+            pnl_pct_dec = (
+                ((entry_price_dec - new_price_dec) / entry_price_dec) * Decimal("100")
+                if entry_price_dec
+                else Decimal("0")
+            )
         self.unrealized_pnl = _to_float(pnl_dec)
         self.unrealized_pnl_pct = _to_float(pnl_pct_dec)
 
@@ -138,24 +147,27 @@ class Position:
 @dataclass
 class TradeRecord:
     """A closed/settled trade."""
+
     symbol: str
     side: str
     entry_price: float
     exit_price: float
     quantity: float
-    realized_pnl: float            # Gross P&L before fees
-    realized_pnl_pct: float        # Gross P&L percentage
-    entry_fee: float = 0.0         # Fee paid on entry in quote currency
-    exit_fee: float = 0.0          # Fee paid on exit in quote currency
-    net_pnl: float = 0.0          # Net P&L after fees
-    exit_reason: str = ""          # "stop_loss", "take_profit", "manual", etc.
+    realized_pnl: float  # Gross P&L before fees
+    realized_pnl_pct: float  # Gross P&L percentage
+    entry_fee: float = 0.0  # Fee paid on entry in quote currency
+    exit_fee: float = 0.0  # Fee paid on exit in quote currency
+    net_pnl: float = 0.0  # Net P&L after fees
+    exit_reason: str = ""  # "stop_loss", "take_profit", "manual", etc.
     opened_at: str = ""
     closed_at: str = ""
 
     def __post_init__(self):
         # Auto-calculate net_pnl if not provided
         if self.net_pnl == 0.0 and self.realized_pnl != 0.0:
-            self.net_pnl = _to_float(_to_decimal(self.realized_pnl) - _to_decimal(self.entry_fee) - _to_decimal(self.exit_fee))
+            self.net_pnl = _to_float(
+                _to_decimal(self.realized_pnl) - _to_decimal(self.entry_fee) - _to_decimal(self.exit_fee)
+            )
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -198,7 +210,7 @@ class PortfolioManager:
         self.initial_balance = _to_float(_to_decimal(initial_balance))
         self.current_balance = _to_float(_to_decimal(initial_balance))
         self.quote_asset = str(quote_asset or "USDT").upper()
-        self.positions: dict[str, Position] = {}   # symbol -> Position
+        self.positions: dict[str, Position] = {}  # symbol -> Position
         self.trade_history: list[TradeRecord] = []
         self.daily_snapshots: list[DailySnapshot] = []
 
@@ -267,11 +279,11 @@ class PortfolioManager:
         # Reserve balance (for long positions, lock the cost)
         if side == "long":
             self.current_balance = _to_float(_to_decimal(self.current_balance) - entry_value_dec)
-        
+
         # Extract base asset for formatting (e.g., "BTCUSDT" -> "BTC")
         base_asset = extract_base_asset(symbol)
         qty_formatted = format_quantity_for_display(quantity, base_asset)
-        
+
         logger.info(
             f"Opened position: {symbol} {side} qty={qty_formatted} {base_asset} "
             f"entry={entry_price:.2f} {self.quote_asset}"
@@ -288,7 +300,7 @@ class PortfolioManager:
         exit_fee: float = 0.0,
     ) -> Optional[TradeRecord]:
         """Close an existing position and record the trade.
-        
+
         Args:
             symbol: Trading pair symbol
             exit_price: Price at which position was closed
@@ -313,11 +325,19 @@ class PortfolioManager:
         if pos.side == "long":
             # Refund: original cost + P&L - ALL fees
             self.current_balance = _to_float(
-                _to_decimal(self.current_balance) + _to_decimal(pos.entry_value) + realized_dec - entry_fee_dec - exit_fee_dec
+                _to_decimal(self.current_balance)
+                + _to_decimal(pos.entry_value)
+                + realized_dec
+                - entry_fee_dec
+                - exit_fee_dec
             )
         else:  # short: close at current price
             self.current_balance = _to_float(
-                _to_decimal(self.current_balance) + _to_decimal(pos.entry_value) + realized_dec - entry_fee_dec - exit_fee_dec
+                _to_decimal(self.current_balance)
+                + _to_decimal(pos.entry_value)
+                + realized_dec
+                - entry_fee_dec
+                - exit_fee_dec
             )
 
         record = TradeRecord(
@@ -347,7 +367,7 @@ class PortfolioManager:
         # Format quantity with proper decimal places for logging
         base_asset = extract_base_asset(pos.symbol)
         qty_formatted = format_quantity_for_display(pos.quantity, base_asset)
-        
+
         logger.info(
             f"Closed position: {symbol} {pos.side} qty={qty_formatted} {base_asset} "
             f"reason={reason} realized_pnl={_to_float(realized_dec):.2f} {self.quote_asset} "
@@ -373,10 +393,13 @@ class PortfolioManager:
     def daily_pnl(self) -> float:
         """Realized P&L today."""
         today = date.today()
-        return _to_float(sum(
-            _to_decimal(t.realized_pnl) for t in self.trade_history
-            if datetime.fromisoformat(t.closed_at).date() == today
-        ))
+        return _to_float(
+            sum(
+                _to_decimal(t.realized_pnl)
+                for t in self.trade_history
+                if datetime.fromisoformat(t.closed_at).date() == today
+            )
+        )
 
     def daily_pnl_pct(self) -> float:
         """Realized P&L % today (vs daily start balance)."""
@@ -443,10 +466,10 @@ class PortfolioManager:
 
     def get_summary_with_formatting(self) -> dict:
         """Return a portfolio summary with properly formatted values for all assets.
-        
+
         This method includes formatted strings for quantities with proper decimal places
         for each asset type. Use this for display/logging purposes.
-        
+
         Returns:
             Dict with both numeric values and formatted strings for display
         """
@@ -455,23 +478,25 @@ class PortfolioManager:
         realized = self.total_realized_pnl()
         total_pnl = unrealized + realized
         total_pnl_pct = round((total_pnl / self.initial_balance) * 100, 2) if self.initial_balance else 0
-        
+
         # Format open positions with proper decimal places
         formatted_positions = []
         for pos in self.positions.values():
             base_asset = extract_base_asset(pos.symbol)
-            formatted_positions.append({
-                "symbol": pos.symbol,
-                "side": pos.side,
-                "quantity_raw": pos.quantity,
-                "quantity_formatted": format_quantity_for_display(pos.quantity, base_asset),
-                "quantity_decimals": get_asset_decimals(base_asset),
-                "entry_price": pos.entry_price,
-                "current_price": pos.current_price,
-                "unrealized_pnl": pos.unrealized_pnl,
-                "unrealized_pnl_pct": pos.unrealized_pnl_pct,
-            })
-        
+            formatted_positions.append(
+                {
+                    "symbol": pos.symbol,
+                    "side": pos.side,
+                    "quantity_raw": pos.quantity,
+                    "quantity_formatted": format_quantity_for_display(pos.quantity, base_asset),
+                    "quantity_decimals": get_asset_decimals(base_asset),
+                    "entry_price": pos.entry_price,
+                    "current_price": pos.current_price,
+                    "unrealized_pnl": pos.unrealized_pnl,
+                    "unrealized_pnl_pct": pos.unrealized_pnl_pct,
+                }
+            )
+
         return {
             "initial_balance": self.initial_balance,
             "current_balance": self.current_balance,  # Keep raw for calculations
@@ -523,15 +548,9 @@ class PortfolioManager:
             self.initial_balance = data.get("initial_balance", self.initial_balance)
             self.current_balance = data.get("current_balance", self.current_balance)
             self.quote_asset = str(data.get("quote_asset", self.quote_asset) or self.quote_asset).upper()
-            self.positions = {
-                s: Position.from_dict(p) for s, p in data.get("positions", {}).items()
-            }
-            self.trade_history = [
-                TradeRecord.from_dict(t) for t in data.get("trade_history", [])
-            ]
-            self.daily_snapshots = [
-                DailySnapshot.from_dict(s) for s in data.get("daily_snapshots", [])
-            ]
+            self.positions = {s: Position.from_dict(p) for s, p in data.get("positions", {}).items()}
+            self.trade_history = [TradeRecord.from_dict(t) for t in data.get("trade_history", [])]
+            self.daily_snapshots = [DailySnapshot.from_dict(s) for s in data.get("daily_snapshots", [])]
             dsd = data.get("_daily_start_date")
             self._daily_start_date = date.fromisoformat(dsd) if dsd else None
             self._daily_start_balance = data.get("_daily_start_balance")

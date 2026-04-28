@@ -9,7 +9,9 @@
 - `bot_config.yaml`
 - `coin_whitelist.json`
 - `main.py`
-- `trading_bot.py`
+- `trading_bot.py` (`TradingBotOrchestrator`)
+- `trading/bot_runtime/run_iteration_runtime.py` — กรองคู่ก่อนวน signal ต่อรอบ (ร่วมกับ `held_coins_only`)
+- `trading/signal_runtime.py` — guard BUY สำหรับคู่ที่ไม่เคย held
 
 ## What To Check
 

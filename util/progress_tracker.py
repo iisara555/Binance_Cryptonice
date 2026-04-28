@@ -1,3 +1,4 @@
+from freqtrade.util.rich_progress import CustomProgress
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -6,8 +7,6 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-
-from freqtrade.util.rich_progress import CustomProgress
 
 
 def retrieve_progress_tracker(pt: CustomProgress | None) -> CustomProgress:

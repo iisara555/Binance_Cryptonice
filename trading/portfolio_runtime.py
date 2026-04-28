@@ -7,7 +7,6 @@ from typing import Any, Callable, Dict, Optional
 
 from risk_management import calculate_atr
 
-
 logger = logging.getLogger(__name__)
 
 # Mark-to-quote totals for live CLI: reuse up to this many seconds when balances
@@ -154,7 +153,10 @@ class PortfolioRuntimeHelper:
                 self.bot._portfolio_cache = payload
             return result
 
-        if portfolio_cache["data"] is not None and (now - float(portfolio_cache.get("timestamp", 0.0) or 0.0)) < cache_ttl:
+        if (
+            portfolio_cache["data"] is not None
+            and (now - float(portfolio_cache.get("timestamp", 0.0) or 0.0)) < cache_ttl
+        ):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "[PORTFOLIO PERF] path=cache_hit allow_refresh=%s total_ms=%.2f",
@@ -243,8 +245,7 @@ class PortfolioRuntimeHelper:
                 is_stale = (datetime.now() - updated_at).total_seconds() > stale_after_seconds
 
             ws_connected = bool(
-                getattr(self.bot, "_ws_client", None)
-                and getattr(self.bot._ws_client, "is_connected", lambda: False)()
+                getattr(self.bot, "_ws_client", None) and getattr(self.bot._ws_client, "is_connected", lambda: False)()
             )
             total_ms = (time.perf_counter() - t_entry) * 1000.0
             rest_n = 0 if used_mtm_cache else int(pricing_stats.get("rest_ticker", 0))
@@ -283,7 +284,9 @@ class PortfolioRuntimeHelper:
                 resp2 = self.bot.api_client.get_balance()
                 if isinstance(resp2, dict) and resp2.get("error") == 0:
                     result_data = resp2.get("result", {})
-                    quote_balance = float(result_data.get(self.quote_asset(), 0) or 0.0) if isinstance(result_data, dict) else 0.0
+                    quote_balance = (
+                        float(result_data.get(self.quote_asset(), 0) or 0.0) if isinstance(result_data, dict) else 0.0
+                    )
                 else:
                     quote_balance = 0.0
                 total_balance = quote_balance

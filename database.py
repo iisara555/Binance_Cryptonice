@@ -12,22 +12,20 @@ Concurrency Strategy:
     secondary safeguard for high-concurrency paths.
 """
 
-import os
-import time
-import sqlite3
-import threading
-import logging
-import textwrap
 import copy
+import logging
+import os
+import sqlite3
+import textwrap
+import threading
+import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Any, Callable, TypeVar, Mapping, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, TypeVar
 
 import pandas as pd
-
-from sqlalchemy import create_engine, func, event, or_  # pylint: disable=unused-import
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy import create_engine, event, func, or_  # pylint: disable=unused-import
 from sqlalchemy.exc import IntegrityError, OperationalError
-
+from sqlalchemy.orm import Session, sessionmaker
 
 # ── Logger ────────────────────────────────────────────────────────────────────
 _logger = logging.getLogger("crypto-bot.database")
@@ -35,7 +33,7 @@ _logger = logging.getLogger("crypto-bot.database")
 
 T = TypeVar("T")
 
-from models import Base, Price, Order, Trade, Signal, Position, ClosedTrade, HeldCoinHistory, TradeState
+from models import Base, ClosedTrade, HeldCoinHistory, Order, Position, Price, Signal, Trade, TradeState
 
 
 def _normalize_utc_naive_timestamp(value: Optional[datetime]) -> Optional[datetime]:
@@ -72,11 +70,11 @@ class Database:
     # Retry parameters
     _WRITE_RETRIES: int = 5
     _RETRY_BASE_DELAY: float = 0.1  # seconds
-    _RETRY_MAX_DELAY: float = 2.0   # cap exponential backoff
+    _RETRY_MAX_DELAY: float = 2.0  # cap exponential backoff
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            db_path = os.path.join(os.path.dirname(__file__), 'crypto_bot.db')
+            db_path = os.path.join(os.path.dirname(__file__), "crypto_bot.db")
 
         self.db_path = db_path
 
@@ -91,7 +89,7 @@ class Database:
         def _on_connect(dbapi_conn: sqlite3.Connection, _connection_record):
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=30000")   # 30 s
+            cursor.execute("PRAGMA busy_timeout=30000")  # 30 s
             cursor.execute("PRAGMA synchronous=NORMAL")  # safe + faster than FULL
             cursor.execute("PRAGMA cache_size=-64000")  # 64 MB page cache
             cursor.execute("PRAGMA temp_store=MEMORY")  # Store temp tables and indexes in RAM for faster ORDER BY
@@ -102,7 +100,9 @@ class Database:
         # Serialise writes at module level
         self._write_lock = threading.Lock()
         self._candle_cache_lock = threading.Lock()
-        self._candle_cache: Dict[Tuple[str, str, Optional[datetime], Optional[datetime], Optional[int]], Tuple[float, pd.DataFrame]] = {}
+        self._candle_cache: Dict[
+            Tuple[str, str, Optional[datetime], Optional[datetime], Optional[int]], Tuple[float, pd.DataFrame]
+        ] = {}
         self._candle_cache_ttl: float = 5.0
         self._candle_cache_max_size: int = 256
 
@@ -190,17 +190,20 @@ class Database:
                         self._RETRY_BASE_DELAY * (2 ** (attempt - 1)),
                         self._RETRY_MAX_DELAY,
                     )
-                    state = 'locked' if 'locked' in err_str else 'busy'
+                    state = "locked" if "locked" in err_str else "busy"
                     _logger.warning(
                         "Database %s (attempt %d/%d) — retrying in %.2fs. Error: %s",
-                        state, attempt, self._WRITE_RETRIES, delay, exc,
+                        state,
+                        attempt,
+                        self._WRITE_RETRIES,
+                        delay,
+                        exc,
                     )
                     time.sleep(delay)
                 else:
                     raise
         # All retries exhausted
-        _logger.error("Database write failed after %d attempts: %s",
-                      self._WRITE_RETRIES, last_error)
+        _logger.error("Database write failed after %d attempts: %s", self._WRITE_RETRIES, last_error)
         raise last_error
 
     # ── Auto-migration ─────────────────────────────────────────────────────────
@@ -265,9 +268,7 @@ class Database:
             return
 
         try:
-            cursor.execute(
-                "UPDATE trades SET realized_pnl = pnl WHERE realized_pnl IS NULL AND pnl IS NOT NULL"
-            )
+            cursor.execute("UPDATE trades SET realized_pnl = pnl WHERE realized_pnl IS NULL AND pnl IS NOT NULL")
             _logger.info("[Migration] Backfilled trades.realized_pnl from legacy trades.pnl")
         except Exception as exc:
             _logger.debug("[Migration] Failed to backfill trades.realized_pnl: %s", exc)
@@ -293,13 +294,13 @@ class Database:
             cursor.execute(f"PRAGMA index_info('{index_name}')")
             column_names = [col[2] for col in cursor.fetchall()]
 
-            if is_unique and column_names == ['pair', 'timestamp', 'timeframe']:
+            if is_unique and column_names == ["pair", "timestamp", "timeframe"]:
                 has_timeframe_unique = True
-            elif is_unique and column_names == ['pair', 'timestamp']:
+            elif is_unique and column_names == ["pair", "timestamp"]:
                 has_legacy_unique = True
 
         if not has_timeframe_unique:
-            reason = 'legacy pair/timestamp unique key' if has_legacy_unique else 'missing timeframe-aware unique key'
+            reason = "legacy pair/timestamp unique key" if has_legacy_unique else "missing timeframe-aware unique key"
             _logger.info("[Migration] Rebuilding prices table to replace %s", reason)
             self._rebuild_prices_table(cursor)
 
@@ -309,9 +310,7 @@ class Database:
         """Recreate the prices table with a unique key on pair, timestamp, and timeframe."""
         cursor.execute("PRAGMA foreign_keys=OFF")
         cursor.execute("DROP TABLE IF EXISTS prices__migrated")
-        cursor.execute(
-            textwrap.dedent(
-                """
+        cursor.execute(textwrap.dedent("""
                 CREATE TABLE prices__migrated (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     pair VARCHAR(20) NOT NULL,
@@ -324,12 +323,8 @@ class Database:
                     volume FLOAT,
                     CONSTRAINT uq_prices_pair_timestamp_timeframe UNIQUE (pair, timestamp, timeframe)
                 )
-                """
-            ).strip()
-        )
-        cursor.execute(
-            textwrap.dedent(
-                """
+                """).strip())
+        cursor.execute(textwrap.dedent("""
                 INSERT OR REPLACE INTO prices__migrated (
                     id, pair, timestamp, timeframe, open, high, low, close, volume
                 )
@@ -345,18 +340,14 @@ class Database:
                     volume
                 FROM prices
                 ORDER BY id
-                """
-            ).strip()
-        )
+                """).strip())
         cursor.execute("DROP TABLE prices")
         cursor.execute("ALTER TABLE prices__migrated RENAME TO prices")
         cursor.execute("PRAGMA foreign_keys=ON")
 
     def _ensure_prices_indexes(self, cursor: sqlite3.Cursor) -> None:
         """Create performance indexes expected by runtime candle queries."""
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS ix_prices_pair_timestamp ON prices (pair, timestamp)"
-        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS ix_prices_pair_timestamp ON prices (pair, timestamp)")
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS ix_prices_pair_timeframe_timestamp ON prices (pair, timeframe, timestamp)"
         )
@@ -386,14 +377,21 @@ class Database:
 
     # ==================== PRICE METHODS ====================
 
-    def insert_price(self, pair: str, timestamp: datetime,
-                    open: float, high: float, low: float,  # noqa: A001 (redefining built-in is OK for SQLAlchemy field)
-                    close: float, volume: float,
-                    timeframe: str = '1h') -> Optional[Price]:
+    def insert_price(
+        self,
+        pair: str,
+        timestamp: datetime,
+        open: float,
+        high: float,
+        low: float,  # noqa: A001 (redefining built-in is OK for SQLAlchemy field)
+        close: float,
+        volume: float,
+        timeframe: str = "1h",
+    ) -> Optional[Price]:
         """Insert or update a price record (thread-safe with retry)."""
 
         normalized_timestamp = _normalize_utc_naive_timestamp(timestamp)
-        normalized_timeframe = timeframe or '1h'
+        normalized_timeframe = timeframe or "1h"
 
         def _do_insert() -> Optional[Price]:
             session = self.get_session()
@@ -480,14 +478,14 @@ class Database:
             try:
                 normalized_rows = [
                     (
-                        p['pair'],
-                        _normalize_utc_naive_timestamp(p['timestamp']),
-                        p.get('timeframe', '1h') or '1h',
-                        p['open'],
-                        p['high'],
-                        p['low'],
-                        p['close'],
-                        p['volume'],
+                        p["pair"],
+                        _normalize_utc_naive_timestamp(p["timestamp"]),
+                        p.get("timeframe", "1h") or "1h",
+                        p["open"],
+                        p["high"],
+                        p["low"],
+                        p["close"],
+                        p["volume"],
                     )
                     for p in prices
                 ]
@@ -500,7 +498,7 @@ class Database:
                            low=excluded.low,
                            close=excluded.close,
                            volume=excluded.volume""",
-                    normalized_rows
+                    normalized_rows,
                 )
                 conn.commit()
                 return cursor.rowcount
@@ -549,11 +547,14 @@ class Database:
         finally:
             session.close()
 
-    def get_price_history(self, pair: str,
-                          start_time: datetime = None,
-                          end_time: datetime = None,
-                          limit: int = 1000,
-                          timeframe: str = None) -> List[Price]:
+    def get_price_history(
+        self,
+        pair: str,
+        start_time: datetime = None,
+        end_time: datetime = None,
+        limit: int = 1000,
+        timeframe: str = None,
+    ) -> List[Price]:
         """Get historical prices for a pair"""
         session = self.get_session()
         try:
@@ -575,34 +576,34 @@ class Database:
         session = self.get_session()
         try:
             start_time = datetime.now(timezone.utc) - timedelta(days=days)
-            query = session.query(Price).filter(
-                Price.pair == pair,
-                Price.timestamp >= start_time
-            )
+            query = session.query(Price).filter(Price.pair == pair, Price.timestamp >= start_time)
             if timeframe:
                 query = query.filter(Price.timeframe == timeframe)
             prices = query.order_by(Price.timestamp.asc()).all()
 
             return [
                 {
-                    'timestamp': p.timestamp,
-                    'pair': p.pair,
-                    'open': p.open,
-                    'high': p.high,
-                    'low': p.low,
-                    'close': p.close,
-                    'volume': p.volume
+                    "timestamp": p.timestamp,
+                    "pair": p.pair,
+                    "open": p.open,
+                    "high": p.high,
+                    "low": p.low,
+                    "close": p.close,
+                    "volume": p.volume,
                 }
                 for p in prices
             ]
         finally:
             session.close()
 
-    def get_candles(self, symbol: str,
-                    interval: str = '1h',
-                    start_time: datetime = None,
-                    end_time: datetime = None,
-                    limit: int = None) -> pd.DataFrame:
+    def get_candles(
+        self,
+        symbol: str,
+        interval: str = "1h",
+        start_time: datetime = None,
+        end_time: datetime = None,
+        limit: int = None,
+    ) -> pd.DataFrame:
         """Return candle data as a pandas DataFrame for model training/backtesting."""
         cached = self._get_cached_candles(symbol, interval, start_time, end_time, limit)
         if cached is not None:
@@ -627,13 +628,13 @@ class Database:
 
             rows = [
                 {
-                    'timestamp': _normalize_utc_naive_timestamp(p.timestamp),
-                    'pair': p.pair,
-                    'open': p.open,
-                    'high': p.high,
-                    'low': p.low,
-                    'close': p.close,
-                    'volume': p.volume,
+                    "timestamp": _normalize_utc_naive_timestamp(p.timestamp),
+                    "pair": p.pair,
+                    "open": p.open,
+                    "high": p.high,
+                    "low": p.low,
+                    "close": p.close,
+                    "volume": p.volume,
                 }
                 for p in prices
             ]
@@ -642,9 +643,9 @@ class Database:
                 self._store_cached_candles(symbol, interval, start_time, end_time, limit, frame)
                 return frame
 
-            frame['timestamp'] = pd.to_datetime(frame['timestamp'], errors='coerce', utc=True).dt.tz_localize(None)
-            frame = frame.dropna(subset=['timestamp'])
-            frame = frame.sort_values('timestamp').reset_index(drop=True)
+            frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_localize(None)
+            frame = frame.dropna(subset=["timestamp"])
+            frame = frame.sort_values("timestamp").reset_index(drop=True)
             self._store_cached_candles(symbol, interval, start_time, end_time, limit, frame)
             return frame.copy(deep=True)
         finally:
@@ -652,12 +653,17 @@ class Database:
 
     # ==================== ORDER METHODS ====================
 
-    def insert_order(self, pair: str, side: str,
-                     quantity: float, price: float,
-                     status: str = 'pending',
-                     order_type: str = 'limit',
-                     fee: float = 0.0,
-                     timestamp: datetime = None) -> Order:
+    def insert_order(
+        self,
+        pair: str,
+        side: str,
+        quantity: float,
+        price: float,
+        status: str = "pending",
+        order_type: str = "limit",
+        fee: float = 0.0,
+        timestamp: datetime = None,
+    ) -> Order:
         """Insert a new order (thread-safe with retry)."""
 
         def _do_insert() -> Order:
@@ -673,7 +679,7 @@ class Database:
                     price=price,
                     status=status,
                     order_type=order_type,  # Aligned with models.py Order.order_type
-                    fee=fee,                 # Aligned with models.py Order.fee
+                    fee=fee,  # Aligned with models.py Order.fee
                 )
                 session.add(order)
                 session.commit()
@@ -703,8 +709,7 @@ class Database:
         with self._write_lock:
             return self._with_retry(_do_update)
 
-    def get_orders(self, pair: str = None, status: str = None,
-                   limit: int = 100) -> List[Order]:
+    def get_orders(self, pair: str = None, status: str = None, limit: int = 100) -> List[Order]:
         """Get orders with optional filters"""
         session = self.get_session()
         try:
@@ -719,12 +724,17 @@ class Database:
 
     # ==================== TRADE METHODS ====================
 
-    def insert_trade(self, pair: str, side: str,
-                     quantity: float, price: float,
-                     realized_pnl: float = None,
-                     fee: float = 0.0,
-                     pnl: float = None,
-                     timestamp: datetime = None) -> Trade:
+    def insert_trade(
+        self,
+        pair: str,
+        side: str,
+        quantity: float,
+        price: float,
+        realized_pnl: float = None,
+        fee: float = 0.0,
+        pnl: float = None,
+        timestamp: datetime = None,
+    ) -> Trade:
         """Insert a new trade record (thread-safe with retry)."""
 
         def _do_insert() -> Trade:
@@ -750,9 +760,7 @@ class Database:
         with self._write_lock:
             return self._with_retry(_do_insert)
 
-    def get_trades(self, pair: str = None,
-                   start_time: datetime = None,
-                   limit: int = 100) -> List[Trade]:
+    def get_trades(self, pair: str = None, start_time: datetime = None, limit: int = 100) -> List[Trade]:
         """Get trade history"""
         session = self.get_session()
         try:
@@ -776,10 +784,10 @@ class Database:
             return result or 0.0
         finally:
             session.close()
+
     # ==================== HELD COIN HISTORY METHODS ====================
 
-    def record_held_coin(self, symbol: str, quantity: float,
-                         timestamp: datetime = None) -> Optional[HeldCoinHistory]:
+    def record_held_coin(self, symbol: str, quantity: float, timestamp: datetime = None) -> Optional[HeldCoinHistory]:
         """Record a successful BUY for a coin/pair in history."""
         symbol_key = symbol.upper()
         ts = timestamp or datetime.now(timezone.utc)
@@ -787,9 +795,7 @@ class Database:
         def _do_upsert() -> Optional[HeldCoinHistory]:
             session = self.get_session()
             try:
-                row = session.query(HeldCoinHistory).filter(
-                    func.upper(HeldCoinHistory.symbol) == symbol_key
-                ).first()
+                row = session.query(HeldCoinHistory).filter(func.upper(HeldCoinHistory.symbol) == symbol_key).first()
                 if row:
                     row.total_bought_qty = (row.total_bought_qty or 0.0) + quantity
                     row.last_bought_qty = quantity
@@ -821,19 +827,21 @@ class Database:
         symbol_key = symbol.upper()
         session = self.get_session()
         try:
-            return session.query(HeldCoinHistory).filter(
-                func.upper(HeldCoinHistory.symbol) == symbol_key
-            ).count() > 0
+            return session.query(HeldCoinHistory).filter(func.upper(HeldCoinHistory.symbol) == symbol_key).count() > 0
         finally:
             session.close()
 
     # ==================== SIGNAL METHODS ====================
 
-    def insert_signal(self, pair: str, signal_type: str,
-                     confidence: float,
-                     result: str = 'pending',
-                     timestamp: datetime = None,
-                     strategy: str = None) -> Signal:
+    def insert_signal(
+        self,
+        pair: str,
+        signal_type: str,
+        confidence: float,
+        result: str = "pending",
+        timestamp: datetime = None,
+        strategy: str = None,
+    ) -> Signal:
         """Insert a trading signal (thread-safe with retry)."""
 
         def _do_insert() -> Signal:
@@ -875,10 +883,9 @@ class Database:
         with self._write_lock:
             return self._with_retry(_do_update)
 
-    def get_signals(self, pair: str = None,
-                    signal_type: str = None,
-                    result: str = None,
-                    limit: int = 100) -> List[Signal]:
+    def get_signals(
+        self, pair: str = None, signal_type: str = None, result: str = None, limit: int = 100
+    ) -> List[Signal]:
         """Get signals with optional filters"""
         session = self.get_session()
         try:
@@ -904,17 +911,17 @@ class Database:
             signals = query.all()
             total = len(signals)
             if total == 0:
-                return {'total': 0, 'success_rate': 0.0}
+                return {"total": 0, "success_rate": 0.0}
 
-            success = len([s for s in signals if s.result == 'success'])
-            failure = len([s for s in signals if s.result == 'failure'])
+            success = len([s for s in signals if s.result == "success"])
+            failure = len([s for s in signals if s.result == "failure"])
 
             return {
-                'total': total,
-                'success': success,
-                'failure': failure,
-                'pending': total - success - failure,
-                'success_rate': success / total if total > 0 else 0.0
+                "total": total,
+                "success": success,
+                "failure": failure,
+                "pending": total - success - failure,
+                "success_rate": success / total if total > 0 else 0.0,
             }
         finally:
             session.close()
@@ -975,12 +982,10 @@ class Database:
             session = self.get_session()
             try:
                 order_id = pos_data.get("order_id", "")
-                existing = session.query(Position).filter(
-                    Position.order_id == order_id
-                ).first()
+                existing = session.query(Position).filter(Position.order_id == order_id).first()
 
                 side_val = pos_data.get("side", "buy")
-                if hasattr(side_val, 'value'):
+                if hasattr(side_val, "value"):
                     side_val = side_val.value
                 opened_at = _coerce_timestamp(pos_data.get("timestamp"))
 
@@ -1033,9 +1038,7 @@ class Database:
                     return position
                 except IntegrityError:
                     session.rollback()
-                    existing2 = session.query(Position).filter(
-                        Position.order_id == order_id
-                    ).first()
+                    existing2 = session.query(Position).filter(Position.order_id == order_id).first()
                     if existing2 is not None:
                         _logger.warning(
                             "[OMS] Position %s already exists — skipping insert",
@@ -1111,9 +1114,7 @@ class Database:
         def _do_delete() -> bool:
             session = self.get_session()
             try:
-                deleted = session.query(Position).filter(
-                    Position.order_id == order_id
-                ).delete()
+                deleted = session.query(Position).filter(Position.order_id == order_id).delete()
                 session.commit()
                 return deleted > 0
             except Exception as e:
@@ -1133,35 +1134,34 @@ class Database:
             positions = session.query(Position).all()
             result = []
             for p in positions:
-                result.append({
-                    "order_id": p.order_id,
-                    "symbol": p.symbol,
-                    "side": p.side,
-                    "amount": p.amount,
-                    "entry_price": p.entry_price,
-                    "stop_loss": p.stop_loss,
-                    "take_profit": p.take_profit,
-                    "total_entry_cost": p.total_entry_cost or 0,
-                    "is_partial_fill": p.is_partial_fill or False,
-                    "remaining_amount": p.remaining_amount or 0,
-                    "trailing_peak": p.trailing_peak,
-                    "timestamp": p.opened_at or p.updated_at,
-                    "filled": False,
-                })
+                result.append(
+                    {
+                        "order_id": p.order_id,
+                        "symbol": p.symbol,
+                        "side": p.side,
+                        "amount": p.amount,
+                        "entry_price": p.entry_price,
+                        "stop_loss": p.stop_loss,
+                        "take_profit": p.take_profit,
+                        "total_entry_cost": p.total_entry_cost or 0,
+                        "is_partial_fill": p.is_partial_fill or False,
+                        "remaining_amount": p.remaining_amount or 0,
+                        "trailing_peak": p.trailing_peak,
+                        "timestamp": p.opened_at or p.updated_at,
+                        "filled": False,
+                    }
+                )
             return result
         finally:
             session.close()
 
-    def update_position_sl(self, order_id: str, new_sl: float,
-                           trailing_peak: float = None) -> bool:
+    def update_position_sl(self, order_id: str, new_sl: float, trailing_peak: float = None) -> bool:
         """Update stop loss for trailing stop (thread-safe)."""
 
         def _do_update() -> bool:
             session = self.get_session()
             try:
-                pos = session.query(Position).filter(
-                    Position.order_id == order_id
-                ).first()
+                pos = session.query(Position).filter(Position.order_id == order_id).first()
                 if pos:
                     pos.stop_loss = new_sl
                     if trailing_peak is not None:
@@ -1191,9 +1191,7 @@ class Database:
                 if not symbol:
                     return None
 
-                existing = session.query(TradeState).filter(
-                    TradeState.symbol == symbol
-                ).first()
+                existing = session.query(TradeState).filter(TradeState.symbol == symbol).first()
 
                 def _apply_updates(row: TradeState) -> TradeState:
                     row.state = str(state_data.get("state", row.state) or row.state)
@@ -1260,9 +1258,7 @@ class Database:
         """Get execution state for a symbol."""
         session = self.get_session()
         try:
-            row = session.query(TradeState).filter(
-                TradeState.symbol == str(symbol).upper()
-            ).first()
+            row = session.query(TradeState).filter(TradeState.symbol == str(symbol).upper()).first()
             if not row:
                 return None
             return {
@@ -1330,9 +1326,7 @@ class Database:
         def _do_delete() -> bool:
             session = self.get_session()
             try:
-                deleted = session.query(TradeState).filter(
-                    TradeState.symbol == str(symbol).upper()
-                ).delete()
+                deleted = session.query(TradeState).filter(TradeState.symbol == str(symbol).upper()).delete()
                 session.commit()
                 return bool(deleted)
             except Exception as e:
@@ -1354,7 +1348,7 @@ class Database:
             session = self.get_session()
             try:
                 side_val = trade_data.get("side", "buy")
-                if hasattr(side_val, 'value'):
+                if hasattr(side_val, "value"):
                     side_val = side_val.value
 
                 ct = ClosedTrade(
@@ -1389,9 +1383,7 @@ class Database:
         with self._write_lock:
             return self._with_retry(_do_insert)
 
-    def get_closed_trades(self, symbol: str = None,
-                          start_time: datetime = None,
-                          limit: int = 50) -> List[ClosedTrade]:
+    def get_closed_trades(self, symbol: str = None, start_time: datetime = None, limit: int = 50) -> List[ClosedTrade]:
         """Get closed trade history."""
         session = self.get_session()
         try:
@@ -1407,6 +1399,12 @@ class Database:
             return query.all()
         finally:
             session.close()
+
+    def closed_trades_repository(self):
+        """Thin repository wrapper for gradual migration away from calling ``get_closed_trades`` directly everywhere."""
+        from persistence.closed_trades import ClosedTradesRepository
+
+        return ClosedTradesRepository(self)
 
     def get_performance_summary(self, symbol: str = None) -> Dict[str, Any]:
         """Get aggregate performance statistics from closed trades."""
@@ -1444,12 +1442,12 @@ class Database:
         session = self.get_session()
         try:
             return {
-                'total_prices': session.query(Price).count(),
-                'total_orders': session.query(Order).count(),
-                'total_trades': session.query(Trade).count(),
-                'total_signals': session.query(Signal).count(),
-                'total_pnl': self.get_total_pnl(),
-                'db_path': self.db_path
+                "total_prices": session.query(Price).count(),
+                "total_orders": session.query(Order).count(),
+                "total_trades": session.query(Trade).count(),
+                "total_signals": session.query(Signal).count(),
+                "total_pnl": self.get_total_pnl(),
+                "db_path": self.db_path,
             }
         finally:
             session.close()
@@ -1462,29 +1460,21 @@ class Database:
             try:
                 cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
-                deleted_prices = session.query(Price).filter(
-                    Price.timestamp < cutoff
-                ).delete()
+                deleted_prices = session.query(Price).filter(Price.timestamp < cutoff).delete()
 
-                deleted_orders = session.query(Order).filter(
-                    Order.timestamp < cutoff
-                ).delete()
+                deleted_orders = session.query(Order).filter(Order.timestamp < cutoff).delete()
 
-                deleted_trades = session.query(Trade).filter(
-                    Trade.timestamp < cutoff
-                ).delete()
+                deleted_trades = session.query(Trade).filter(Trade.timestamp < cutoff).delete()
 
-                deleted_signals = session.query(Signal).filter(
-                    Signal.timestamp < cutoff
-                ).delete()
+                deleted_signals = session.query(Signal).filter(Signal.timestamp < cutoff).delete()
 
                 session.commit()
 
                 return {
-                    'prices': deleted_prices,
-                    'orders': deleted_orders,
-                    'trades': deleted_trades,
-                    'signals': deleted_signals
+                    "prices": deleted_prices,
+                    "orders": deleted_orders,
+                    "trades": deleted_trades,
+                    "signals": deleted_signals,
                 }
             except Exception as e:
                 session.rollback()
@@ -1509,10 +1499,14 @@ class Database:
             try:
                 days = int(raw_days)
             except (TypeError, ValueError):
-                _logger.warning("[Retention] Ignoring invalid retention for timeframe %s: %r", normalized_timeframe, raw_days)
+                _logger.warning(
+                    "[Retention] Ignoring invalid retention for timeframe %s: %r", normalized_timeframe, raw_days
+                )
                 continue
             if days <= 0:
-                _logger.warning("[Retention] Ignoring non-positive retention for timeframe %s: %s", normalized_timeframe, days)
+                _logger.warning(
+                    "[Retention] Ignoring non-positive retention for timeframe %s: %s", normalized_timeframe, days
+                )
                 continue
             normalized_policy[normalized_timeframe] = days
 
@@ -1527,10 +1521,14 @@ class Database:
                 total_deleted = 0
                 for timeframe, days in normalized_policy.items():
                     cutoff = now_utc - timedelta(days=days)
-                    deleted = session.query(Price).filter(
-                        func.coalesce(Price.timeframe, '1h') == timeframe,
-                        Price.timestamp < cutoff,
-                    ).delete(synchronize_session=False)
+                    deleted = (
+                        session.query(Price)
+                        .filter(
+                            func.coalesce(Price.timeframe, "1h") == timeframe,
+                            Price.timestamp < cutoff,
+                        )
+                        .delete(synchronize_session=False)
+                    )
                     deleted_counts[timeframe] = int(deleted or 0)
                     total_deleted += int(deleted or 0)
 
@@ -1574,7 +1572,7 @@ class Database:
                 )
                 _logger.warning(
                     "Database vacuum %s (attempt %d/%d) — retrying in %.2fs. Error: %s",
-                    'locked' if 'locked' in err_str else 'busy',
+                    "locked" if "locked" in err_str else "busy",
                     attempt,
                     self._WRITE_RETRIES,
                     delay,
@@ -1605,6 +1603,7 @@ def init_db(db_path: str = None) -> Database:
 
 # Singleton instance
 _db_instance = None
+
 
 def get_database(db_path: str = None) -> Database:
     """Get or create database singleton"""

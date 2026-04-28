@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-import logging
-import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -117,7 +117,9 @@ class MultiTimeframeCollector:
 
     def collect(self, pair: str, timeframes: List[str]) -> bool:
         self.pair = str(pair or self.pair).upper()
-        self.timeframes = [str(timeframe).strip() for timeframe in (timeframes or self.timeframes) if str(timeframe).strip()]
+        self.timeframes = [
+            str(timeframe).strip() for timeframe in (timeframes or self.timeframes) if str(timeframe).strip()
+        ]
         return bool(self.fetch_from_db())
 
     def fetch_from_db(self, limit: int = 100) -> Dict[str, TimeframeData]:
@@ -167,8 +169,7 @@ class MultiTimeframeAnalyzer:
         self.pair = str(pair or "").upper()
         self.alignment_threshold = float(self.config.get("alignment_threshold", 0.6) or 0.6)
         self.tf_weights = {
-            str(timeframe): float(weight)
-            for timeframe, weight in (self.config.get("tf_weights") or {}).items()
+            str(timeframe): float(weight) for timeframe, weight in (self.config.get("tf_weights") or {}).items()
         }
         self.higher_timeframes = [
             str(timeframe).strip()
@@ -352,7 +353,9 @@ class MultiTimeframeAnalyzer:
         latest_macd_hist = indicators.get("macd_hist", 0.0)
         volume_ma = indicators.get("volume_ma", 0.0)
         latest_close = float(close.iloc[-1])
-        volume_ratio = float(volume.iloc[-1] / volume_ma) if volume_ma and not pd.isna(volume_ma) and volume_ma > 0 else 1.0
+        volume_ratio = (
+            float(volume.iloc[-1] / volume_ma) if volume_ma and not pd.isna(volume_ma) and volume_ma > 0 else 1.0
+        )
 
         trend_strength = float(adx) if adx else 0.0
         signal_type = SignalType.HOLD
@@ -435,6 +438,10 @@ class MultiTimeframeSignalGenerator:
         analyzer = MultiTimeframeAnalyzer(self.config)
         result = MultiTimeframeResult(pair="", timestamp=datetime.now(timezone.utc), timeframes=data)
         result.signals = analyzer.analyze(data)
-        result.aligned_signal, result.aligned_confidence, result.trend_alignment = analyzer.aggregate_signals(result.signals)
-        result.higher_timeframe_trend, result.higher_timeframe_confidence = analyzer.get_higher_timeframe_bias(result.signals)
+        result.aligned_signal, result.aligned_confidence, result.trend_alignment = analyzer.aggregate_signals(
+            result.signals
+        )
+        result.higher_timeframe_trend, result.higher_timeframe_confidence = analyzer.get_higher_timeframe_bias(
+            result.signals
+        )
         return result

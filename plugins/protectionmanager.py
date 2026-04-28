@@ -13,7 +13,6 @@ from freqtrade.persistence.models import PairLock
 from freqtrade.plugins.protections import IProtection
 from freqtrade.resolvers import ProtectionResolver
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -55,14 +54,10 @@ class ProtectionManager:
         result = None
         for protection_handler in self._protection_handlers:
             if protection_handler.has_global_stop:
-                lock = protection_handler.global_stop(
-                    date_now=now, side=side, starting_balance=starting_balance
-                )
+                lock = protection_handler.global_stop(date_now=now, side=side, starting_balance=starting_balance)
                 if lock and lock.until:
                     if not PairLocks.is_global_lock(lock.until, side=lock.lock_side):
-                        result = PairLocks.lock_pair(
-                            "*", lock.until, lock.reason, now=now, side=lock.lock_side
-                        )
+                        result = PairLocks.lock_pair("*", lock.until, lock.reason, now=now, side=lock.lock_side)
         return result
 
     def stop_per_pair(
@@ -82,9 +77,7 @@ class ProtectionManager:
                 )
                 if lock and lock.until:
                     if not PairLocks.is_pair_locked(pair, lock.until, lock.lock_side):
-                        result = PairLocks.lock_pair(
-                            pair, lock.until, lock.reason, now=now, side=lock.lock_side
-                        )
+                        result = PairLocks.lock_pair(pair, lock.until, lock.reason, now=now, side=lock.lock_side)
         return result
 
     @staticmethod
@@ -99,9 +92,7 @@ class ProtectionManager:
                 try:
                     parsed_unlock_at = datetime.strptime(config_unlock_at, "%H:%M")
                 except ValueError:
-                    raise ConfigurationError(
-                        f"Invalid date format for unlock_at: {config_unlock_at}."
-                    )
+                    raise ConfigurationError(f"Invalid date format for unlock_at: {config_unlock_at}.")
 
             if "stop_duration" in prot and "stop_duration_candles" in prot:
                 raise ConfigurationError(
@@ -115,9 +106,7 @@ class ProtectionManager:
                     f"`lookback_period_candles`.\n Please fix the protection {prot.get('method')}."
                 )
 
-            if parsed_unlock_at is not None and (
-                "stop_duration" in prot or "stop_duration_candles" in prot
-            ):
+            if parsed_unlock_at is not None and ("stop_duration" in prot or "stop_duration_candles" in prot):
                 raise ConfigurationError(
                     "Protections must specify either `unlock_at`, `stop_duration` or "
                     "`stop_duration_candles`.\n"

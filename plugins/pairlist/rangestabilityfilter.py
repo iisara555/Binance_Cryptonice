@@ -5,15 +5,13 @@ Rate of change pairlist filter
 import logging
 from datetime import timedelta
 
-from pandas import DataFrame
-
 from freqtrade.constants import ListPairsWithTimeframes
 from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.misc import plural
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util import FtTTLCache, dt_floor_day, dt_now, dt_ts
-
+from pandas import DataFrame
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +41,7 @@ class RangeStabilityFilter(IPairList):
             )
         if self._sort_direction not in [None, "asc", "desc"]:
             raise OperationalException(
-                "RangeStabilityFilter requires sort_direction to be "
-                "either None (undefined), 'asc' or 'desc'"
+                "RangeStabilityFilter requires sort_direction to be " "either None (undefined), 'asc' or 'desc'"
             )
 
     def short_desc(self) -> str:

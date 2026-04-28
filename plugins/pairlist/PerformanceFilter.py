@@ -6,12 +6,10 @@ import logging
 from datetime import timedelta
 
 import pandas as pd
-
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.persistence import Trade
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.util.datetime_helpers import dt_now
-
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +89,7 @@ class PerformanceFilter(IPairList):
             removed = sorted_df[sorted_df["profit_ratio"] < self._min_profit]
             for _, row in removed.iterrows():
                 self.log_once(
-                    f"Removing pair {row['pair']} since {row['profit_ratio']} is "
-                    f"below {self._min_profit}",
+                    f"Removing pair {row['pair']} since {row['profit_ratio']} is " f"below {self._min_profit}",
                     logger.info,
                 )
             sorted_df = sorted_df[sorted_df["profit_ratio"] >= self._min_profit]

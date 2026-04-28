@@ -7,7 +7,6 @@ from freqtrade.enums import ExitType
 from freqtrade.persistence import Trade
 from freqtrade.plugins.protections import IProtection, ProtectionReturn
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -41,9 +40,7 @@ class StoplossGuard(IProtection):
             f"locking {self.unlock_reason_time_element}."
         )
 
-    def _stoploss_guard(
-        self, date_now: datetime, pair: str | None, side: LongShort
-    ) -> ProtectionReturn | None:
+    def _stoploss_guard(self, date_now: datetime, pair: str | None, side: LongShort) -> ProtectionReturn | None:
         """
         Evaluate recent trades
         """
@@ -74,8 +71,7 @@ class StoplossGuard(IProtection):
             return None
 
         self.log_once(
-            f"Trading stopped due to {self._trade_limit} "
-            f"stoplosses within {self._lookback_period} minutes.",
+            f"Trading stopped due to {self._trade_limit} " f"stoplosses within {self._lookback_period} minutes.",
             logger.info,
         )
         until = self.calculate_lock_end(trades)
@@ -86,9 +82,7 @@ class StoplossGuard(IProtection):
             lock_side=(side if self._only_per_side else "*"),
         )
 
-    def global_stop(
-        self, date_now: datetime, side: LongShort, starting_balance: float
-    ) -> ProtectionReturn | None:
+    def global_stop(self, date_now: datetime, side: LongShort, starting_balance: float) -> ProtectionReturn | None:
         """
         Stops trading (position entering) for all pairs
         This must evaluate to true for the whole period of the "cooldown period".

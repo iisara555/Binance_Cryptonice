@@ -9,10 +9,10 @@
 รีวิวเชิงลึกควรโฟกัสที่ระบบที่ยังใช้งานจริง:
 
 - runtime loop ใน `main.py`
-- orchestration ใน `trading_bot.py`
+- orchestration ใน `trading_bot.py` (logic ใหญ่ delegate ไป `trading/bot_runtime/` — ดู [ADR-001](ADR-001-domain-boundaries-and-dependencies.md))
 - execution และ position tracking ใน `trade_executor.py`
 - risk/state persistence ใน `risk_management.py` และ `state_management.py`
-- Bitkub connectivity ใน `api_client.py`
+- exchange connectivity ใน `api_client.py` (Binance Thailand / `BinanceThClient`)
 - watchdog และ Windows service supervision
 - Rich terminal visibility ใน `cli_ui.py`
 

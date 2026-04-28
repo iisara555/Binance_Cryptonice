@@ -8,7 +8,6 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Ticker
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -31,10 +30,7 @@ class PriceFilter(IPairList):
         if self._max_value < 0:
             raise OperationalException("PriceFilter requires max_value to be >= 0")
         self._enabled = (
-            (self._low_price_ratio > 0)
-            or (self._min_price > 0)
-            or (self._max_price > 0)
-            or (self._max_value > 0)
+            (self._low_price_ratio > 0) or (self._min_price > 0) or (self._max_price > 0) or (self._max_value > 0)
         )
 
     @property
@@ -76,9 +72,7 @@ class PriceFilter(IPairList):
                 "type": "number",
                 "default": 0,
                 "description": "Low price ratio",
-                "help": (
-                    "Remove pairs where a price move of 1 price unit (pip) is above this ratio."
-                ),
+                "help": ("Remove pairs where a price move of 1 price unit (pip) is above this ratio."),
             },
             "min_price": {
                 "type": "number",
@@ -148,8 +142,7 @@ class PriceFilter(IPairList):
 
                 if diff > self._max_value:
                     self.log_once(
-                        f"Removed {pair} from whitelist, "
-                        f"because min value change of {diff} > {self._max_value}.",
+                        f"Removed {pair} from whitelist, " f"because min value change of {diff} > {self._max_value}.",
                         logger.info,
                     )
                     return False

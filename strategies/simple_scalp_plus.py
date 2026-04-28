@@ -6,6 +6,7 @@ Fast confluence strategy for scalping mode.
 Requires 4/5 confirmations from Hull MA, EMA trend, RSI regime,
 VWAP location, and volume participation.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -13,6 +14,7 @@ from typing import Any, Dict, Optional
 import pandas as pd
 
 from indicators import TechnicalIndicators, hull_signal, volume_confirmation, vwap
+
 from .base import SignalType, StrategyBase, StrategyConfig, TradingSignal
 
 
@@ -92,9 +94,7 @@ class SimpleScalpPlus(StrategyBase):
             slow=self.macd_slow,
             signal=self.macd_signal,
         )
-        stoch_k, stoch_d = TechnicalIndicators.calculate_stochastic(
-            high, low, close, period=self.stoch_period
-        )
+        stoch_k, stoch_d = TechnicalIndicators.calculate_stochastic(high, low, close, period=self.stoch_period)
         vwap_series = vwap(high, low, close, volume, period=self.volume_period)
         hull_sig = hull_signal(close, period=self.hull_period)
         vol_ok = volume_confirmation(volume, period=self.volume_period, threshold=self.volume_threshold)

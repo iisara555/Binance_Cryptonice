@@ -25,6 +25,7 @@ Entry / Exit logic
 BUY  : >= 3 of 5 bullish confirmations -> TradingSignal(BUY) with ATR SL/TP.
 SELL : >= 2 of 3 bearish reversal signals -> TradingSignal(SELL) (exit only).
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,7 +47,6 @@ from .base import (
     StrategyConfig,
     TradingSignal,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -105,15 +105,9 @@ class MacheteV8bLite(StrategyBase):
             1,
             min(3, int(settings.get("min_confirmations_sell", self.MIN_CONFIRMATIONS_SELL))),
         )
-        self.enable_relaxed_confirmation = bool(
-            settings.get("enable_relaxed_confirmation", False)
-        )
-        self.relaxed_requires_adx_and_volume = bool(
-            settings.get("relaxed_requires_adx_and_volume", True)
-        )
-        self.relaxed_confirmation_delta = max(
-            0, min(3, int(settings.get("relaxed_confirmation_delta", 1)))
-        )
+        self.enable_relaxed_confirmation = bool(settings.get("enable_relaxed_confirmation", False))
+        self.relaxed_requires_adx_and_volume = bool(settings.get("relaxed_requires_adx_and_volume", True))
+        self.relaxed_confirmation_delta = max(0, min(3, int(settings.get("relaxed_confirmation_delta", 1))))
         self.ssl_period = max(4, int(settings.get("ssl_period", 10)))
         self.rmi_period = max(4, int(settings.get("rmi_period", 14)))
         self.rmi_momentum = max(1, int(settings.get("rmi_momentum", 5)))
@@ -156,9 +150,7 @@ class MacheteV8bLite(StrategyBase):
             fish_sig = fisher_signal(high, low, self.fisher_period)
             tema_sig = tema_signal(close, self.tema_fast, self.tema_slow)
             ao_sig = ao_signal(high, low, self.ao_fast, self.ao_slow)
-            adx_series = TechnicalIndicators.calculate_adx(
-                high, low, close, self.adx_period
-            )
+            adx_series = TechnicalIndicators.calculate_adx(high, low, close, self.adx_period)
             vol_ok = volume_confirmation(volume, self.vol_period, self.vol_threshold)
         except Exception as exc:
             logger.debug("MacheteV8bLite: indicator failure on %s: %s", symbol, exc)
@@ -251,9 +243,7 @@ class MacheteV8bLite(StrategyBase):
                 support=support,
                 resistance=resistance,
                 gate_mode=str(buy_gate.get("mode", "standard")),
-                required_confirmations_effective=int(
-                    buy_gate.get("required", self.min_confirmations_buy)
-                ),
+                required_confirmations_effective=int(buy_gate.get("required", self.min_confirmations_buy)),
             )
 
         if len(confirmations_bear) >= self.min_confirmations_sell:
@@ -328,9 +318,7 @@ class MacheteV8bLite(StrategyBase):
                 "informative_timeframe": self.informative_timeframe,
                 "atr_multiplier": self.atr_multiplier,
                 "gate_mode": str(gate_mode or "standard"),
-                "required_confirmations_effective": int(
-                    max(1, required_confirmations_effective)
-                ),
+                "required_confirmations_effective": int(max(1, required_confirmations_effective)),
                 "trade_rationale": rationale,
             },
         )

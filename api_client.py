@@ -22,14 +22,14 @@ on the query string — we follow that convention here.
 
 from __future__ import annotations
 
-import hmac
-import math
-import time
 import hashlib
+import hmac
 import logging
+import math
 import threading
+import time
 from contextlib import contextmanager
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -102,14 +102,23 @@ def _binance_error_message(code: Any, fallback: Optional[str] = None) -> str:
 # format; this map only normalises the legacy TradingView-style numeric
 # resolutions that some older callers still pass in.
 INTERVAL_MAP: Dict[str, str] = {
-    "1": "1m", "1m": "1m",
-    "5": "5m", "5m": "5m",
-    "15": "15m", "15m": "15m",
-    "30": "30m", "30m": "30m",
-    "60": "1h", "1h": "1h",
-    "240": "4h", "4h": "4h",
-    "1D": "1d", "1d": "1d", "1440": "1d",
-    "1W": "1w", "1w": "1w",
+    "1": "1m",
+    "1m": "1m",
+    "5": "5m",
+    "5m": "5m",
+    "15": "15m",
+    "15m": "15m",
+    "30": "30m",
+    "30m": "30m",
+    "60": "1h",
+    "1h": "1h",
+    "240": "4h",
+    "4h": "4h",
+    "1D": "1d",
+    "1d": "1d",
+    "1440": "1d",
+    "1W": "1w",
+    "1w": "1w",
 }
 
 
@@ -123,6 +132,7 @@ SHUTDOWN_REASON: str = ""
 # Logic identical to the previous exchange implementation — kept verbatim per
 # SPEC_01.  Only doc strings reference the new exchange.
 
+
 class CircuitBreaker:
     """
     Circuit breaker to stop trading after consecutive API errors.
@@ -134,8 +144,8 @@ class CircuitBreaker:
     """
 
     CLOSED = "closed"
-    OPEN   = "open"
-    HALF   = "half"
+    OPEN = "open"
+    HALF = "half"
 
     def __init__(
         self,
@@ -144,15 +154,15 @@ class CircuitBreaker:
         half_max_calls: int = 2,
     ):
         self.failure_threshold = failure_threshold
-        self.recovery_timeout  = recovery_timeout
-        self.half_max_calls    = half_max_calls
+        self.recovery_timeout = recovery_timeout
+        self.half_max_calls = half_max_calls
 
-        self._state         = self.CLOSED
+        self._state = self.CLOSED
         self._failure_count = 0
         self._success_count = 0
-        self._last_failure  = 0.0
-        self._half_calls    = 0
-        self._lock          = threading.RLock()
+        self._last_failure = 0.0
+        self._half_calls = 0
+        self._lock = threading.RLock()
 
     @property
     def state(self) -> str:
@@ -191,41 +201,39 @@ class CircuitBreaker:
     def record_failure(self, error_msg: str = ""):
         with self._lock:
             self._failure_count += 1
-            self._last_failure  = time.time()
+            self._last_failure = time.time()
 
             if self._state == self.HALF:
                 self._state = self.OPEN
                 logger.warning("CircuitBreaker: HALF → OPEN (still failing)")
             elif self._failure_count >= self.failure_threshold:
                 self._state = self.OPEN
-                logger.warning(
-                    f"CircuitBreaker: CLOSED → OPEN "
-                    f"({self.failure_threshold} consecutive failures)"
-                )
+                logger.warning(f"CircuitBreaker: CLOSED → OPEN " f"({self.failure_threshold} consecutive failures)")
 
             if error_msg:
                 logger.error(f"CircuitBreaker failure #{self._failure_count}: {error_msg}")
 
     def reset(self):
         with self._lock:
-            self._state         = self.CLOSED
+            self._state = self.CLOSED
             self._failure_count = 0
             self._success_count = 0
-            self._half_calls    = 0
+            self._half_calls = 0
 
 
 # ── Clock Sync ────────────────────────────────────────────────────────────────
+
 
 class ClockSync:
     """Tracks offset between local clock and Binance.th server clock."""
 
     def __init__(self, max_offset: float = 30.0):
-        self.max_offset    = max_offset
-        self._offset       = 0.0
-        self._last_sync    = 0.0
+        self.max_offset = max_offset
+        self._offset = 0.0
+        self._last_sync = 0.0
         self._sync_interval = 300.0
-        self._locked       = threading.Lock()
-        self._alerted      = False
+        self._locked = threading.Lock()
+        self._alerted = False
 
     @property
     def offset(self) -> float:
@@ -249,18 +257,15 @@ class ClockSync:
             else:
                 server_ts_ms = int(payload)
             server_ts = server_ts_ms / 1000.0
-            local_ts  = time.time()
+            local_ts = time.time()
 
             offset = server_ts - local_ts
             with self._locked:
-                self._offset    = offset
+                self._offset = offset
                 self._last_sync = local_ts
 
             if abs(offset) > self.max_offset and not self._alerted:
-                logger.warning(
-                    f"ClockSync: LARGE OFFSET detected "
-                    f"({offset:+.1f}s) — requests may be rejected"
-                )
+                logger.warning(f"ClockSync: LARGE OFFSET detected " f"({offset:+.1f}s) — requests may be rejected")
                 self._alerted = True
             elif abs(offset) <= self.max_offset:
                 self._alerted = False
@@ -280,6 +285,7 @@ class ClockSync:
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
+
 class BinanceAPIError(Exception):
     """Raised when the Binance.th API returns an error code."""
 
@@ -292,21 +298,24 @@ class BinanceAPIError(Exception):
 
 class CircuitBreakerOpen(BinanceAPIError):
     """Raised when the circuit breaker is open and blocking requests."""
+
     pass
 
 
 class BinanceAuthException(BinanceAPIError):
     """Raised when Binance.th rejects private API auth and the bot must stop."""
+
     pass
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _round_step(value: float, step: float) -> float:
     """Round ``value`` DOWN to the nearest multiple of ``step``."""
     if step is None or step <= 0 or value <= 0:
         return float(value)
-    d_val  = Decimal(str(value))
+    d_val = Decimal(str(value))
     d_step = Decimal(str(step))
     rounded = (d_val / d_step).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_step
     return float(rounded)
@@ -347,6 +356,7 @@ def _no_trailing_zeros(value: float) -> float:
 
 # ── BinanceThClient ──────────────────────────────────────────────────────────
 
+
 class BinanceThClient:
     """
     Thin wrapper around the Binance Thailand REST API.
@@ -384,7 +394,7 @@ class BinanceThClient:
         symbol: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
-        self.api_key    = api_key    or BINANCE.api_key
+        self.api_key = api_key or BINANCE.api_key
         self.api_secret = api_secret or BINANCE.api_secret
 
         default_symbol = (symbol or getattr(BINANCE, "default_symbol", "BTCUSDT")) or "BTCUSDT"
@@ -412,7 +422,7 @@ class BinanceThClient:
         # Loop error tracking (kept for parity with prior client)
         self._loop_error_count = 0
         self._loop_error_reset = 3.0
-        self._last_error_time  = 0.0
+        self._last_error_time = 0.0
 
         # Balance cache
         self._balances_cache: Optional[Dict[str, Dict[str, float]]] = None
@@ -539,7 +549,7 @@ class BinanceThClient:
         filters: Dict[str, Any] = {
             "stepSize": 0.000001,
             "tickSize": 0.000001,
-            "minQty":   0.0,
+            "minQty": 0.0,
             "minNotional": 0.0,
             "baseAssetPrecision": 8,
             "quoteAssetPrecision": 8,
@@ -571,13 +581,11 @@ class BinanceThClient:
                     ftype = f.get("filterType")
                     if ftype == "LOT_SIZE":
                         filters["stepSize"] = float(f.get("stepSize") or filters["stepSize"])
-                        filters["minQty"]   = float(f.get("minQty") or 0.0)
+                        filters["minQty"] = float(f.get("minQty") or 0.0)
                     elif ftype == "PRICE_FILTER":
                         filters["tickSize"] = float(f.get("tickSize") or filters["tickSize"])
                     elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
-                        filters["minNotional"] = float(
-                            f.get("minNotional") or f.get("notional") or 0.0
-                        )
+                        filters["minNotional"] = float(f.get("minNotional") or f.get("notional") or 0.0)
                 filters["_fallback"] = False
         except Exception as exc:
             logger.warning(
@@ -593,7 +601,9 @@ class BinanceThClient:
     def _round_quantity(self, binance_symbol: str, qty: float) -> float:
         f = self._get_symbol_filters(binance_symbol)
         if f.get("_fallback"):
-            raise BinanceAPIError(-1013, f"Exchange filters unavailable for {binance_symbol}; refusing to submit quantity")
+            raise BinanceAPIError(
+                -1013, f"Exchange filters unavailable for {binance_symbol}; refusing to submit quantity"
+            )
         step = float(f.get("stepSize") or 0.0)
         if step <= 0:
             raise BinanceAPIError(-1013, f"Missing LOT_SIZE stepSize for {binance_symbol}")
@@ -693,15 +703,13 @@ class BinanceThClient:
         if not self._cb.is_available():
             raise CircuitBreakerOpen(
                 -999,
-                "Circuit breaker is OPEN — too many consecutive errors. "
-                "Trading paused. Will retry after cooldown.",
+                "Circuit breaker is OPEN — too many consecutive errors. " "Trading paused. Will retry after cooldown.",
             )
 
         if signed and not self.check_clock_sync():
             raise BinanceAPIError(
                 -998,
-                f"Clock offset {self._clock.offset:+.1f}s exceeds limit — "
-                "refusing authenticated request",
+                f"Clock offset {self._clock.offset:+.1f}s exceeds limit — " "refusing authenticated request",
             )
 
         # Thread-safe rate limiter — claim a slot inside the lock; sleep outside.
@@ -761,12 +769,7 @@ class BinanceThClient:
                         except (TypeError, ValueError):
                             code_int = code_val
                     if isinstance(code_int, int) and code_int < 0:
-                        if (
-                            signed
-                            and r.status_code in (401, 403)
-                            and code_int == -2015
-                            and http_attempt < max_http - 1
-                        ):
+                        if signed and r.status_code in (401, 403) and code_int == -2015 and http_attempt < max_http - 1:
                             logger.warning(
                                 "HTTP %s + code -2015 on %s — retrying signed request (%s/%s) after gateway blip",
                                 r.status_code,
@@ -774,14 +777,12 @@ class BinanceThClient:
                                 http_attempt + 1,
                                 max_http,
                             )
-                            time.sleep(0.35 * (1.45 ** http_attempt))
+                            time.sleep(0.35 * (1.45**http_attempt))
                             continue
 
                         if r.status_code >= 400:
                             is_suppressed_auth = (
-                                signed
-                                and r.status_code in (401, 403)
-                                and bool(self._fatal_auth_suppression_context)
+                                signed and r.status_code in (401, 403) and bool(self._fatal_auth_suppression_context)
                             )
                             threshold = max(
                                 1,
@@ -793,27 +794,14 @@ class BinanceThClient:
                                 and code_int == -2015
                                 and (self._consecutive_auth_failures + 1) < threshold
                             )
-                            log_method = (
-                                logger.warning
-                                if (is_suppressed_auth or is_transient_soft)
-                                else logger.error
-                            )
-                            suffix = (
-                                f" during {self._fatal_auth_suppression_context}"
-                                if is_suppressed_auth else ""
-                            )
-                            log_method(
-                                f"HTTP {r.status_code} from {path}{suffix} — "
-                                f"Raw response: {r.text[:500]}"
-                            )
+                            log_method = logger.warning if (is_suppressed_auth or is_transient_soft) else logger.error
+                            suffix = f" during {self._fatal_auth_suppression_context}" if is_suppressed_auth else ""
+                            log_method(f"HTTP {r.status_code} from {path}{suffix} — " f"Raw response: {r.text[:500]}")
                         msg = _binance_error_message(code_int, data.get("msg"))
                         raise BinanceAPIError(code_int, msg, raw=data)
 
                 if r.status_code >= 400:
-                    logger.error(
-                        f"HTTP {r.status_code} from {path} — "
-                        f"Raw response: {r.text[:500]}"
-                    )
+                    logger.error(f"HTTP {r.status_code} from {path} — " f"Raw response: {r.text[:500]}")
                     raise BinanceAPIError(
                         -1,
                         f"HTTP {r.status_code} from {path}: {str(data)[:300]}",
@@ -823,25 +811,24 @@ class BinanceThClient:
 
             if signed and self._consecutive_auth_failures:
                 logger.info(
-                    "Signed call recovered on %s after %d transient auth error(s) — "
-                    "resetting auth-failure counter.",
-                    path, self._consecutive_auth_failures,
+                    "Signed call recovered on %s after %d transient auth error(s) — " "resetting auth-failure counter.",
+                    path,
+                    self._consecutive_auth_failures,
                 )
             self._consecutive_auth_failures = 0
             self._cb.record_success()
             return data
 
         except BinanceAPIError as e:
-            is_auth_error = (
-                e.code in (-2014, -2015)
-                or (signed and isinstance(e.code, int) and e.code in {-1022})
-            )
+            is_auth_error = e.code in (-2014, -2015) or (signed and isinstance(e.code, int) and e.code in {-1022})
             if is_auth_error:
                 if self._fatal_auth_suppression_context:
                     logger.warning(
                         "Binance auth error %s on %s during %s — caller will downgrade to "
                         "degraded mode; fatal shutdown side effects suppressed",
-                        e.code, path, self._fatal_auth_suppression_context,
+                        e.code,
+                        path,
+                        self._fatal_auth_suppression_context,
                     )
                     raise
 
@@ -856,8 +843,10 @@ class BinanceThClient:
                         "Transient Binance auth error %s on %s "
                         "(consecutive %d/%d, likely IP-whitelist propagation). "
                         "Caller may retry; circuit breaker NOT tripped.",
-                        e.code, path,
-                        self._consecutive_auth_failures, threshold,
+                        e.code,
+                        path,
+                        self._consecutive_auth_failures,
+                        threshold,
                     )
                     raise
 
@@ -865,8 +854,12 @@ class BinanceThClient:
                 logger.critical(
                     "🚨 FATAL: Binance auth error %s on %s after %d consecutive failures. "
                     "Current IP: %s | Message: %s | Raw: %s",
-                    e.code, path, self._consecutive_auth_failures,
-                    current_ip, e.message, e.raw,
+                    e.code,
+                    path,
+                    self._consecutive_auth_failures,
+                    current_ip,
+                    e.message,
+                    e.raw,
                 )
                 self._cb.record_failure(f"FATAL Auth Error {e.code} on {path}")
                 raise BinanceAuthException(
@@ -881,8 +874,7 @@ class BinanceThClient:
             if isinstance(e.code, int) and e.code in (-1013, -2010, -2011, -2013, -2026):
                 if e.code == -2011 and "/api/v1/order" in path and method.upper() == "DELETE":
                     logger.info(
-                        f"Expected stale cancel {e.code} on {path}: {e.message} "
-                        f"(order already filled or gone)"
+                        f"Expected stale cancel {e.code} on {path}: {e.message} " f"(order already filled or gone)"
                     )
                 else:
                     logger.warning(
@@ -996,14 +988,16 @@ class BinanceThClient:
             if not isinstance(row, list) or len(row) < 6:
                 continue
             try:
-                candles.append([
-                    int(int(row[0]) / 1000),
-                    float(row[1]),
-                    float(row[2]),
-                    float(row[3]),
-                    float(row[4]),
-                    float(row[5]),
-                ])
+                candles.append(
+                    [
+                        int(int(row[0]) / 1000),
+                        float(row[1]),
+                        float(row[2]),
+                        float(row[3]),
+                        float(row[4]),
+                        float(row[5]),
+                    ]
+                )
             except (TypeError, ValueError):
                 continue
 
@@ -1095,9 +1089,11 @@ class BinanceThClient:
     ) -> Dict[str, Dict[str, float]]:
         """GET /api/v1/account → {"BTC": {"available": x, "reserved": y}, ...}."""
         with self._state_lock:
-            if (not force_refresh
-                    and self._balances_cache is not None
-                    and time.time() - self._balances_cache_time < self._balances_cache_ttl):
+            if (
+                not force_refresh
+                and self._balances_cache is not None
+                and time.time() - self._balances_cache_time < self._balances_cache_ttl
+            ):
                 return self._balances_cache
 
         try:
@@ -1109,7 +1105,7 @@ class BinanceThClient:
                     continue
                 try:
                     available = float(entry.get("free", 0.0) or 0.0)
-                    reserved  = float(entry.get("locked", 0.0) or 0.0)
+                    reserved = float(entry.get("locked", 0.0) or 0.0)
                 except (TypeError, ValueError):
                     available, reserved = 0.0, 0.0
                 if available <= 0 and reserved <= 0:
@@ -1178,7 +1174,7 @@ class BinanceThClient:
     ) -> Dict[str, Any]:
         """Translate legacy (amount, rate) inputs into Binance order parameters."""
         side = side.upper()
-        ot   = (order_type or "limit").lower()
+        ot = (order_type or "limit").lower()
 
         params: Dict[str, Any] = {"symbol": binance_symbol, "side": side}
 
@@ -1227,9 +1223,9 @@ class BinanceThClient:
                     -1013,
                     f"LIMIT {side} notional {notional} below minNotional {min_notional}",
                 )
-            params["type"]     = "LIMIT_MAKER" if post_only else "LIMIT"
+            params["type"] = "LIMIT_MAKER" if post_only else "LIMIT"
             params["quantity"] = self._format_qty_string(binance_symbol, qty)
-            params["price"]    = self._format_price_string(binance_symbol, price)
+            params["price"] = self._format_price_string(binance_symbol, price)
             if not post_only:
                 params["timeInForce"] = "GTC"
 
@@ -1344,11 +1340,7 @@ class BinanceThClient:
             params={"symbol": binance_symbol, "limit": int(limit)},
         )
         rows = data if isinstance(data, list) else []
-        return [
-            _normalize_order_response(row, fallback_symbol=symbol)
-            for row in rows
-            if isinstance(row, dict)
-        ]
+        return [_normalize_order_response(row, fallback_symbol=symbol) for row in rows if isinstance(row, dict)]
 
     # ── Wallet / fiat history (stubbed in SPEC_01) ─────────────────────────
     # Binance.th does not expose direct equivalents of the legacy
@@ -1392,7 +1384,7 @@ class BinanceThClient:
         balances = self.get_balances()
         info = balances.get(asset.upper(), {"available": 0.0, "reserved": 0.0})
         av = info.get("available", 0.0)
-        rv = info.get("reserved",  0.0)
+        rv = info.get("reserved", 0.0)
         return f"{asset}: available={av:.8f}  reserved={rv:.8f}"
 
     def fmt_ticker(self, symbol: Optional[str] = None) -> str:
@@ -1407,6 +1399,7 @@ class BinanceThClient:
 
 # ── Module-level helpers ─────────────────────────────────────────────────────
 
+
 def _normalize_ticker(data: Dict[str, Any], *, requested_symbol: str) -> Dict[str, Any]:
     """Normalize a Binance 24hr ticker payload into the expected internal shape."""
     if not isinstance(data, dict):
@@ -1419,29 +1412,29 @@ def _normalize_ticker(data: Dict[str, Any], *, requested_symbol: str) -> Dict[st
             return default
 
     return {
-        "last":           _f("lastPrice"),
-        "high":           _f("highPrice"),
-        "low":            _f("lowPrice"),
-        "highest_bid":    _f("bidPrice"),
-        "lowest_ask":     _f("askPrice"),
-        "volume":         _f("volume"),
-        "quote_volume":   _f("quoteVolume"),
+        "last": _f("lastPrice"),
+        "high": _f("highPrice"),
+        "low": _f("lowPrice"),
+        "highest_bid": _f("bidPrice"),
+        "lowest_ask": _f("askPrice"),
+        "volume": _f("volume"),
+        "quote_volume": _f("quoteVolume"),
         "percent_change": _f("priceChangePercent"),
-        "high_24_hr":     _f("highPrice"),
-        "low_24_hr":      _f("lowPrice"),
-        "symbol":         requested_symbol or data.get("symbol", ""),
-        "_raw":           data,
+        "high_24_hr": _f("highPrice"),
+        "low_24_hr": _f("lowPrice"),
+        "symbol": requested_symbol or data.get("symbol", ""),
+        "_raw": data,
     }
 
 
 _BINANCE_ORDER_STATUS_MAP = {
-    "NEW":              "unfilled",
+    "NEW": "unfilled",
     "PARTIALLY_FILLED": "partial",
-    "FILLED":           "filled",
-    "CANCELED":         "cancelled",
-    "PENDING_CANCEL":   "cancelling",
-    "REJECTED":         "rejected",
-    "EXPIRED":          "expired",
+    "FILLED": "filled",
+    "CANCELED": "cancelled",
+    "PENDING_CANCEL": "cancelling",
+    "REJECTED": "rejected",
+    "EXPIRED": "expired",
 }
 
 
@@ -1453,6 +1446,7 @@ def _normalize_order_response(data: Dict[str, Any], *, fallback_symbol: str) -> 
 
     The original Binance payload is preserved under ``_raw``.
     """
+
     def _f(key: str, default: float = 0.0) -> float:
         try:
             return float(data.get(key, default) or default)
@@ -1460,14 +1454,14 @@ def _normalize_order_response(data: Dict[str, Any], *, fallback_symbol: str) -> 
             return default
 
     raw_symbol = str(data.get("symbol") or fallback_symbol or "").upper()
-    side       = str(data.get("side") or "").upper()
+    side = str(data.get("side") or "").upper()
     order_type = str(data.get("type") or "").lower()
-    status     = str(data.get("status") or "").upper()
+    status = str(data.get("status") or "").upper()
 
-    orig_qty       = _f("origQty")
-    executed_qty   = _f("executedQty")
-    cum_quote_qty  = _f("cummulativeQuoteQty")
-    price          = _f("price")
+    orig_qty = _f("origQty")
+    executed_qty = _f("executedQty")
+    cum_quote_qty = _f("cummulativeQuoteQty")
+    price = _f("price")
     transact_ts_ms = data.get("transactTime") or data.get("updateTime") or data.get("time") or 0
     try:
         transact_ts = int(int(transact_ts_ms) / 1000)
@@ -1495,20 +1489,20 @@ def _normalize_order_response(data: Dict[str, Any], *, fallback_symbol: str) -> 
         avg_price = cum_quote_qty / executed_qty
 
     return {
-        "id":         str(data.get("orderId") or data.get("id") or ""),
-        "ci":         str(data.get("clientOrderId") or ""),
-        "typ":        order_type or ("limit" if price > 0 else "market"),
-        "side":       side.lower() or "",
-        "amt":        amt,
-        "rat":        price if price > 0 else avg_price,
-        "rec":        rec,
-        "fee":        fee,
-        "cre":        transact_ts,
-        "ts":         transact_ts,
-        "status":     _BINANCE_ORDER_STATUS_MAP.get(status, status.lower()),
-        "avg_price":  avg_price,
-        "symbol":     raw_symbol or fallback_symbol,
-        "_raw":       data,
+        "id": str(data.get("orderId") or data.get("id") or ""),
+        "ci": str(data.get("clientOrderId") or ""),
+        "typ": order_type or ("limit" if price > 0 else "market"),
+        "side": side.lower() or "",
+        "amt": amt,
+        "rat": price if price > 0 else avg_price,
+        "rec": rec,
+        "fee": fee,
+        "cre": transact_ts,
+        "ts": transact_ts,
+        "status": _BINANCE_ORDER_STATUS_MAP.get(status, status.lower()),
+        "avg_price": avg_price,
+        "symbol": raw_symbol or fallback_symbol,
+        "_raw": data,
     }
 
 
@@ -1538,10 +1532,7 @@ def _candle_cache_put(key: str, payload: Dict[str, Any]) -> None:
     with _candle_cache_lock:
         _candle_cache[key] = (now, payload)
         if len(_candle_cache) > _CANDLE_CACHE_MAX:
-            expired = [
-                k for k, (cached_at, _) in _candle_cache.items()
-                if now - cached_at >= _CANDLE_CACHE_TTL
-            ]
+            expired = [k for k, (cached_at, _) in _candle_cache.items() if now - cached_at >= _CANDLE_CACHE_TTL]
             for k in expired:
                 _candle_cache.pop(k, None)
             overflow = len(_candle_cache) - _CANDLE_CACHE_MAX

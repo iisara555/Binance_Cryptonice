@@ -2,7 +2,6 @@ import logging
 
 import numpy as np
 import pandas as pd
-
 from freqtrade.constants import Config
 from freqtrade.data.btanalysis.bt_fileutils import trade_list_to_dataframe
 from freqtrade.data.btanalysis.trade_parallelism import balance_distribution_over_time
@@ -11,14 +10,11 @@ from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_prev_date
 from freqtrade.persistence import KeyValueStore, Trade, WalletHistory
 from freqtrade.util import dt_now, dt_ts
 
-
 logger = logging.getLogger(__name__)
 
 
 def migrate_wallet_history(config: Config, exchange: Exchange, starting_balance: float):
-    if config.get("skip_wallet_history_migration") or not exchange.get_option(
-        "ohlcv_has_history", True
-    ):
+    if config.get("skip_wallet_history_migration") or not exchange.get_option("ohlcv_has_history", True):
         # we can't fill up wallet history without ohlcv history
         return
     if KeyValueStore.get_int_value("wallet_history_migration"):
@@ -35,9 +31,7 @@ def _migrate_wallet_history(config: Config, exchange: Exchange, starting_balance
     # Prepare balance distribution data with OHLCV rates
     balance_dist, pairlist_valid = _prepare_balance_distribution(config, exchange, starting_balance)
     if not balance_dist.empty and pairlist_valid:
-        _create_wallet_history_entries(
-            config, exchange, balance_dist, pairlist_valid, config["stake_currency"]
-        )
+        _create_wallet_history_entries(config, exchange, balance_dist, pairlist_valid, config["stake_currency"])
 
 
 def _prepare_balance_distribution(
@@ -75,9 +69,7 @@ def _prepare_balance_distribution(
         cache=False,
         drop_incomplete=False,
     )
-    logger.info(
-        "Wallet History migration: Done fetching OHLCV data for wallet history migration..."
-    )
+    logger.info("Wallet History migration: Done fetching OHLCV data for wallet history migration...")
 
     dfs = []
     # Combine all dataframes into one using the open rate
@@ -88,16 +80,12 @@ def _prepare_balance_distribution(
         dfs.append(x[[col]])
 
     if not dfs:
-        logger.warning(
-            "No OHLCV data available for the trading pairs; skipping wallet history migration."
-        )
+        logger.warning("No OHLCV data available for the trading pairs; skipping wallet history migration.")
         return pd.DataFrame(), []
     merged = pd.concat(dfs, axis=1)
 
     balance_dist = balance_dist.join(merged, how="left")
-    df_value = pd.DataFrame(
-        index=balance_dist.index, columns=[f"{p}_value" for p in pairlist_valid], dtype=float
-    )
+    df_value = pd.DataFrame(index=balance_dist.index, columns=[f"{p}_value" for p in pairlist_valid], dtype=float)
     for p in pairlist_valid:
         # df_value[f"{p}_value"] = balance_dist[f"{p}_open"] * balance_dist[p]
         # Identical calculation to rpc and wallets.py
@@ -113,9 +101,7 @@ def _prepare_balance_distribution(
     balance_dist = pd.concat([balance_dist, df_value], axis=1)
 
     # Aggregate total value at each point in time
-    balance_dist["total_value"] = balance_dist[
-        [f"{p}_value" for p in pairlist_valid] + [stake_currency]
-    ].sum(axis=1)
+    balance_dist["total_value"] = balance_dist[[f"{p}_value" for p in pairlist_valid] + [stake_currency]].sum(axis=1)
 
     return balance_dist, pairlist_valid
 
@@ -132,18 +118,10 @@ def _create_wallet_history_entries(
     # Assume the first column is the index (date)
     stake_idx = balance_dist.columns.get_loc(stake_currency)
     pair_balance_idx = {pair: balance_dist.columns.get_loc(pair) + 1 for pair in pairlist_valid}
-    pair_leverage_idx = {
-        pair: balance_dist.columns.get_loc(f"{pair}_leverage") + 1 for pair in pairlist_valid
-    }
-    pair_collateral_idx = {
-        pair: balance_dist.columns.get_loc(f"{pair}_collateral") + 1 for pair in pairlist_valid
-    }
-    pair_is_short_idx = {
-        pair: balance_dist.columns.get_loc(f"{pair}_is_short") + 1 for pair in pairlist_valid
-    }
-    pair_rate_idx = {
-        pair: balance_dist.columns.get_loc(f"{pair}_open") + 1 for pair in pairlist_valid
-    }
+    pair_leverage_idx = {pair: balance_dist.columns.get_loc(f"{pair}_leverage") + 1 for pair in pairlist_valid}
+    pair_collateral_idx = {pair: balance_dist.columns.get_loc(f"{pair}_collateral") + 1 for pair in pairlist_valid}
+    pair_is_short_idx = {pair: balance_dist.columns.get_loc(f"{pair}_is_short") + 1 for pair in pairlist_valid}
+    pair_rate_idx = {pair: balance_dist.columns.get_loc(f"{pair}_open") + 1 for pair in pairlist_valid}
     # Convert balance_dist to WalletHistory entries
     wallet_entries = []
     for row in balance_dist.itertuples(index=True, name=None):

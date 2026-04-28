@@ -9,8 +9,7 @@ def backfill_trades(db_path: Path) -> int:
     connection = sqlite3.connect(str(db_path))
     try:
         cursor = connection.cursor()
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT INTO trades (pair, side, quantity, price, fee, realized_pnl, timestamp)
             SELECT
                 o.pair,
@@ -33,8 +32,7 @@ def backfill_trades(db_path: Path) -> int:
                     AND ABS(t.price - COALESCE(NULLIF(o.filled_price, 0), o.price)) < 1e-12
                     AND COALESCE(t.timestamp, '') = COALESCE(o.created_at, o.timestamp)
               )
-            """
-        )
+            """)
         inserted_rows = int(cursor.rowcount or 0)
         connection.commit()
         return inserted_rows

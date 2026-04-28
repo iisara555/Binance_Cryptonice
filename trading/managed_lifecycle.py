@@ -9,7 +9,6 @@ from trade_executor import OrderResult, OrderSide, OrderStatus
 from trading.cost_basis import resolve_sane_entry_cost
 from trading.orchestrator import TradeDecision
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -127,28 +126,34 @@ class ManagedLifecycleHelper:
         )
 
         try:
-            self.bot.db.log_closed_trade({
-                "symbol": snapshot.symbol,
-                "side": "buy",
-                "amount": amount,
-                "entry_price": snapshot.entry_price,
-                "exit_price": exit_price,
-                "entry_cost": entry_cost,
-                "gross_exit": gross_exit,
-                "entry_fee": entry_fee,
-                "exit_fee": exit_fee,
-                "total_fees": total_fees,
-                "net_pnl": net_pnl,
-                "net_pnl_pct": net_pnl_pct,
-                "trigger": snapshot.trigger,
-                "price_source": price_source,
-                "opened_at": snapshot.opened_at,
-                "closed_at": now,
-            })
+            self.bot.db.log_closed_trade(
+                {
+                    "symbol": snapshot.symbol,
+                    "side": "buy",
+                    "amount": amount,
+                    "entry_price": snapshot.entry_price,
+                    "exit_price": exit_price,
+                    "entry_cost": entry_cost,
+                    "gross_exit": gross_exit,
+                    "entry_fee": entry_fee,
+                    "exit_fee": exit_fee,
+                    "total_fees": total_fees,
+                    "net_pnl": net_pnl,
+                    "net_pnl_pct": net_pnl_pct,
+                    "trigger": snapshot.trigger,
+                    "price_source": price_source,
+                    "opened_at": snapshot.opened_at,
+                    "closed_at": now,
+                }
+            )
         except Exception as exc:
             logger.error("[State] Failed to log closed trade for %s: %s", snapshot.symbol, exc, exc_info=True)
 
-        trigger_label = "Take Profit" if snapshot.trigger == "TP" else ("Stop Loss" if snapshot.trigger == "SL" else (snapshot.trigger or "Exit"))
+        trigger_label = (
+            "Take Profit"
+            if snapshot.trigger == "TP"
+            else ("Stop Loss" if snapshot.trigger == "SL" else (snapshot.trigger or "Exit"))
+        )
         msg = self.bot._format_exit_alert(
             snapshot.symbol,
             trigger_label,
@@ -231,11 +236,13 @@ class ManagedLifecycleHelper:
             if self.bot.risk_manager:
                 self.bot.risk_manager.record_trade()
         decision.status = snapshot.state.value
-        self.bot._executed_today.append({
-            "decision": decision,
-            "result": result,
-            "timestamp": datetime.now(),
-        })
+        self.bot._executed_today.append(
+            {
+                "decision": decision,
+                "result": result,
+                "timestamp": datetime.now(),
+            }
+        )
         self.bot._log_position_trace(
             "ENTRY_SUBMITTED",
             decision.plan.symbol,
@@ -292,23 +299,28 @@ class ManagedLifecycleHelper:
         if order_value_quote < min_order_quote:
             logger.warning(
                 "[Dust] Skipping %s exit for %s — value %.2f quote < min %.0f quote. Force-closing as dust.",
-                triggered, pos_symbol, order_value_quote, min_order_quote,
+                triggered,
+                pos_symbol,
+                order_value_quote,
+                min_order_quote,
             )
             self.bot.executor.remove_tracked_position(position_id)
             self.bot._cleanup_sl_hold_entry(position_id)
             self.bot._state_manager._drop(pos_symbol)
             try:
-                self.bot.db.log_closed_trade({
-                    "symbol": pos_symbol,
-                    "side": side,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "amount": amount,
-                    "realized_pnl": -(total_entry_cost),
-                    "pnl_pct": -100.0,
-                    "trigger": "DUST",
-                    "status": "dust_closed",
-                })
+                self.bot.db.log_closed_trade(
+                    {
+                        "symbol": pos_symbol,
+                        "side": side,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "amount": amount,
+                        "realized_pnl": -(total_entry_cost),
+                        "pnl_pct": -100.0,
+                        "trigger": "DUST",
+                        "status": "dust_closed",
+                    }
+                )
             except Exception as db_exc:
                 logger.warning("[Dust] DB log failed for %s: %s", pos_symbol, db_exc)
             return True
@@ -327,7 +339,8 @@ class ManagedLifecycleHelper:
             # Fallback: parse error code from message like "[15] Amount too low"
             if error_code is None and result.message:
                 import re
-                _m = re.search(r'\[(15|18)\]', result.message)
+
+                _m = re.search(r"\[(15|18)\]", result.message)
                 if _m:
                     error_code = int(_m.group(1))
             # Permanent failures like "Amount too low" (15) or "Order value below minimum" (18)
@@ -335,23 +348,28 @@ class ManagedLifecycleHelper:
             if error_code in (15, 18):
                 logger.warning(
                     "[Dust] Force-closing %s position %s — amount too low to sell (error %s: %s)",
-                    pos_symbol, position_id, error_code, result.message,
+                    pos_symbol,
+                    position_id,
+                    error_code,
+                    result.message,
                 )
                 self.bot.executor.remove_tracked_position(position_id)
                 self.bot._cleanup_sl_hold_entry(position_id)
                 self.bot._state_manager._drop(pos_symbol)
                 try:
-                    self.bot.db.log_closed_trade({
-                        "symbol": pos_symbol,
-                        "side": side,
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "amount": amount,
-                        "realized_pnl": -(entry_price * amount),
-                        "pnl_pct": -100.0,
-                        "trigger": "DUST",
-                        "status": "dust_closed",
-                    })
+                    self.bot.db.log_closed_trade(
+                        {
+                            "symbol": pos_symbol,
+                            "side": side,
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "amount": amount,
+                            "realized_pnl": -(entry_price * amount),
+                            "pnl_pct": -100.0,
+                            "trigger": "DUST",
+                            "status": "dust_closed",
+                        }
+                    )
                 except Exception as db_exc:
                     logger.warning("[Dust] DB log failed for %s: %s", pos_symbol, db_exc)
                 return True  # Return True to prevent retry
@@ -433,7 +451,9 @@ class ManagedLifecycleHelper:
                             )
 
                     if status.status == OrderStatus.FILLED:
-                        filled_amount, filled_price = self.bot._resolve_fill_amount(snapshot, status, snapshot.entry_price)
+                        filled_amount, filled_price = self.bot._resolve_fill_amount(
+                            snapshot, status, snapshot.entry_price
+                        )
                         if filled_amount <= 0 or filled_price <= 0:
                             logger.warning("[State] Filled BUY for %s but amount/price unresolved", snapshot.symbol)
                             continue
@@ -450,7 +470,9 @@ class ManagedLifecycleHelper:
                             filled_price,
                         )
                         if self.bot.send_alerts:
-                            quote = self.bot._status_helper.quote_asset() if hasattr(self.bot, "_status_helper") else "USDT"
+                            quote = (
+                                self.bot._status_helper.quote_asset() if hasattr(self.bot, "_status_helper") else "USDT"
+                            )
                             coin = self.bot._format_coin_symbol(snapshot.symbol)
                             msg = self.bot._format_alert_block(
                                 f"✅ <b>ซื้อสำเร็จ (Filled)</b>  {coin}",
@@ -464,7 +486,9 @@ class ManagedLifecycleHelper:
                         continue
 
                     if self.bot._state_manager.is_timed_out(snapshot):
-                        cancelled = self.bot.executor.cancel_order(snapshot.entry_order_id, symbol=snapshot.symbol, side="buy")
+                        cancelled = self.bot.executor.cancel_order(
+                            snapshot.entry_order_id, symbol=snapshot.symbol, side="buy"
+                        )
                         stale_fill = getattr(self.bot.executor, "_oms_cancel_was_error_21", False)
                         self.bot.executor._oms_cancel_was_error_21 = False
                         if stale_fill:
@@ -474,7 +498,9 @@ class ManagedLifecycleHelper:
                                 order_id=snapshot.entry_order_id,
                                 filled_price=snapshot.entry_price,
                             )
-                            filled_amount, filled_price = self.bot._resolve_fill_amount(snapshot, fallback, snapshot.entry_price)
+                            filled_amount, filled_price = self.bot._resolve_fill_amount(
+                                snapshot, fallback, snapshot.entry_price
+                            )
                             if filled_amount > 0 and filled_price > 0:
                                 self.bot._register_filled_position_from_state(snapshot, filled_amount, filled_price)
                                 self.bot._state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
@@ -519,12 +545,18 @@ class ManagedLifecycleHelper:
                         continue
 
                     if self.bot._state_manager.is_timed_out(snapshot):
-                        cancelled = self.bot.executor.cancel_order(snapshot.exit_order_id, symbol=snapshot.symbol, side="sell")
+                        cancelled = self.bot.executor.cancel_order(
+                            snapshot.exit_order_id, symbol=snapshot.symbol, side="sell"
+                        )
                         stale_fill = getattr(self.bot.executor, "_oms_cancel_was_error_21", False)
                         self.bot.executor._oms_cancel_was_error_21 = False
                         if stale_fill:
-                            completed = self.bot._state_manager.complete_exit(snapshot.symbol, snapshot.exit_price or snapshot.entry_price)
-                            self.bot._report_completed_exit(completed, snapshot.exit_price or snapshot.entry_price, "stale_cancel")
+                            completed = self.bot._state_manager.complete_exit(
+                                snapshot.symbol, snapshot.exit_price or snapshot.entry_price
+                            )
+                            self.bot._report_completed_exit(
+                                completed, snapshot.exit_price or snapshot.entry_price, "stale_cancel"
+                            )
                             continue
 
                         if cancelled:

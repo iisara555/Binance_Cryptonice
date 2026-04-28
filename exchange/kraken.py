@@ -4,14 +4,12 @@ import logging
 from typing import Any
 
 import ccxt
-
 from freqtrade.constants import BuySell
 from freqtrade.enums import MarginMode, TradingMode
 from freqtrade.exceptions import DDosProtection, OperationalException, TemporaryError
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import CcxtBalances, FtHas
-
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +103,7 @@ class Kraken(Exchange):
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
         except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Could not get balance due to {e.__class__.__name__}. Message: {e}"
-            ) from e
+            raise TemporaryError(f"Could not get balance due to {e.__class__.__name__}. Message: {e}") from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 

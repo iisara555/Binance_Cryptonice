@@ -127,9 +127,7 @@ def test_first_poll_bootstraps_existing_history_without_emitting_events(tmp_path
 
 def test_second_poll_emits_only_new_history_after_bootstrap(tmp_path):
     monitor = _build_monitor(tmp_path)
-    monitor.api_client.get_balances.return_value = {
-        "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}
-    }
+    monitor.api_client.get_balances.return_value = {"USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}}
     monitor.api_client.get_crypto_deposit_history.return_value = {"items": []}
     monitor.api_client.get_crypto_withdraw_history.return_value = {"items": []}
 
@@ -159,9 +157,7 @@ def test_second_poll_emits_only_new_history_after_bootstrap(tmp_path):
 
 def test_first_poll_can_emit_existing_history_when_bootstrap_disabled(tmp_path):
     monitor = _build_monitor(tmp_path, config={"bootstrap_history_on_startup": False})
-    monitor.api_client.get_balances.return_value = {
-        "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}
-    }
+    monitor.api_client.get_balances.return_value = {"USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}}
     monitor.api_client.get_fiat_deposit_history.return_value = [
         {"txn_id": "dep-old", "status": "complete", "amount": "1000", "time": "2022-01-01T00:00:00Z"}
     ]
@@ -233,9 +229,7 @@ def test_poll_once_stops_dispatch_after_callback_requests_shutdown(tmp_path):
         monitor.stop()
 
     monitor = _build_monitor(tmp_path, on_event=on_event, config={"bootstrap_history_on_startup": False})
-    monitor.api_client.get_balances.return_value = {
-        "USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}
-    }
+    monitor.api_client.get_balances.return_value = {"USDT": {"available": 500.0, "reserved": 0.0, "total": 500.0}}
     monitor.api_client.get_fiat_deposit_history.return_value = [
         {"txn_id": "dep-1", "status": "complete", "amount": "100", "time": "2024-01-01T00:00:00Z"},
         {"txn_id": "dep-2", "status": "complete", "amount": "200", "time": "2024-01-01T00:01:00Z"},

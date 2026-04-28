@@ -6,7 +6,6 @@ from functools import partial
 from threading import Thread
 
 import ccxt
-
 from freqtrade.constants import Config, PairWithTimeframe
 from freqtrade.enums.candletype import CandleType
 from freqtrade.exceptions import TemporaryError
@@ -14,7 +13,6 @@ from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange import timeframe_to_seconds
 from freqtrade.exchange.exchange_types import OHLCVResponse
 from freqtrade.util import dt_ts, format_ms_time, format_ms_time_det
-
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +124,7 @@ class ExchangeWS:
             if p not in self._klines_scheduled:
                 self._klines_scheduled.add(p)
                 pair, timeframe, candle_type = p
-                task = asyncio.create_task(
-                    self._continuously_async_watch_ohlcv(pair, timeframe, candle_type)
-                )
+                task = asyncio.create_task(self._continuously_async_watch_ohlcv(pair, timeframe, candle_type))
                 self._background_tasks.add(task)
                 task.add_done_callback(
                     partial(
@@ -148,9 +144,7 @@ class ExchangeWS:
         except Exception:
             logger.exception("Exception in _unwatch_ohlcv")
 
-    def _continuous_stopped(
-        self, task: asyncio.Task, pair: str, timeframe: str, candle_type: CandleType
-    ):
+    def _continuous_stopped(self, task: asyncio.Task, pair: str, timeframe: str, candle_type: CandleType):
         self._background_tasks.discard(task)
         result = "done"
         if task.cancelled():
@@ -160,25 +154,18 @@ class ExchangeWS:
                 result = str(result1)
 
         logger.info(f"{pair}, {timeframe}, {candle_type} - Task finished - {result}")
-        asyncio.run_coroutine_threadsafe(
-            self._unwatch_ohlcv(pair, timeframe, candle_type), loop=self._loop
-        )
+        asyncio.run_coroutine_threadsafe(self._unwatch_ohlcv(pair, timeframe, candle_type), loop=self._loop)
 
         self._klines_scheduled.discard((pair, timeframe, candle_type))
         self._pop_history((pair, timeframe, candle_type))
 
-    async def _continuously_async_watch_ohlcv(
-        self, pair: str, timeframe: str, candle_type: CandleType
-    ) -> None:
+    async def _continuously_async_watch_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         try:
             while (pair, timeframe, candle_type) in self._klines_watching:
                 start = dt_ts()
                 data = await self._ccxt_object.watch_ohlcv(pair, timeframe)
                 self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
-                logger.debug(
-                    f"watch done {pair}, {timeframe}, data {len(data)} "
-                    f"in {(dt_ts() - start) / 1000:.3f}s"
-                )
+                logger.debug(f"watch done {pair}, {timeframe}, data {len(data)} " f"in {(dt_ts() - start) / 1000:.3f}s")
         except ccxt.ExchangeClosedByUser:
             logger.debug("Exchange connection closed by user")
         except ccxt.BaseError:

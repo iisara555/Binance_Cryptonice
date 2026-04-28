@@ -32,10 +32,12 @@ def test_env_target_allocation_applies_sideways_cash_shift(monkeypatch):
 
 
 def test_threshold_strategy_returns_reason_when_within_threshold():
-    strategy = ThresholdRebalanceStrategy({
-        "threshold_pct": 10.0,
-        "min_rebalance_pct": 1.0,
-    })
+    strategy = ThresholdRebalanceStrategy(
+        {
+            "threshold_pct": 10.0,
+            "min_rebalance_pct": 1.0,
+        }
+    )
     allocations = [
         AllocationTarget(symbol="BTC", target_pct=50.0, current_value=500.0),
         AllocationTarget(symbol="DOGE", target_pct=30.0, current_value=300.0),

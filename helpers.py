@@ -118,12 +118,14 @@ def get_current_price(
                 # Bitkub adapter so existing callers and tests keep working.
                 try:
                     from binance_websocket import get_latest_ticker as _bn_get  # type: ignore
+
                     tick = _bn_get(symbol)
                 except Exception:
                     tick = None
                 if tick is None:
                     try:
                         from bitkub_websocket import get_latest_ticker as _bk_get  # type: ignore
+
                         tick = _bk_get(symbol)
                     except Exception:
                         tick = None
@@ -155,6 +157,7 @@ def get_current_price(
 
 
 # ── Balance Helpers ────────────────────────────────────────────────────────────
+
 
 def get_balance(
     api_client: Any,
@@ -239,6 +242,7 @@ def get_crypto_balance(
 
 
 # ── Symbol Formatting ─────────────────────────────────────────────────────────
+
 
 def normalize_symbol(symbol: str) -> str:
     """
@@ -325,6 +329,7 @@ def calc_net_pnl(
 
 
 # ── Ticker Parsing ─────────────────────────────────────────────────────────────
+
 
 def parse_ticker_last(ticker: Any) -> Optional[float]:
     """

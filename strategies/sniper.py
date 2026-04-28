@@ -150,13 +150,21 @@ class SniperStrategy(StrategyBase):
         trigger_bar = ""
         trigger_timestamp = ""
         if buy_trigger_ok:
-            trigger_bar = "current" if buy_cross_offset == 0 else ("previous" if buy_cross_offset == 1 else f"{buy_cross_offset}_bars_ago")
+            trigger_bar = (
+                "current"
+                if buy_cross_offset == 0
+                else ("previous" if buy_cross_offset == 1 else f"{buy_cross_offset}_bars_ago")
+            )
             if confirmed_timestamps is not None and len(confirmed_timestamps) >= (buy_cross_offset or 0) + 1:
                 trigger_ts = confirmed_timestamps.iloc[-1 - int(buy_cross_offset or 0)]
                 if pd.notna(trigger_ts):
                     trigger_timestamp = str(trigger_ts)
         elif sell_trigger_ok:
-            trigger_bar = "current" if sell_cross_offset == 0 else ("previous" if sell_cross_offset == 1 else f"{sell_cross_offset}_bars_ago")
+            trigger_bar = (
+                "current"
+                if sell_cross_offset == 0
+                else ("previous" if sell_cross_offset == 1 else f"{sell_cross_offset}_bars_ago")
+            )
             if confirmed_timestamps is not None and len(confirmed_timestamps) >= (sell_cross_offset or 0) + 1:
                 trigger_ts = confirmed_timestamps.iloc[-1 - int(sell_cross_offset or 0)]
                 if pd.notna(trigger_ts):
@@ -188,7 +196,7 @@ class SniperStrategy(StrategyBase):
         # Calculate ADX for trend strength filter and dynamic SL/TP adjustment
         adx = self._indicators.calculate_adx(high, low, close, period=14)
         current_adx = float(adx.iloc[-1]) if not adx.empty else 25.0
-        
+
         # Inverse volatility scaling: wider stops in high ADX (momentum/volatility expansion)
         # to avoid whipsaws from market noise during momentum spikes.
         # ADX > 50: very strong trend, high volatility → wider SL (2.0x) to absorb noise.
@@ -207,13 +215,13 @@ class SniperStrategy(StrategyBase):
             sl_mult = 1.5
             tp_mult = 2.5
             adx_context = "Weak Trend (1.5x ATR Floor)"
-        
+
         self._record_diag(
             "Sniper:ADX",
             "PASS",
             f"ADX={current_adx:.1f} ({adx_context}) → SL_mult={sl_mult}, TP_mult={tp_mult}",
         )
-        
+
         if signal_type is SignalType.BUY:
             stop_loss = current_close - (sl_mult * current_atr)
             take_profit = current_close + (tp_mult * current_atr)

@@ -14,7 +14,6 @@ from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, S
 from freqtrade.util import FtTTLCache
 from freqtrade.util.coin_gecko import FtCoinGeckoApi
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -29,8 +28,7 @@ class MarketCapPairList(IPairList):
 
         if (self._mode == "whitelist") and ("number_assets" not in self._pairlistconfig):
             raise OperationalException(
-                "`number_assets` not specified. Please check your configuration "
-                'for "pairlist.config.number_assets"'
+                "`number_assets` not specified. Please check your configuration " 'for "pairlist.config.number_assets"'
             )
 
         self._stake_currency = self._config["stake_currency"]
@@ -54,8 +52,7 @@ class MarketCapPairList(IPairList):
             for category in self._categories:
                 if category not in category_ids:
                     raise OperationalException(
-                        f"Category {category} not in coingecko category list. "
-                        f"You can choose from {category_ids}"
+                        f"Category {category} not in coingecko category list. " f"You can choose from {category_ids}"
                     )
 
         if self._max_rank > 250:
@@ -100,8 +97,7 @@ class MarketCapPairList(IPairList):
                 "default": [],
                 "description": "Coin Categories",
                 "help": (
-                    "The Category of the coin e.g layer-1 default [] "
-                    "(https://www.coingecko.com/en/categories)"
+                    "The Category of the coin e.g layer-1 default [] " "(https://www.coingecko.com/en/categories)"
                 ),
             },
             "refresh_period": {

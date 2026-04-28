@@ -25,14 +25,16 @@ def test_has_ever_held_remains_true_after_position_closed(temp_db):
     db = Database(temp_db)
 
     db.record_held_coin("ETH", 1.5)
-    position = db.save_position({
-        "order_id": "test_eth_buy_1",
-        "symbol": "ETH",
-        "side": "buy",
-        "amount": 1.5,
-        "entry_price": 100.0,
-        "remaining_amount": 1.5,
-    })
+    position = db.save_position(
+        {
+            "order_id": "test_eth_buy_1",
+            "symbol": "ETH",
+            "side": "buy",
+            "amount": 1.5,
+            "entry_price": 100.0,
+            "remaining_amount": 1.5,
+        }
+    )
 
     assert position is not None
     assert db.delete_position(position.order_id) is True

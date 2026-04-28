@@ -8,7 +8,6 @@ from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.persistence import Trade
 from freqtrade.plugins.pairlist.IPairList import IPairList, SupportsBacktesting
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
-import re
 import math
+import re
+import sys
 import threading
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from rich.align import Align
 from rich import box
-from rich.console import Group
-from rich.console import Console
+from rich.align import Align
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -28,6 +27,7 @@ from logger_setup import get_shared_console
 try:
     from signal_generator import get_latest_signal_flow_snapshot
 except Exception:  # pragma: no cover - defensive: keep dashboard alive if module fails
+
     def get_latest_signal_flow_snapshot() -> Dict[str, Dict[str, Any]]:
         return {}
 
@@ -182,7 +182,10 @@ class CLICommandCenter:
     def _is_live_console_handler(handler: logging.Handler) -> bool:
         if handler.__class__.__name__ == "RichHandler":
             return True
-        return isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) in {sys.stdout, sys.stderr}
+        return isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) in {
+            sys.stdout,
+            sys.stderr,
+        }
 
     def _mute_console_handlers(self) -> None:
         if self._muted_console_handlers:
@@ -231,7 +234,9 @@ class CLICommandCenter:
         if not self._log_lock.acquire(blocking=False):
             self._dropped_log_count += 1
             if self._dropped_log_count == 1:
-                self._safe_stderr_write("[cli_ui] warning: dashboard log buffer busy; dropping log records until lock is available\n")
+                self._safe_stderr_write(
+                    "[cli_ui] warning: dashboard log buffer busy; dropping log records until lock is available\n"
+                )
             return
         try:
             if self._dropped_log_count > 0:
@@ -752,7 +757,9 @@ class CLICommandCenter:
                 table.add_row("-", "-", "-", "-", "-", "No open positions", "-", "-")
         else:
             for position in positions:
-                sltp_text = f"{self._fmt_price(position.get('stop_loss'))} / {self._fmt_price(position.get('take_profit'))}"
+                sltp_text = (
+                    f"{self._fmt_price(position.get('stop_loss'))} / {self._fmt_price(position.get('take_profit'))}"
+                )
                 sl_dist = self._fmt_distance_pct(position.get("sl_distance_pct"))
                 tp_dist = self._fmt_distance_pct(position.get("tp_distance_pct"))
                 dist_text = Text.assemble(("SL ", self._DIM), sl_dist, (" | TP ", self._DIM), tp_dist)
@@ -798,7 +805,10 @@ class CLICommandCenter:
                 (f"{len(positions)} open", f"bold {self._EMBER}" if positions else f"bold {self._GREEN}"),
                 ("  \u2502  ", self._DIM),
                 ("W/L ", self._DIM),
-                (f"{winners}/{losers}{win_rate_str}", f"bold {self._GREEN}" if winners >= losers else f"bold {self._RED}"),
+                (
+                    f"{winners}/{losers}{win_rate_str}",
+                    f"bold {self._GREEN}" if winners >= losers else f"bold {self._RED}",
+                ),
                 ("  \u2502  ", self._DIM),
                 ("PnL ", self._DIM),
                 self._pnl_text(avg_pnl_pct),
@@ -807,9 +817,14 @@ class CLICommandCenter:
         summary_lines.append(
             Text.assemble(
                 ("  PnL   ", self._DIM),
-                self._sparkline_text(self._trend_values("avg_pnl_pct", [avg_pnl_pct]), filled_style=f"bold {self._GREEN}" if avg_pnl_pct >= 0 else f"bold {self._RED}"),
+                self._sparkline_text(
+                    self._trend_values("avg_pnl_pct", [avg_pnl_pct]),
+                    filled_style=f"bold {self._GREEN}" if avg_pnl_pct >= 0 else f"bold {self._RED}",
+                ),
                 ("  Open  ", self._DIM),
-                self._sparkline_text(self._trend_values("open_positions", [float(len(positions))]), filled_style=f"bold {self._CYAN}"),
+                self._sparkline_text(
+                    self._trend_values("open_positions", [float(len(positions))]), filled_style=f"bold {self._CYAN}"
+                ),
             )
         )
 
@@ -872,27 +887,35 @@ class CLICommandCenter:
             Text.assemble(
                 ("▸ ", f"bold {self._BLUE}"),
                 ("Cash  ", self._DIM),
-                self._meter_text(available_balance, total_balance, width=16, filled_style=f"bold {self._EMBER}", suffix="quote"),
+                self._meter_text(
+                    available_balance, total_balance, width=16, filled_style=f"bold {self._EMBER}", suffix="quote"
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("  Trend ", self._DIM),
-                self._sparkline_text(self._trend_values("available_balance", [available_balance]), filled_style=f"bold {self._EMBER}"),
+                self._sparkline_text(
+                    self._trend_values("available_balance", [available_balance]), filled_style=f"bold {self._EMBER}"
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("▸ ", f"bold {self._BLUE}"),
                 ("Slots ", self._DIM),
-                self._meter_text(float(open_positions), max_positions, width=16, filled_style=f"bold {self._WHITE}", decimals=0),
+                self._meter_text(
+                    float(open_positions), max_positions, width=16, filled_style=f"bold {self._WHITE}", decimals=0
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("▸ ", f"bold {self._BLUE}"),
                 ("Trade ", self._DIM),
-                self._meter_text(trade_count, max_daily_trades, width=16, filled_style=f"bold {self._GREEN}", decimals=0),
+                self._meter_text(
+                    trade_count, max_daily_trades, width=16, filled_style=f"bold {self._GREEN}", decimals=0
+                ),
             )
         )
         if balance_mix:
@@ -915,9 +938,21 @@ class CLICommandCenter:
         grid.add_column(ratio=1)
 
         left_lines = [
-            Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Market    ", self._DIM), (str(system.get("last_market_update", "-")), self._WHITE)),
-            Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Fresh     ", self._DIM), self._freshness_text(system.get("freshness"), system.get("market_age_seconds"))),
-            Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Latency   ", self._DIM), self._api_latency_text(system.get("api_latency"))),
+            Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("Market    ", self._DIM),
+                (str(system.get("last_market_update", "-")), self._WHITE),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("Fresh     ", self._DIM),
+                self._freshness_text(system.get("freshness"), system.get("market_age_seconds")),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("Latency   ", self._DIM),
+                self._api_latency_text(system.get("api_latency")),
+            ),
             Text.assemble(
                 ("▸ ", f"bold {self._CYAN}"),
                 ("WebSocket ", self._DIM),
@@ -927,18 +962,53 @@ class CLICommandCenter:
                     self._RED if str(system.get("websocket_last_error") or "").strip() else self._DIM,
                 ),
             ),
-            Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Balance   ", self._DIM), self._service_health_text(system.get("balance_health"))),
-            Text.assemble(("▸ ", f"bold {self._CYAN}"), ("Candle    ", self._DIM), (str(system.get("candle_readiness", "-")), self._WHITE)),
+            Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("Balance   ", self._DIM),
+                self._service_health_text(system.get("balance_health")),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("Candle    ", self._DIM),
+                (str(system.get("candle_readiness", "-")), self._WHITE),
+            ),
             Text.assemble(("  ", ""), ("Waiting   ", self._DIM), (str(system.get("candle_waiting", "-")), self._DIM)),
         ]
 
         right_lines = [
-            Text.assemble(("▸ ", f"bold {self._EMBER}"), ("Available ", self._DIM), (str(system.get("available_balance", "-")), f"bold {self._EMBER}")),
-            Text.assemble(("▸ ", f"bold {self._GREEN}"), ("Total     ", self._DIM), (str(system.get("total_balance", "-")), f"bold {self._GREEN}")),
-            Text.assemble(("▸ ", f"bold {self._WHITE}"), ("Trades    ", self._DIM), (f"{system.get('trade_count', '-')}/{system.get('max_daily_trades', '-')}", self._WHITE)),
-            Text.assemble(("▸ ", f"bold {self._RED}"), ("Risk/Trd  ", self._DIM), (str(system.get("risk_per_trade", "-")), f"bold {self._RED}")),
-            Text.assemble(("▸ ", f"bold {self._WHITE}"), ("DailyLoss ", self._DIM), (f"{system.get('daily_loss', '-')} ({system.get('daily_loss_pct', '-')})", self._WHITE)),
-            Text.assemble(("▸ ", self._DIM), ("Cooldown  ", self._DIM), (str(system.get("cooling_down", "-")), f"bold {self._EMBER}" if str(system.get("cooling_down", "-")) == "Yes" else f"bold {self._GREEN}")),
+            Text.assemble(
+                ("▸ ", f"bold {self._EMBER}"),
+                ("Available ", self._DIM),
+                (str(system.get("available_balance", "-")), f"bold {self._EMBER}"),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._GREEN}"),
+                ("Total     ", self._DIM),
+                (str(system.get("total_balance", "-")), f"bold {self._GREEN}"),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._WHITE}"),
+                ("Trades    ", self._DIM),
+                (f"{system.get('trade_count', '-')}/{system.get('max_daily_trades', '-')}", self._WHITE),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._RED}"),
+                ("Risk/Trd  ", self._DIM),
+                (str(system.get("risk_per_trade", "-")), f"bold {self._RED}"),
+            ),
+            Text.assemble(
+                ("▸ ", f"bold {self._WHITE}"),
+                ("DailyLoss ", self._DIM),
+                (f"{system.get('daily_loss', '-')} ({system.get('daily_loss_pct', '-')})", self._WHITE),
+            ),
+            Text.assemble(
+                ("▸ ", self._DIM),
+                ("Cooldown  ", self._DIM),
+                (
+                    str(system.get("cooling_down", "-")),
+                    f"bold {self._EMBER}" if str(system.get("cooling_down", "-")) == "Yes" else f"bold {self._GREEN}",
+                ),
+            ),
         ]
 
         grid.add_row(Group(*left_lines), Group(*right_lines))
@@ -1189,7 +1259,9 @@ class CLICommandCenter:
                 style = f"bold {self._EMBER}"
             timestamp = str(row.get("timestamp") or "-")
             message = self._truncate_inline(str(row.get("message") or "-"), 44)
-            lines.append(Text.assemble((f"{timestamp} ", self._DIM), (f"[{event_type}] ", style), (message, self._WHITE)))
+            lines.append(
+                Text.assemble((f"{timestamp} ", self._DIM), (f"[{event_type}] ", style), (message, self._WHITE))
+            )
 
         return self._panel(Group(*lines), title="◖ Event Tape", theme="events")
 
@@ -1223,14 +1295,19 @@ class CLICommandCenter:
             summary_lines.append(
                 Text.assemble(
                     ("  Total ", self._DIM),
-                    self._sparkline_text(self._trend_values("total_balance", [total_balance]), filled_style=f"bold {self._GREEN}"),
+                    self._sparkline_text(
+                        self._trend_values("total_balance", [total_balance]), filled_style=f"bold {self._GREEN}"
+                    ),
                 )
             )
             summary_lines.append(
                 Text.assemble(
                     ("▸ ", f"bold {self._EMBER}"),
                     ("Conc   ", self._DIM),
-                    (f"{top_allocation_pct:.1f}%", f"bold {self._RED}" if top_allocation_pct >= 70.0 else f"bold {self._WHITE}"),
+                    (
+                        f"{top_allocation_pct:.1f}%",
+                        f"bold {self._RED}" if top_allocation_pct >= 70.0 else f"bold {self._WHITE}",
+                    ),
                     ("  │  ", self._DIM),
                     ("Cash ", self._DIM),
                     (f"{cash_allocation_pct:.1f}%", f"bold {self._EMBER}"),
@@ -1250,7 +1327,10 @@ class CLICommandCenter:
 
         portfolio_theme = self._resolve_portfolio_theme(
             max((self._extract_allocation_pct(item) for item in breakdown_lines), default=0.0),
-            next((self._extract_allocation_pct(item) for item in breakdown_lines if self._is_cash_breakdown_line(item)), 0.0),
+            next(
+                (self._extract_allocation_pct(item) for item in breakdown_lines if self._is_cash_breakdown_line(item)),
+                0.0,
+            ),
         )
         if summary_lines:
             return self._panel(Group(*summary_lines, table), title="▣ Portfolio", theme=portfolio_theme)
@@ -1284,40 +1364,57 @@ class CLICommandCenter:
                 (str(system.get("risk_per_trade") or "-"), f"bold {self._RED}"),
                 ("  │  ", self._DIM),
                 ("Cool ", self._DIM),
-                (str(system.get("cooling_down") or "No"), f"bold {self._EMBER}" if str(system.get("cooling_down") or "No") == "Yes" else f"bold {self._GREEN}"),
+                (
+                    str(system.get("cooling_down") or "No"),
+                    (
+                        f"bold {self._EMBER}"
+                        if str(system.get("cooling_down") or "No") == "Yes"
+                        else f"bold {self._GREEN}"
+                    ),
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("▸ ", f"bold {self._EMBER}"),
                 ("Loss    ", self._DIM),
-                self._meter_text(daily_loss_value, daily_loss_cap, width=16, filled_style=f"bold {self._RED}", suffix="quote"),
+                self._meter_text(
+                    daily_loss_value, daily_loss_cap, width=16, filled_style=f"bold {self._RED}", suffix="quote"
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("▸ ", f"bold {self._EMBER}"),
                 ("Active  ", self._DIM),
-                self._meter_text(trade_count, max_daily_trades, width=16, filled_style=f"bold {self._GREEN}", decimals=0),
+                self._meter_text(
+                    trade_count, max_daily_trades, width=16, filled_style=f"bold {self._GREEN}", decimals=0
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("▸ ", f"bold {self._EMBER}"),
                 ("Expose  ", self._DIM),
-                self._meter_text(float(open_positions), max_positions, width=16, filled_style=f"bold {self._WHITE}", decimals=0),
+                self._meter_text(
+                    float(open_positions), max_positions, width=16, filled_style=f"bold {self._WHITE}", decimals=0
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("  Load  ", self._DIM),
-                self._sparkline_text(self._trend_values("daily_loss", [daily_loss_value]), filled_style=f"bold {self._RED}"),
+                self._sparkline_text(
+                    self._trend_values("daily_loss", [daily_loss_value]), filled_style=f"bold {self._RED}"
+                ),
             )
         )
         lines.append(
             Text.assemble(
                 ("  Pos   ", self._DIM),
-                self._sparkline_text(self._trend_values("open_positions", [float(open_positions)]), filled_style=f"bold {self._CYAN}"),
+                self._sparkline_text(
+                    self._trend_values("open_positions", [float(open_positions)]), filled_style=f"bold {self._CYAN}"
+                ),
             )
         )
 

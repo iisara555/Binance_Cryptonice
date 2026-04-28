@@ -10,7 +10,6 @@ from typing import Any
 
 import rapidjson
 import requests
-
 from freqtrade import __version__
 from freqtrade.configuration.load_config import CONFIG_PARSE_MODE
 from freqtrade.exceptions import OperationalException
@@ -18,7 +17,6 @@ from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
 from freqtrade.util import FtTTLCache
-
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +31,7 @@ class RemotePairList(IPairList):
 
         if "pairlist_url" not in self._pairlistconfig:
             raise OperationalException(
-                "`pairlist_url` not specified. Please check your configuration "
-                'for "pairlist.config.pairlist_url"'
+                "`pairlist_url` not specified. Please check your configuration " 'for "pairlist.config.pairlist_url"'
             )
 
         self._mode = self._pairlistconfig.get("mode", "whitelist")
@@ -51,9 +48,7 @@ class RemotePairList(IPairList):
         self._last_pairlist: list[Any] = list()
 
         if self._mode not in ["whitelist", "blacklist"]:
-            raise OperationalException(
-                '`mode` not configured correctly. Supported Modes are "whitelist","blacklist"'
-            )
+            raise OperationalException('`mode` not configured correctly. Supported Modes are "whitelist","blacklist"')
 
         if self._processing_mode not in ["filter", "append"]:
             raise OperationalException(
@@ -62,8 +57,7 @@ class RemotePairList(IPairList):
 
         if self._pairlist_pos == 0 and self._mode == "blacklist":
             raise OperationalException(
-                "A `blacklist` mode RemotePairList can not be on the first "
-                "position of your pairlist."
+                "A `blacklist` mode RemotePairList can not be on the first " "position of your pairlist."
             )
 
     def short_desc(self) -> str:
@@ -178,14 +172,10 @@ class RemotePairList(IPairList):
                 except Exception as e:
                     pairlist = self._handle_error(f"Failed processing JSON data: {type(e)}")
             else:
-                pairlist = self._handle_error(
-                    f"RemotePairList is not of type JSON. {self._pairlist_url}"
-                )
+                pairlist = self._handle_error(f"RemotePairList is not of type JSON. {self._pairlist_url}")
 
         except requests.exceptions.RequestException:
-            pairlist = self._handle_error(
-                f"Was not able to fetch pairlist from: {self._pairlist_url}"
-            )
+            pairlist = self._handle_error(f"Was not able to fetch pairlist from: {self._pairlist_url}")
 
             time_elapsed = 0
 

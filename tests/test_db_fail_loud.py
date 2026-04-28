@@ -6,9 +6,10 @@ non-IntegrityError exceptions propagate up through _with_retry instead
 of being silently swallowed by inner try/except blocks.
 """
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
-from sqlalchemy.exc import OperationalError, IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from database import Database
 
@@ -20,6 +21,7 @@ def db(temp_db):
 
 
 # ── save_position ────────────────────────────────────────────────────────────
+
 
 class TestSavePositionFailLoud:
     """save_position must raise on non-integrity DB errors."""
@@ -36,9 +38,7 @@ class TestSavePositionFailLoud:
             "remaining_amount": 0.001,
         }
 
-        lock_err = OperationalError(
-            "database is locked", params=None, orig=Exception("database is locked")
-        )
+        lock_err = OperationalError("database is locked", params=None, orig=Exception("database is locked"))
 
         with patch.object(db, "get_session") as mock_get:
             mock_session = MagicMock()
@@ -51,27 +51,28 @@ class TestSavePositionFailLoud:
 
     def test_successful_save_still_works(self, db):
         """Normal save_position must still return a Position object."""
-        pos = db.save_position({
-            "order_id": "normal_save_1",
-            "symbol": "THB_BTC",
-            "side": "buy",
-            "amount": 0.001,
-            "entry_price": 1_000_000,
-            "remaining_amount": 0.001,
-        })
+        pos = db.save_position(
+            {
+                "order_id": "normal_save_1",
+                "symbol": "THB_BTC",
+                "side": "buy",
+                "amount": 0.001,
+                "entry_price": 1_000_000,
+                "remaining_amount": 0.001,
+            }
+        )
         assert pos is not None
         assert pos.order_id == "normal_save_1"
 
 
 # ── delete_position ──────────────────────────────────────────────────────────
 
+
 class TestDeletePositionFailLoud:
     """delete_position must raise on non-integrity DB errors."""
 
     def test_operational_error_propagates(self, db):
-        lock_err = OperationalError(
-            "database is locked", params=None, orig=Exception("database is locked")
-        )
+        lock_err = OperationalError("database is locked", params=None, orig=Exception("database is locked"))
 
         with patch.object(db, "get_session") as mock_get:
             mock_session = MagicMock()
@@ -89,6 +90,7 @@ class TestDeletePositionFailLoud:
 
 # ── log_closed_trade ─────────────────────────────────────────────────────────
 
+
 class TestLogClosedTradeFailLoud:
     """log_closed_trade must raise on non-integrity DB errors."""
 
@@ -101,9 +103,7 @@ class TestLogClosedTradeFailLoud:
             "exit_price": 1_050_000,
         }
 
-        lock_err = OperationalError(
-            "database is locked", params=None, orig=Exception("database is locked")
-        )
+        lock_err = OperationalError("database is locked", params=None, orig=Exception("database is locked"))
 
         with patch.object(db, "get_session") as mock_get:
             mock_session = MagicMock()
@@ -114,26 +114,27 @@ class TestLogClosedTradeFailLoud:
                 db.log_closed_trade(trade_data)
 
     def test_successful_log_still_works(self, db):
-        ct = db.log_closed_trade({
-            "symbol": "THB_BTC",
-            "side": "sell",
-            "amount": 0.001,
-            "entry_price": 1_000_000,
-            "exit_price": 1_050_000,
-        })
+        ct = db.log_closed_trade(
+            {
+                "symbol": "THB_BTC",
+                "side": "sell",
+                "amount": 0.001,
+                "entry_price": 1_000_000,
+                "exit_price": 1_050_000,
+            }
+        )
         assert ct is not None
         assert ct.symbol == "THB_BTC"
 
 
 # ── save_trade_state ─────────────────────────────────────────────────────────
 
+
 class TestSaveTradeStateFailLoud:
     """save_trade_state must raise on non-integrity DB errors."""
 
     def test_operational_error_propagates(self, db):
-        lock_err = OperationalError(
-            "database is locked", params=None, orig=Exception("database is locked")
-        )
+        lock_err = OperationalError("database is locked", params=None, orig=Exception("database is locked"))
 
         with patch.object(db, "get_session") as mock_get:
             mock_session = MagicMock()
@@ -145,24 +146,25 @@ class TestSaveTradeStateFailLoud:
                 db.save_trade_state({"symbol": "THB_BTC", "state": "idle"})
 
     def test_successful_save_still_works(self, db):
-        ts = db.save_trade_state({
-            "symbol": "THB_BTC",
-            "state": "pending_buy",
-            "side": "buy",
-        })
+        ts = db.save_trade_state(
+            {
+                "symbol": "THB_BTC",
+                "state": "pending_buy",
+                "side": "buy",
+            }
+        )
         assert ts is not None
         assert ts.symbol == "THB_BTC"
 
 
 # ── delete_trade_state ───────────────────────────────────────────────────────
 
+
 class TestDeleteTradeStateFailLoud:
     """delete_trade_state must raise on non-integrity DB errors."""
 
     def test_operational_error_propagates(self, db):
-        lock_err = OperationalError(
-            "database is locked", params=None, orig=Exception("database is locked")
-        )
+        lock_err = OperationalError("database is locked", params=None, orig=Exception("database is locked"))
 
         with patch.object(db, "get_session") as mock_get:
             mock_session = MagicMock()
@@ -175,13 +177,12 @@ class TestDeleteTradeStateFailLoud:
 
 # ── update_position_sl ───────────────────────────────────────────────────────
 
+
 class TestUpdatePositionSLFailLoud:
     """update_position_sl must raise on non-integrity DB errors."""
 
     def test_operational_error_propagates(self, db):
-        lock_err = OperationalError(
-            "database is locked", params=None, orig=Exception("database is locked")
-        )
+        lock_err = OperationalError("database is locked", params=None, orig=Exception("database is locked"))
 
         with patch.object(db, "get_session") as mock_get:
             mock_session = MagicMock()

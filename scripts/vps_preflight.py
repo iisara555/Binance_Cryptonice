@@ -11,7 +11,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -51,12 +50,14 @@ def _http_json(url: str, timeout: float) -> Dict[str, Any]:
 
 
 def _check(checks: List[Dict[str, Any]], name: str, ok: bool, detail: str, severity: str = "error") -> None:
-    checks.append({
-        "name": name,
-        "ok": bool(ok),
-        "severity": severity,
-        "detail": detail,
-    })
+    checks.append(
+        {
+            "name": name,
+            "ok": bool(ok),
+            "severity": severity,
+            "detail": detail,
+        }
+    )
 
 
 def run_preflight(
@@ -74,8 +75,18 @@ def run_preflight(
 
     binance_key = _env_value("BINANCE_API_KEY", env_values)
     binance_secret = _env_value("BINANCE_API_SECRET", env_values)
-    _check(checks, "BINANCE_API_KEY configured", not _looks_like_placeholder(binance_key), "BINANCE_API_KEY must be set to a real value")
-    _check(checks, "BINANCE_API_SECRET configured", not _looks_like_placeholder(binance_secret), "BINANCE_API_SECRET must be set to a real value")
+    _check(
+        checks,
+        "BINANCE_API_KEY configured",
+        not _looks_like_placeholder(binance_key),
+        "BINANCE_API_KEY must be set to a real value",
+    )
+    _check(
+        checks,
+        "BINANCE_API_SECRET configured",
+        not _looks_like_placeholder(binance_secret),
+        "BINANCE_API_SECRET must be set to a real value",
+    )
 
     bot_config = project_root / "bot_config.yaml"
     _check(checks, "bot_config.yaml present", bot_config.exists(), f"Expected bot config at {bot_config}")
@@ -132,11 +143,19 @@ def run_preflight(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run VPS preflight checks for the crypto bot deployment")
     parser.add_argument("--project-root", default=str(PROJECT_ROOT), help="Project root path")
-    parser.add_argument("--bot-health-url", default="http://127.0.0.1:8080/health", help="Bot health URL; pass empty string to skip")
+    parser.add_argument(
+        "--bot-health-url", default="http://127.0.0.1:8080/health", help="Bot health URL; pass empty string to skip"
+    )
     parser.add_argument("--skip-bot-health", action="store_true", help="Skip probing the bot health endpoint")
     parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
-    parser.add_argument("--allow-auth-degraded", action="store_true", help="Treat auth-degraded bot health as a warning instead of a failure")
-    parser.add_argument("--skip-http", action="store_true", help="Skip live HTTP checks and only validate local files/config")
+    parser.add_argument(
+        "--allow-auth-degraded",
+        action="store_true",
+        help="Treat auth-degraded bot health as a warning instead of a failure",
+    )
+    parser.add_argument(
+        "--skip-http", action="store_true", help="Skip live HTTP checks and only validate local files/config"
+    )
     parser.add_argument("--json", action="store_true", help="Print JSON only")
     args = parser.parse_args()
 

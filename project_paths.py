@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 from typing import Iterable, Optional
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 

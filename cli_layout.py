@@ -11,6 +11,7 @@ widths and zero ANSI/emoji noise. File logging (JSON via logger_setup) is
 unaffected: the reporter still emits an INFO record per phase boundary so the
 JSON audit log stays complete.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -23,7 +24,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterator, Mapping, Optional, TextIO
-
 
 __all__ = [
     "StartupReporter",

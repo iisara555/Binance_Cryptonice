@@ -10,21 +10,23 @@ SECURITY: All sensitive credentials must be loaded from environment variables.
           NEVER hardcode API keys or tokens in this file.
 """
 
-import os
-import sys
 import io
 import logging
 import logging.handlers
+import os
 import sqlite3
 import subprocess
-import requests
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+
+import requests
 
 from project_paths import PROJECT_ROOT, resolve_project_python
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -39,7 +41,7 @@ PID_FILE = BOT_DIR / "bot.pid"
 # Import process guard for lock-aware checks
 sys.path.insert(0, str(BOT_DIR))
 try:
-    from process_guard import get_lock_status, _is_process_alive
+    from process_guard import _is_process_alive, get_lock_status
 except ImportError:
     # Fallback if process_guard not available
     def get_lock_status(lock_path=None):
@@ -52,10 +54,12 @@ except ImportError:
         except OSError:
             return False
 
+
 # ── Telegram Configuration (from environment) ──────────────────────────────
 # MUST be set in .env file — bot will exit if not found
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
 
 def _validate_telegram_config():
     """Validate Telegram config exists - fail-fast if missing."""
@@ -68,6 +72,7 @@ def _validate_telegram_config():
         print("        Set this in your .env file before running watchdog")
         sys.exit(1)
 
+
 # ── How old can last price be before we assume bot is dead (minutes) ───────
 STALE_THRESHOLD_MINUTES = 5
 
@@ -75,7 +80,10 @@ STALE_THRESHOLD_MINUTES = 5
 _wd_logger = logging.getLogger("watchdog")
 _wd_logger.setLevel(logging.INFO)
 _wd_handler = logging.handlers.RotatingFileHandler(
-    LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    LOG_FILE,
+    maxBytes=10 * 1024 * 1024,
+    backupCount=3,
+    encoding="utf-8",
 )
 _wd_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
 _wd_logger.addHandler(_wd_handler)
@@ -83,14 +91,16 @@ _wd_console = logging.StreamHandler()
 _wd_console.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
 _wd_logger.addHandler(_wd_console)
 
+
 def log(msg):
     _wd_logger.info(msg)
+
 
 def send_telegram(msg):
     """Send message via Telegram. Uses environment variables only."""
     # Validate config before sending
     _validate_telegram_config()
-    
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
     try:
@@ -99,6 +109,7 @@ def send_telegram(msg):
             log(f"Telegram send failed: {response.status_code} - {response.text}")
     except requests.RequestException as e:
         log(f"Telegram error: {e}")
+
 
 def get_last_price_time():
     """Get timestamp of most recent price in DB."""
@@ -120,6 +131,7 @@ def get_last_price_time():
         log(f"DB error: {e}")
         return None
 
+
 def is_bot_process_running():
     """Check if bot process is running using process guard lock."""
     lock_status = get_lock_status(Path(PID_FILE))
@@ -138,6 +150,7 @@ def is_bot_process_running():
 
     return False
 
+
 def start_bot():
     """Start the bot process. The bot itself acquires the singleton lock via process_guard."""
     log("Bot appears dead. Starting bot...")
@@ -152,7 +165,7 @@ def start_bot():
         project_python = resolve_project_python(BOT_DIR)
         if not project_python:
             raise FileNotFoundError(f"Could not find a project Python executable under {BOT_DIR}")
-        
+
         # Start bot in background — the bot's main() will acquire its own lock
         if sys.platform == "win32":
             DETACHED_PROCESS = 0x00000008
@@ -163,7 +176,7 @@ def start_bot():
                     cwd=str(BOT_DIR),
                     creationflags=DETACHED_PROCESS,
                     stdout=devnull,
-                    stderr=subprocess.STDOUT
+                    stderr=subprocess.STDOUT,
                 )
             finally:
                 devnull.close()
@@ -175,11 +188,11 @@ def start_bot():
                     cwd=str(BOT_DIR),
                     stdout=devnull,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True
+                    start_new_session=True,
                 )
             finally:
                 devnull.close()
-        
+
         log(f"Bot started successfully (child PID {proc.pid})")
         send_telegram(f"🔄 Crypto Bot auto-restarted by Watchdog (PID {proc.pid})")
         return True
@@ -188,13 +201,14 @@ def start_bot():
         send_telegram(f"⚠️ Crypto Bot restart FAILED: {e}")
         return False
 
+
 def main():
     """Main watchdog check."""
     print(f"Watchdog check at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
+
     # Validate Telegram config exists
     _validate_telegram_config()
-    
+
     # Check last price time
     last_price = get_last_price_time()
     if last_price is None:
@@ -203,20 +217,21 @@ def main():
         if not is_bot_process_running():
             start_bot()
         return
-    
+
     age_minutes = (datetime.now() - last_price).total_seconds() / 60
     log(f"Last price: {last_price} ({age_minutes:.1f} minutes ago)")
-    
+
     if age_minutes > STALE_THRESHOLD_MINUTES:
         log(f"Price data STALE ({age_minutes:.1f} min > {STALE_THRESHOLD_MINUTES} min threshold)")
         send_telegram(f"⚠️ Crypto Bot may be down: Last price {age_minutes:.0f} minutes ago")
-        
+
         if not is_bot_process_running():
             start_bot()
         else:
             log("Bot process running but no prices — may be stuck")
     else:
         log("Bot appears healthy")
+
 
 if __name__ == "__main__":
     main()

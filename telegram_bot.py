@@ -17,19 +17,79 @@ Usage (integrated into main.py):
   tg_handler.stop()    # stops polling thread
 """
 
-import os
-import time
 import logging
+import os
 import sqlite3
 import threading
+import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from alerts import TelegramSender, escape_html
 
 logger = logging.getLogger(__name__)
+
+
+def _flatten_exchange_open_orders(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize ``get_open_orders`` return value to a list of order rows (handles legacy wrappers)."""
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return list(payload)
+    if isinstance(payload, dict):
+        inner = payload.get("result")
+        if isinstance(inner, list):
+            return list(inner)
+        return []
+    return []
+
+
+def _extract_cancel_fields(order: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Extract order id, symbol pair, and side (lower) for ``cancel_order``."""
+    oid = str(order.get("id", "") or order.get("orderId", "") or "")
+    pair = str(order.get("symbol", "") or "").strip()
+    if not pair:
+        raw = order.get("_raw")
+        if isinstance(raw, dict):
+            pair = str(raw.get("symbol", "") or "").strip()
+    raw_side = order.get("side", "sell") or "sell"
+    if isinstance(raw_side, str) and raw_side.upper() in {"BUY", "SELL"}:
+        side_lower = raw_side.lower()
+    else:
+        side_lower = "sell"
+    return oid, pair, side_lower
+
+
+def _resolve_sqlite_db_path(app_ref: Any, raw_db_path: str) -> str:
+    """Resolve relative DB paths against config directory (same rule as app startup), not cwd."""
+    path = Path(raw_db_path or "crypto_bot.db")
+    if path.is_absolute():
+        return str(path)
+    config_path = getattr(app_ref, "_config_path", None)
+    if config_path is not None:
+        return str(Path(config_path).resolve().parent / path)
+    return str(Path(__file__).resolve().parent / path)
+
+
+def _emergency_kill_collect_open_orders(api: Any, pairs_to_check: List[str]) -> List[Dict[str, Any]]:
+    """Fetch all open orders (preferred); on failure fall back to per-pair enumeration."""
+    try:
+        got = api.get_open_orders(None)
+    except Exception as exc:
+        logger.error("Emergency kill: get_open_orders(all) failed: %s", exc)
+        got = None
+    if got is not None:
+        return _flatten_exchange_open_orders(got)
+    aggregated: List[Dict[str, Any]] = []
+    for pair in pairs_to_check:
+        try:
+            aggregated.extend(_flatten_exchange_open_orders(api.get_open_orders(pair)))
+        except Exception as exc:
+            logger.error("Emergency kill: get_open_orders(%s) failed: %s", pair, exc)
+    return aggregated
 
 
 def _http_status_code(error: Exception) -> Optional[int]:
@@ -40,10 +100,12 @@ def _http_status_code(error: Exception) -> Optional[int]:
 def kill_confirm_keyboard() -> Dict[str, Any]:
     """Inline keyboard for /kill confirmation."""
     return {
-        "inline_keyboard": [[
-            {"text": "⚠️ CONFIRM KILL", "callback_data": "kill_confirm"},
-            {"text": "❌ CANCEL", "callback_data": "kill_cancel"},
-        ]]
+        "inline_keyboard": [
+            [
+                {"text": "⚠️ CONFIRM KILL", "callback_data": "kill_confirm"},
+                {"text": "❌ CANCEL", "callback_data": "kill_cancel"},
+            ]
+        ]
     }
 
 
@@ -118,7 +180,9 @@ class TelegramBotHandler:
         self.trading_disabled = trading_disabled or threading.Event()
         shared_alert_system = getattr(app_ref, "alert_system", None)
         shared_telegram = getattr(shared_alert_system, "telegram", None)
-        self.telegram = shared_telegram if isinstance(shared_telegram, TelegramSender) else TelegramSender(bot_token, self.chat_id)
+        self.telegram = (
+            shared_telegram if isinstance(shared_telegram, TelegramSender) else TelegramSender(bot_token, self.chat_id)
+        )
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -272,10 +336,7 @@ class TelegramBotHandler:
                     self.telegram.answer_callback(str(cq_id))
                 except Exception as e:
                     logger.warning("Failed to answer callback kill_confirm: %s", e)
-            threading.Thread(
-                target=self._execute_kill, args=(msg,),
-                daemon=True, name="emergency-kill"
-            ).start()
+            threading.Thread(target=self._execute_kill, args=(msg,), daemon=True, name="emergency-kill").start()
         elif data == "kill_cancel":
             if cq_id is not None:
                 try:
@@ -403,12 +464,7 @@ class TelegramBotHandler:
         uptime_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m {secs}s"
         status_text = "🟡 DEGRADED" if auth_degraded else ("🔴 DISABLED" if disabled else "🟢 ACTIVE")
 
-        text = (
-            f"📊 <b>สถานะระบบ</b>\n"
-            f"{'─' * 20}\n"
-            f"สถานะ  {status_text}\n"
-            f"Uptime  {uptime_str}\n"
-        )
+        text = f"📊 <b>สถานะระบบ</b>\n" f"{'─' * 20}\n" f"สถานะ  {status_text}\n" f"Uptime  {uptime_str}\n"
 
         if auth_degraded:
             text += (
@@ -442,10 +498,7 @@ class TelegramBotHandler:
                 pnl_pct = (pnl / initial) * 100 if initial > 0 else 0
                 pnl_emoji = "🟢" if pnl >= 0 else "🔴"
 
-                text += (
-                    f"\n<b>พอร์ต</b>\n"
-                    f"เงินสด  <code>{quote_balance:,.2f}</code> {quote_asset}\n"
-                )
+                text += f"\n<b>พอร์ต</b>\n" f"เงินสด  <code>{quote_balance:,.2f}</code> {quote_asset}\n"
                 if holdings:
                     text += "\n".join(holdings) + "\n"
                 text += (
@@ -483,17 +536,19 @@ class TelegramBotHandler:
         self._send(
             "▶️ <b>กลับมาเทรด</b>\n\nกดปุ่มด้านล่างเพื่อยืนยัน",
             reply_markup={
-                "inline_keyboard": [[
-                    {"text": "▶️ CONFIRM RESUME", "callback_data": "resume_confirm"},
-                ]]
+                "inline_keyboard": [
+                    [
+                        {"text": "▶️ CONFIRM RESUME", "callback_data": "resume_confirm"},
+                    ]
+                ]
             },
         )
-
 
     def _cmd_pnl(self):
         """Show detailed P&L summary from closed trades in quote currency."""
         quote_asset = self._get_quote_asset()
-        db_path = self.app_ref.config.get("database", {}).get("db_path", "crypto_bot.db")
+        raw_db = (self.app_ref.config.get("database") or {}).get("db_path", "crypto_bot.db")
+        db_path = _resolve_sqlite_db_path(self.app_ref, raw_db)
         if not os.path.exists(db_path):
             self._send("❌ ไม่พบฐานข้อมูล")
             return
@@ -516,12 +571,15 @@ class TelegramBotHandler:
 
         # Today's P&L
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        cur.execute("""
+        cur.execute(
+            """
             SELECT COUNT(*), COALESCE(SUM(net_pnl), 0),
                    COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END), 0)
             FROM closed_trades
             WHERE closed_at >= ?
-        """, (today_start.strftime("%Y-%m-%d %H:%M:%S.%f"),))
+        """,
+            (today_start.strftime("%Y-%m-%d %H:%M:%S.%f"),),
+        )
         today_trades, today_pnl, _ = cur.fetchone()
         today_pnl = today_pnl or 0
 
@@ -556,7 +614,8 @@ class TelegramBotHandler:
                 coin = _extract_base_asset(sym, quote_asset) if sym else sym
                 pnl_e = "🟢" if (pnl or 0) >= 0 else "🔴"
                 trigger_str = f" [{trigger}]" if trigger else ""
-                lines.append(f"{pnl_e} {coin}  <code>{pnl:+,.2f}</code> {quote_asset}  ({pnl_pct:+.1f}%){trigger_str}")
+                pct = float(pnl_pct or 0.0)
+                lines.append(f"{pnl_e} {coin}  <code>{pnl:+,.2f}</code> {quote_asset}  ({pct:+.1f}%){trigger_str}")
 
         lines.extend(["", "─" * 20])
         lines.append(f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
@@ -579,27 +638,20 @@ class TelegramBotHandler:
             api.reset_circuit()
             logger.info("Emergency kill: circuit breaker reset to CLOSED")
 
-            # 1. Cancel ALL open orders
-            try:
-                for pair in pairs_to_check:
-                    try:
-                        live_orders = api.get_open_orders(pair)
-                        if isinstance(live_orders, dict):
-                            live_orders = live_orders.get("result", [])
-                        for order in live_orders:
-                            oid = str(order.get("id", ""))
-                            side = order.get("side", "sell")
-                            if oid:
-                                r = api.cancel_order(pair, oid, side)
-                                if r.get("error", 0) == 0:
-                                    results["cancelled"].append(f"{pair} #{oid}")
-                                    logger.info("Cancelled order %s on %s", oid, pair)
-                                else:
-                                    results["errors"].append(f"cancel {pair} #{oid}: {r.get('message', r)}")
-                    except Exception as e:
-                        logger.error("Error cancelling orders for %s: %s", pair, e)
-            except Exception as e:
-                logger.error("Error fetching open orders: %s", e)
+            # 1. Cancel ALL open orders — prefer single global fetch so symbols outside self.pairs are included
+            for order in _emergency_kill_collect_open_orders(api, pairs_to_check):
+                oid, pair, side = _extract_cancel_fields(order if isinstance(order, dict) else {})
+                if not oid or not pair:
+                    continue
+                try:
+                    r = api.cancel_order(pair, oid, side)
+                    if r.get("error", 0) == 0:
+                        results["cancelled"].append(f"{pair} #{oid}")
+                        logger.info("Cancelled order %s on %s", oid, pair)
+                    else:
+                        results["errors"].append(f"cancel {pair} #{oid}: {r.get('message', r)}")
+                except Exception as exc:
+                    logger.error("Emergency kill: cancel order failed: %s", exc)
 
             # Clear bot's tracked open orders
             try:
@@ -653,7 +705,8 @@ class TelegramBotHandler:
             try:
                 self.telegram.edit_message(
                     msg_id,
-                    summary, reply_markup=no_keyboard(),
+                    summary,
+                    reply_markup=no_keyboard(),
                 )
             except Exception as e:
                 logger.error("Could not edit kill message: %s", e)

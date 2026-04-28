@@ -6,7 +6,6 @@ from freqtrade.constants import Config, LongShort
 from freqtrade.persistence import Trade
 from freqtrade.plugins.protections import IProtection, ProtectionReturn
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,9 +38,7 @@ class LowProfitPairs(IProtection):
             f"locking {self.unlock_reason_time_element}."
         )
 
-    def _low_profit(
-        self, date_now: datetime, pair: str, side: LongShort
-    ) -> ProtectionReturn | None:
+    def _low_profit(self, date_now: datetime, pair: str, side: LongShort) -> ProtectionReturn | None:
         """
         Evaluate recent trades for pair
         """
@@ -81,9 +78,7 @@ class LowProfitPairs(IProtection):
 
         return None
 
-    def global_stop(
-        self, date_now: datetime, side: LongShort, starting_balance: float
-    ) -> ProtectionReturn | None:
+    def global_stop(self, date_now: datetime, side: LongShort, starting_balance: float) -> ProtectionReturn | None:
         """
         Stops trading (position entering) for all pairs
         This must evaluate to true for the whole period of the "cooldown period".

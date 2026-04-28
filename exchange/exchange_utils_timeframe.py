@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 
 import ccxt
 from ccxt import ROUND_DOWN, ROUND_UP
-
 from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
 
 

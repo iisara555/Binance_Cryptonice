@@ -10,7 +10,6 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.exchange.exchange_types import Tickers
 from freqtrade.plugins.pairlist.IPairList import IPairList, PairlistParameter, SupportsBacktesting
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -38,9 +37,7 @@ class ProducerPairList(IPairList):
         self._num_assets: int = self._pairlistconfig.get("number_assets", 0)
         self._producer_name = self._pairlistconfig.get("producer_name", "default")
         if not self._config.get("external_message_consumer", {}).get("enabled"):
-            raise OperationalException(
-                "ProducerPairList requires external_message_consumer to be enabled."
-            )
+            raise OperationalException("ProducerPairList requires external_message_consumer to be enabled.")
 
     def short_desc(self) -> str:
         """
@@ -67,16 +64,13 @@ class ProducerPairList(IPairList):
                 "default": "default",
                 "description": "Producer name",
                 "help": (
-                    "Name of the producer to use. Requires additional "
-                    "external_message_consumer configuration."
+                    "Name of the producer to use. Requires additional " "external_message_consumer configuration."
                 ),
             },
         }
 
     def _filter_pairlist(self, pairlist: list[str] | None):
-        upstream_pairlist = self._pairlistmanager._dataprovider.get_producer_pairs(
-            self._producer_name
-        )
+        upstream_pairlist = self._pairlistmanager._dataprovider.get_producer_pairs(self._producer_name)
 
         if pairlist is None:
             pairlist = self._pairlistmanager._dataprovider.get_producer_pairs(self._producer_name)

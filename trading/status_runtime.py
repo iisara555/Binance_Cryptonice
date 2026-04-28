@@ -45,8 +45,8 @@ class StatusRuntimeHelper:
 
     @staticmethod
     def format_alert_block(header: str, lines: List[str], now: Optional[datetime] = None) -> str:
-        timestamp = (now or datetime.now()).strftime('%H:%M:%S')
-        return "\n".join([header, '-' * 22, *lines, f"Time: <code>{timestamp}</code>"])
+        timestamp = (now or datetime.now()).strftime("%H:%M:%S")
+        return "\n".join([header, "-" * 22, *lines, f"Time: <code>{timestamp}</code>"])
 
     @staticmethod
     def format_coin_symbol(symbol: str) -> str:
@@ -176,7 +176,7 @@ class StatusRuntimeHelper:
 
     def format_skip_alert(self, decision: Any) -> str:
         plan = decision.plan
-        reason = getattr(decision.risk_check, 'reason', getattr(decision.risk_check, 'reasons', 'Unknown reason'))
+        reason = getattr(decision.risk_check, "reason", getattr(decision.risk_check, "reasons", "Unknown reason"))
         coin = self.format_coin_symbol(plan.symbol) if plan else ""
         side = normalize_side_value(getattr(plan, "side", ""), default="n/a").upper() if plan else "N/A"
         return f"🛡️ <b>Risk Control</b>  {coin} {side}\nReason: {reason}"
@@ -201,7 +201,9 @@ class StatusRuntimeHelper:
         plan = decision.plan
         coin = self.format_coin_symbol(plan.symbol) if plan else ""
         side = normalize_side_value(getattr(plan, "side", ""), default="n/a").upper() if plan else "N/A"
-        return f"🧪 <b>Dry Run</b>  {coin} {side} @ {plan.entry_price:,.0f} {self.quote_asset()}  ({plan.confidence:.0%})"
+        return (
+            f"🧪 <b>Dry Run</b>  {coin} {side} @ {plan.entry_price:,.0f} {self.quote_asset()}  ({plan.confidence:.0%})"
+        )
 
     def build_multi_timeframe_status(self) -> Dict[str, Any]:
         timeframes = list(getattr(self.bot, "mtf_timeframes", []) or [])
@@ -263,7 +265,11 @@ class StatusRuntimeHelper:
                             "required_candles": self.required_candles,
                             "waiting_candles": waiting_candles,
                             "required_for_readiness": required_for_readiness,
-                            "latest": latest.isoformat() if hasattr(latest, "isoformat") else (str(latest) if latest else None),
+                            "latest": (
+                                latest.isoformat()
+                                if hasattr(latest, "isoformat")
+                                else (str(latest) if latest else None)
+                            ),
                         }
                     )
 
@@ -305,7 +311,9 @@ class StatusRuntimeHelper:
         cache = getattr(self.bot, "_multi_timeframe_status_cache", {"data": None, "timestamp": 0.0})
         cache_ttl_config = getattr(self.bot, "_cache_ttl", {}) or {}
         cache_ttl = max(float(cache_ttl_config.get("market_data", 10) or 10), 15.0)
-        if cache.get("data") is not None and ((now - float(cache.get("timestamp", 0.0) or 0.0)) < cache_ttl or not allow_refresh):
+        if cache.get("data") is not None and (
+            (now - float(cache.get("timestamp", 0.0) or 0.0)) < cache_ttl or not allow_refresh
+        ):
             return cache["data"]
 
         if not allow_refresh:
@@ -388,7 +396,11 @@ class StatusRuntimeHelper:
                 else:
                     ws_state = "disconnected"
             live_symbol = pair_list[0] if pair_list else trading_pair
-            live_tick = self.latest_ticker_getter(live_symbol) if self.websocket_available and self.latest_ticker_getter else None
+            live_tick = (
+                self.latest_ticker_getter(live_symbol)
+                if self.websocket_available and self.latest_ticker_getter
+                else None
+            )
             live_price = live_tick.last if live_tick else None
             try:
                 stats = ws_client.get_stats() if callable(getattr(ws_client, "get_stats", None)) else None
@@ -509,8 +521,7 @@ class StatusRuntimeHelper:
             non_quote_balance_rows = sum(
                 1
                 for a, p in balances.items()
-                if str(a or "").upper() != quote_asset
-                and self._coerce_float((p or {}).get("total"), 0.0) > 0
+                if str(a or "").upper() != quote_asset and self._coerce_float((p or {}).get("total"), 0.0) > 0
             )
             logger.warning(
                 "[STATUS PERF] lightweight=%s total_ms=%.1f portfolio_ms=%.1f post_portfolio_ms=%.1f "
@@ -546,7 +557,9 @@ class StatusRuntimeHelper:
             "timeframe": getattr(self.bot, "timeframe", None),
             "interval_seconds": getattr(self.bot, "interval_seconds", 0),
             "loop_count": getattr(self.bot, "_loop_count", 0),
-            "last_loop": self.bot._last_loop_time.isoformat() if getattr(self.bot, "_last_loop_time", None) is not None else None,
+            "last_loop": (
+                self.bot._last_loop_time.isoformat() if getattr(self.bot, "_last_loop_time", None) is not None else None
+            ),
             "pending_decisions": pending_count,
             "executed_today": executed_today_count,
             "open_positions": open_positions,
