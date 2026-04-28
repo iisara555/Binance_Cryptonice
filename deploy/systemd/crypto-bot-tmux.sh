@@ -62,6 +62,14 @@ start_session() {
         tmux kill-session -t "${SESSION_NAME}"
     fi
 
+    # Avoid a second main.py if something still runs under systemd/nohup/manual ssh.
+    if is_bot_running; then
+        echo "error: trading bot is already running outside tmux (duplicate run)." >&2
+        echo "  use a single runtime: sudo ${PROJECT_ROOT}/deploy/systemd/vps_switch_to_tmux_only.sh" >&2
+        echo "  or: sudo systemctl disable --now crypto-sniper.service crypto-bot-runtime.service" >&2
+        exit 1
+    fi
+
     tmux new-session -d -s "${SESSION_NAME}" -x 200 -y 50 -c "${PROJECT_ROOT}" "$(build_tmux_runner_command)"
     echo "started tmux session '${SESSION_NAME}'"
 }
@@ -114,6 +122,7 @@ case "${1:-start}" in
         ;;
     *)
         echo "usage: $0 {start|stop|restart|attach|status}" >&2
+        echo "  attach from anywhere: ${PROJECT_ROOT}/deploy/systemd/crypto-attach" >&2
         exit 2
         ;;
 esac

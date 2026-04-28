@@ -210,6 +210,31 @@ def _merge_unique_timeframes(existing: Iterable[str], additions: Iterable[str]) 
     return merged
 
 
+def _resolve_mode_active_strategies(
+    runtime_config: Dict[str, Any],
+    active_mode: str,
+    *,
+    fallback: Iterable[str],
+) -> List[str]:
+    """Resolve active strategies from mode profile, then fallback list."""
+    mode_profiles = dict(runtime_config.get("mode_indicator_profiles", {}) or {})
+    profile = dict(mode_profiles.get(str(active_mode or "").strip().lower(), {}) or {})
+    configured = profile.get("active_strategies")
+    candidates = configured if isinstance(configured, list) and configured else list(fallback or [])
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for strategy_name in candidates:
+        name = str(strategy_name or "").strip()
+        if not name:
+            continue
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(name)
+    return normalized
+
+
 def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     runtime_config = dict(config or {})
     strategy_mode = dict(runtime_config.get("strategy_mode", {}) or {})
@@ -233,7 +258,11 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
         hold_hours = float(trend_mode.get("max_hold_hours", auto_exit_cfg.get("max_hold_hours", 48)) or 48)
 
         trading_cfg["timeframe"] = trend_tf
-        strategies_cfg["enabled"] = ["trend_following"]
+        strategies_cfg["enabled"] = _resolve_mode_active_strategies(
+            runtime_config,
+            active_mode,
+            fallback=["trend_following"],
+        )
         strategies_cfg["min_confidence"] = float(trend_mode.get("min_confidence", strategies_cfg.get("min_confidence", 0.35)))
         strategies_cfg["min_strategies_agree"] = int(trend_mode.get("min_strategies_agree", 1) or 1)
 
@@ -265,7 +294,11 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
     bootstrap_timeout_hours = float(scalping_mode.get("bootstrap_position_timeout_hours", 24) or 24)
 
     trading_cfg["timeframe"] = primary_tf
-    strategies_cfg["enabled"] = ["scalping"]
+    strategies_cfg["enabled"] = _resolve_mode_active_strategies(
+        runtime_config,
+        active_mode,
+        fallback=["scalping"],
+    )
     strategies_cfg["min_confidence"] = float(scalping_mode.get("min_confidence", strategies_cfg.get("min_confidence", 0.35)))
     strategies_cfg["min_strategies_agree"] = int(scalping_mode.get("min_strategies_agree", 1) or 1)
 
@@ -3523,8 +3556,10 @@ class TradingBotApp:
             if not active:
                 reporter.warning("no strategies enabled — bot will idle")
 
-        bot.start()
+        # Start health endpoint before the trading loop so probes stay available
+        # even if startup/backfill work takes longer than expected.
         self._start_health_server()
+        bot.start()
         self._start_pair_hot_reload()
         self._start_weekly_review_scheduler()
 

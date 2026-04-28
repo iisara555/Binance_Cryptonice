@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Quick attach to the trading bot tmux session (default name: crypto).
+# Optional: sudo ln -sf "$CRYPTO_BOT_ROOT/deploy/systemd/crypto-attach" /usr/local/bin/crypto-tmux
+
+SESSION_NAME="${TMUX_SESSION_NAME:-crypto}"
+PROJECT_ROOT="${CRYPTO_BOT_ROOT:-/root/Crypto_Sniper}"
+WRAPPER="${PROJECT_ROOT}/deploy/systemd/crypto-bot-tmux.sh"
+
+if ! command -v tmux >/dev/null 2>&1; then
+    echo "tmux is not installed (apt install tmux)" >&2
+    exit 1
+fi
+
+if ! tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+    echo "tmux session '${SESSION_NAME}' not found — restarting crypto-bot-tmux.service ..." >&2
+    if command -v systemctl >/dev/null 2>&1; then
+        if ! systemctl restart crypto-bot-tmux.service 2>/dev/null; then
+            echo "Restart failed (need root?): sudo systemctl restart crypto-bot-tmux" >&2
+            exit 1
+        fi
+    else
+        "${WRAPPER}" restart
+    fi
+    sleep 3
+fi
+
+if ! tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
+    echo "Could not open session '${SESSION_NAME}'. Try: sudo systemctl status crypto-bot-tmux" >&2
+    exit 1
+fi
+
+exec tmux attach-session -t "${SESSION_NAME}"

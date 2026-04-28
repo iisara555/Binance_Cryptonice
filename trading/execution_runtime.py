@@ -54,6 +54,7 @@ class ExecutionRuntimeDeps:
 class ExecutionRuntimeHelper:
     @staticmethod
     def process_full_auto(deps: ExecutionRuntimeDeps, decision: TradeDecision, portfolio: Dict[str, Any]) -> None:
+        """Last mile after `SignalRuntimeHelper.process_pair_iteration` builds a `TradeDecision`."""
         if deps.read_only:
             logger.info("READ_ONLY mode — skipping trade execution")
             return

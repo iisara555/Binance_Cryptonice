@@ -8,6 +8,7 @@ param(
     # Defaults tuned for slow post-merge cold starts (health after systemd/tmux + Python init).
     [int]$HealthCheckAttempts = 45,
     [int]$HealthCheckIntervalSeconds = 3,
+    [int]$HealthCheckInitialDelaySeconds = 20,
     [switch]$SkipHealthCheck
 )
 
@@ -54,7 +55,9 @@ $runtimeFiles = @(
     'trading/status_runtime.py',
     'deploy/systemd/crypto-bot-tmux.sh',
     'deploy/systemd/crypto-bot-tmux.service',
-    'deploy/systemd/crypto-bot-runtime.service'
+    'deploy/systemd/crypto-bot-runtime.service',
+    'deploy/systemd/crypto-attach',
+    'deploy/systemd/vps_switch_to_tmux_only.sh'
 )
 
 function Write-Step {
@@ -205,6 +208,7 @@ function New-RemoteValidateAndRestartScript {
         [Parameter(Mandatory = $true)][int]$SkipHealth,
         [Parameter(Mandatory = $true)][int]$HealthAttempts,
         [Parameter(Mandatory = $true)][int]$HealthSleepSeconds,
+        [Parameter(Mandatory = $true)][int]$HealthInitialDelaySeconds,
         [Parameter(Mandatory = $true)][string[]]$RelativePaths
     )
 
@@ -218,6 +222,7 @@ health_url='__BOT_HEALTH_URL__'
 skip_health='__SKIP_HEALTH__'
 health_attempts='__HEALTH_ATTEMPTS__'
 health_sleep='__HEALTH_SLEEP_SECONDS__'
+health_initial_delay='__HEALTH_INITIAL_DELAY_SECONDS__'
 
 resolve_python_bin() {
     for candidate in \
@@ -235,7 +240,9 @@ resolve_python_bin() {
     return 1
 }
 
-chmod +x "$project_root/deploy/systemd/crypto-bot-tmux.sh"
+chmod +x "$project_root/deploy/systemd/crypto-bot-tmux.sh" \
+    "$project_root/deploy/systemd/crypto-attach" \
+    "$project_root/deploy/systemd/vps_switch_to_tmux_only.sh"
 sed \
     -e "s|^User=.*|User=$service_user|" \
     -e "s|^Group=.*|Group=$service_user|" \
@@ -257,6 +264,9 @@ systemctl status "$service_name" --no-pager -l
 tmux list-sessions
 
 if [ "$skip_health" = "0" ]; then
+    if [ "$health_initial_delay" -gt 0 ]; then
+        sleep "$health_initial_delay"
+    fi
     attempt=1
     while [ "$attempt" -le "$health_attempts" ]; do
         if curl -fsS "$health_url"; then
@@ -270,7 +280,7 @@ if [ "$skip_health" = "0" ]; then
 fi
 '@
 
-    return $script.Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__REMOTE_SERVICE_USER__', $ServiceUser).Replace('__REMOTE_SERVICE_NAME__', $ServiceName).Replace('__BOT_HEALTH_URL__', $HealthUrl).Replace('__SKIP_HEALTH__', [string]$SkipHealth).Replace('__HEALTH_ATTEMPTS__', [string]$HealthAttempts).Replace('__HEALTH_SLEEP_SECONDS__', [string]$HealthSleepSeconds).Replace('__PYTHON_FILES__', ($pythonFiles -join ' '))
+    return $script.Replace('__PROJECT_ROOT__', $ProjectRoot).Replace('__REMOTE_SERVICE_USER__', $ServiceUser).Replace('__REMOTE_SERVICE_NAME__', $ServiceName).Replace('__BOT_HEALTH_URL__', $HealthUrl).Replace('__SKIP_HEALTH__', [string]$SkipHealth).Replace('__HEALTH_ATTEMPTS__', [string]$HealthAttempts).Replace('__HEALTH_SLEEP_SECONDS__', [string]$HealthSleepSeconds).Replace('__HEALTH_INITIAL_DELAY_SECONDS__', [string]$HealthInitialDelaySeconds).Replace('__PYTHON_FILES__', ($pythonFiles -join ' '))
 }
 
 Assert-CommandExists -Name 'ssh'
@@ -312,7 +322,7 @@ foreach ($relativePath in $runtimeFiles) {
 }
 
 Write-Step "Validating Python files and restarting service"
-$validateAndRestartScript = New-RemoteValidateAndRestartScript -ProjectRoot $RemoteProjectRoot -ServiceUser $remoteServiceUser -ServiceName $RemoteServiceName -HealthUrl $BotHealthUrl -SkipHealth ([int]$SkipHealthCheck.IsPresent) -HealthAttempts $HealthCheckAttempts -HealthSleepSeconds $HealthCheckIntervalSeconds -RelativePaths $runtimeFiles
+$validateAndRestartScript = New-RemoteValidateAndRestartScript -ProjectRoot $RemoteProjectRoot -ServiceUser $remoteServiceUser -ServiceName $RemoteServiceName -HealthUrl $BotHealthUrl -SkipHealth ([int]$SkipHealthCheck.IsPresent) -HealthAttempts $HealthCheckAttempts -HealthSleepSeconds $HealthCheckIntervalSeconds -HealthInitialDelaySeconds $HealthCheckInitialDelaySeconds -RelativePaths $runtimeFiles
 Invoke-SshScript -Target $SshTarget -ScriptBody $validateAndRestartScript
 
 Write-Step "Creating post-deploy snapshot on VPS"

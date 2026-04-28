@@ -107,6 +107,8 @@ mode_indicator_profiles:
     confirm_timeframe: "15m"
     min_confidence: 0.40                  # AUDIT FIX: was 0.30 — require stronger conviction
     min_strategies_agree: 1
+    # OR logic: each strategy can pass risk alone; no merged "all must agree" bar.
+    independent_strategy_execution: true
     # SL/TP ต่อ mode (sync กับ strategy_mode.scalping)
     stop_loss_pct: 1.0
     take_profit_pct: 3.0
@@ -121,6 +123,7 @@ mode_indicator_profiles:
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
     min_strategies_agree: 1
+    independent_strategy_execution: true
     stop_loss_pct: 4.5
     take_profit_pct: 10.0
     atr_multiplier: 1.8
@@ -134,6 +137,7 @@ mode_indicator_profiles:
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
     min_strategies_agree: 1
+    independent_strategy_execution: true
     stop_loss_pct: 2.0
     take_profit_pct: 4.0
     atr_multiplier: 1.5
@@ -257,6 +261,7 @@ strategies:
     - "sniper"
   min_confidence: 0.40               # AUDIT FIX: was 0.35 — require stronger conviction
   min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
+  independent_strategy_execution: true   # Overridden per mode in mode_indicator_profiles; default OR when profile omits it
   scalping:
     fast_ema: 9
     slow_ema: 21

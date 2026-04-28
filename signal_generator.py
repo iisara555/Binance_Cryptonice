@@ -214,12 +214,18 @@ class SignalGenerator:
         ]
         
         # Risk parameters
+        strategies_top = dict(self.config.get("strategies", {}) or {})
         self.risk_config = {
             "min_confidence": self.config.get("min_confidence", 0.5),
             "max_risk_score": self.config.get("max_risk_score", 70),
             "min_strategies_agree": self.config.get("min_strategies_agree", 2),
             "max_positions": self.config.get("max_open_positions", 3),
             "max_daily_trades": self.config.get("max_daily_trades", 10),
+            # When True: each strategy's signal is aggregated alone (OR). Agreement gate is skipped
+            # so e.g. SimpleScalp+ can trade without Sniper firing the same bar (and vice versa).
+            "independent_strategy_execution": bool(
+                strategies_top.get("independent_strategy_execution", False)
+            ),
         }
 
         # Signal cache: key=(symbol, data_hash), value=(signals, timestamp)
@@ -298,6 +304,13 @@ class SignalGenerator:
             self.risk_config["min_strategies_agree"] = int(profile["min_strategies_agree"])
         elif "min_strategies_agree" in strategies_cfg:
             self.risk_config["min_strategies_agree"] = int(strategies_cfg["min_strategies_agree"])
+
+        if "independent_strategy_execution" in profile:
+            self.risk_config["independent_strategy_execution"] = bool(profile["independent_strategy_execution"])
+        elif "independent_strategy_execution" in strategies_cfg:
+            self.risk_config["independent_strategy_execution"] = bool(
+                strategies_cfg["independent_strategy_execution"]
+            )
 
         if "max_risk_score" in profile:
             self.risk_config["max_risk_score"] = float(profile["max_risk_score"])
@@ -537,6 +550,105 @@ class SignalGenerator:
         )
         agg.trade_rationale = str((raw_signal.metadata or {}).get("trade_rationale") or self._generate_trade_rationale(agg))
         return [agg]
+
+    def _make_aggregate_for_direction(
+        self,
+        type_signals: List[TradingSignal],
+        sig_type: SignalType,
+        market_condition: MarketCondition,
+        symbol: str,
+        data: pd.DataFrame,
+    ) -> Optional[AggregatedSignal]:
+        """Build one AggregatedSignal for a set of raw signals sharing the same direction."""
+        if sig_type == SignalType.HOLD or not type_signals:
+            return None
+
+        strategy_weights = self._calculate_strategy_weights(type_signals)
+        weight_sum = sum(strategy_weights.values())
+        if weight_sum <= 0:
+            return None
+        weighted_conf = sum(
+            s.confidence * strategy_weights.get(s.strategy_name, 1.0) for s in type_signals
+        ) / weight_sum
+
+        if len(type_signals) >= 3:
+            weighted_conf = min(0.95, weighted_conf + 0.1)
+        elif len(type_signals) >= 2:
+            weighted_conf = min(0.90, weighted_conf + 0.05)
+
+        adj_conf = self._adjust_for_market_condition(weighted_conf, type_signals, market_condition)
+
+        prices = [s.price for s in type_signals]
+        stop_losses = [s.stop_loss for s in type_signals if s.stop_loss]
+        take_profits = [s.take_profit for s in type_signals if s.take_profit]
+        rrs = [s.risk_reward_ratio for s in type_signals if s.risk_reward_ratio]
+
+        votes: Dict[str, int] = {}
+        for s in type_signals:
+            votes[s.strategy_name] = votes.get(s.strategy_name, 0) + 1
+
+        risk_score = self._calculate_risk_score(type_signals, market_condition)
+
+        mtf_rationale = ""
+        try:
+            macro_trend = None
+            htf_used = None
+
+            if self._db and hasattr(self._db, "get_candles"):
+                for htf_interval in ("1h", "4h"):
+                    try:
+                        htf_df = self._db.get_candles(symbol, interval=htf_interval, limit=30)
+                        if htf_df is not None and hasattr(htf_df, "__len__") and len(htf_df) >= 20:
+                            htf_closes = (
+                                htf_df["close"].astype(float)
+                                if hasattr(htf_df, "columns")
+                                else pd.Series([float(r.close) for r in htf_df])
+                            )
+                            ema_fast = htf_closes.ewm(span=9, adjust=False).mean().iloc[-1]
+                            ema_slow = htf_closes.ewm(span=21, adjust=False).mean().iloc[-1]
+                            macro_trend = SignalType.BUY if ema_fast > ema_slow else SignalType.SELL
+                            htf_used = htf_interval
+                            break
+                    except Exception:
+                        continue
+
+            if macro_trend is None and len(data) >= 60 and "close" in data.columns:
+                ema_60 = data["close"].ewm(span=60, adjust=False).mean().iloc[-1]
+                current_price = data["close"].iloc[-1]
+                macro_trend = SignalType.BUY if current_price > ema_60 else SignalType.SELL
+                htf_used = "ema60_approx"
+
+            if macro_trend is not None:
+                if sig_type != macro_trend:
+                    logger.debug(
+                        "[MTF Filter] Micro %s contradicts %s Macro %s -> Halving confidence",
+                        sig_type.name,
+                        htf_used,
+                        macro_trend.name,
+                    )
+                    adj_conf *= 0.5
+                    risk_score += 25
+                    mtf_rationale = f" | ⚠️ MTF Misaligned ({htf_used})"
+                else:
+                    mtf_rationale = f" | ✅ MTF Aligned ({htf_used})"
+        except Exception as e:
+            logger.debug(f"[MTF] Filter skipped: {e}")
+
+        agg_signal = AggregatedSignal(
+            symbol=symbol,
+            signal_type=sig_type,
+            combined_confidence=adj_conf,
+            signals=type_signals,
+            avg_price=float(np.mean(prices)),
+            avg_stop_loss=float(np.mean(stop_losses)) if stop_losses else 0.0,
+            avg_take_profit=float(np.mean(take_profits)) if take_profits else 0.0,
+            avg_risk_reward=float(np.mean(rrs)) if rrs else 0.0,
+            strategy_votes=votes,
+            market_condition=market_condition,
+            risk_score=risk_score,
+        )
+        agg_signal._mtf_rationale = mtf_rationale
+        return agg_signal
     
     def _aggregate_signals(
         self, 
@@ -545,17 +657,41 @@ class SignalGenerator:
         symbol: str,
         data: pd.DataFrame
     ) -> List[AggregatedSignal]:
-        """Aggregate signals by direction and calculate combined confidence"""
+        """Aggregate signals by direction and calculate combined confidence.
+
+        With ``independent_strategy_execution``, emit one candidate per raw signal (OR),
+        so strategies with different bar counts / styles do not need to fire on the same bar.
+        """
         
         if not signals:
             _diag(symbol, "Aggregate:Input", "REJECT", "Empty signal list — nothing to aggregate")
             return []
-        
-        # Group by signal type
+
+        if self.risk_config.get("independent_strategy_execution"):
+            results_ind: List[AggregatedSignal] = []
+            for raw in signals:
+                if raw.signal_type == SignalType.HOLD:
+                    continue
+                built = self._make_aggregate_for_direction(
+                    [raw], raw.signal_type, market_condition, symbol, data
+                )
+                if built is not None:
+                    results_ind.append(built)
+            results_ind.sort(key=lambda x: x.combined_confidence, reverse=True)
+            for agg_sig in results_ind:
+                agg_sig.trade_rationale = self._generate_trade_rationale(agg_sig)
+            _diag(
+                symbol,
+                "Aggregation",
+                "INFO",
+                f"independent_execution: {len(results_ind)} candidate(s) from {len(signals)} raw",
+            )
+            return results_ind
+
         by_type: Dict[SignalType, List[TradingSignal]] = {
             SignalType.BUY: [],
             SignalType.SELL: [],
-            SignalType.HOLD: []
+            SignalType.HOLD: [],
         }
         
         for sig in signals:
@@ -564,109 +700,14 @@ class SignalGenerator:
         results = []
         
         for sig_type, type_signals in by_type.items():
-            if sig_type == SignalType.HOLD or not type_signals:
-                continue
-            
-            # Weighted average (strategies that agree more = higher weight)
-            strategy_weights = self._calculate_strategy_weights(type_signals)
-            weighted_conf = sum(
-                s.confidence * strategy_weights.get(s.strategy_name, 1.0) 
-                for s in type_signals
-            ) / sum(strategy_weights.values())
-            
-            # Alignment bonus
-            if len(type_signals) >= 3:
-                weighted_conf = min(0.95, weighted_conf + 0.1)
-            elif len(type_signals) >= 2:
-                weighted_conf = min(0.90, weighted_conf + 0.05)
-            
-            # Market condition adjustment
-            adj_conf = self._adjust_for_market_condition(
-                weighted_conf, type_signals, market_condition
+            built = self._make_aggregate_for_direction(
+                type_signals, sig_type, market_condition, symbol, data
             )
-            
-            # Calculate aggregated values
-            prices = [s.price for s in type_signals]
-            stop_losses = [s.stop_loss for s in type_signals if s.stop_loss]
-            take_profits = [s.take_profit for s in type_signals if s.take_profit]
-            rrs = [s.risk_reward_ratio for s in type_signals if s.risk_reward_ratio]
-            
-            # Strategy votes
-            votes: Dict[str, int] = {}
-            for s in type_signals:
-                votes[s.strategy_name] = votes.get(s.strategy_name, 0) + 1
-            
-            # Risk score for this aggregated signal
-            risk_score = self._calculate_risk_score(type_signals, market_condition)
-            
-            # ── MTF Confluence Check (Phase 2 — real higher-TF data) ──
-            # Uses actual 1H candle data from the database when available,
-            # falling back to EMA60 approximation on the current timeframe only
-            # if no higher-TF data is stored.
-            mtf_rationale = ""
-            try:
-                macro_trend = None
-                htf_used = None
-
-                # Attempt real higher-TF data via DB
-                if self._db and hasattr(self._db, "get_candles"):
-                    for htf_interval in ("1h", "4h"):
-                        try:
-                            htf_df = self._db.get_candles(symbol, interval=htf_interval, limit=30)
-                            if htf_df is not None and hasattr(htf_df, '__len__') and len(htf_df) >= 20:
-                                htf_closes = htf_df['close'].astype(float) if hasattr(htf_df, 'columns') else pd.Series([float(r.close) for r in htf_df])
-                                ema_fast = htf_closes.ewm(span=9, adjust=False).mean().iloc[-1]
-                                ema_slow = htf_closes.ewm(span=21, adjust=False).mean().iloc[-1]
-                                macro_trend = SignalType.BUY if ema_fast > ema_slow else SignalType.SELL
-                                htf_used = htf_interval
-                                break
-                        except Exception:
-                            continue
-
-                # Fallback: EMA60 on current data
-                if macro_trend is None and len(data) >= 60 and 'close' in data.columns:
-                    ema_60 = data['close'].ewm(span=60, adjust=False).mean().iloc[-1]
-                    current_price = data['close'].iloc[-1]
-                    macro_trend = SignalType.BUY if current_price > ema_60 else SignalType.SELL
-                    htf_used = "ema60_approx"
-
-                if macro_trend is not None:
-                    if sig_type != macro_trend:
-                        logger.debug(
-                            "[MTF Filter] Micro %s contradicts %s Macro %s -> Halving confidence",
-                            sig_type.name, htf_used, macro_trend.name,
-                        )
-                        adj_conf *= 0.5
-                        risk_score += 25
-                        mtf_rationale = f" | ⚠️ MTF Misaligned ({htf_used})"
-                    else:
-                        mtf_rationale = f" | ✅ MTF Aligned ({htf_used})"
-            except Exception as e:
-                logger.debug(f"[MTF] Filter skipped: {e}")
-
-            agg_signal = AggregatedSignal(
-                symbol=symbol,
-                signal_type=sig_type,
-                combined_confidence=adj_conf,
-                signals=type_signals,
-                avg_price=float(np.mean(prices)),
-                avg_stop_loss=float(np.mean(stop_losses)) if stop_losses else 0.0,
-                avg_take_profit=float(np.mean(take_profits)) if take_profits else 0.0,
-                avg_risk_reward=float(np.mean(rrs)) if rrs else 0.0,
-                strategy_votes=votes,
-                market_condition=market_condition,
-                risk_score=risk_score
-            )
-            
-            # Store mtf_rationale so _generate_trade_rationale can pick it up
-            agg_signal._mtf_rationale = mtf_rationale 
-            
-            results.append(agg_signal)
+            if built is not None:
+                results.append(built)
         
-        # Sort by confidence
         results.sort(key=lambda x: x.combined_confidence, reverse=True)
         
-        # Generate trade rationale for each signal
         for agg_sig in results:
             agg_sig.trade_rationale = self._generate_trade_rationale(agg_sig)
         
@@ -893,8 +934,15 @@ class SignalGenerator:
             _diag(pair, "RiskCheck:RiskScore", "PASS",
                   f"risk_score={signal.risk_score:.0f} <= {self.risk_config['max_risk_score']}")
         
-        # 3. Strategy agreement check
-        if len(signal.strategy_votes) < self.risk_config["min_strategies_agree"]:
+        # 3. Strategy agreement check (skipped in independent OR mode)
+        if self.risk_config.get("independent_strategy_execution"):
+            _diag(
+                pair,
+                "RiskCheck:StrategyAgreement",
+                "PASS",
+                "independent_strategy_execution — per-strategy candidates; min_agree gate skipped",
+            )
+        elif len(signal.strategy_votes) < self.risk_config["min_strategies_agree"]:
             result.passed = False
             reason = (f"Only {len(signal.strategy_votes)} strategies agree, need "
                       f"{self.risk_config['min_strategies_agree']}+")

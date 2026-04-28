@@ -1594,7 +1594,14 @@ class TradingBotOrchestrator:
             logger.warning("WebSocket retry start failed: %s", exc)
     
     def _main_loop(self):
-        """Main trading loop - runs every interval_seconds."""
+        """Main trading loop (interval_seconds between cycles).
+
+        Each cycle: `_run_iteration` (global gates → SL/TP / lifecycle → per symbol
+        `SignalRuntimeHelper.process_pair_iteration`) → sleep. OHLCV for strategies is
+        read mainly from SQLite (`PortfolioRuntimeHelper.get_market_data_for_symbol`),
+        filled by background `BinanceThCollector` from `main.TradingBotApp`.
+        Successful plans run through `ExecutionRuntimeHelper.process_full_auto` (or semi/dry).
+        """
         while self.running:
             try:
                 self._ensure_websocket_started()
@@ -1990,6 +1997,12 @@ class TradingBotOrchestrator:
         return SignalRuntimeDeps(
             get_portfolio_state=self._get_portfolio_state,
             get_mtf_signal_for_symbol=self._get_mtf_signal_for_symbol,
+            apply_mtf_confirmation=lambda sym, sigs, mtf: SignalRuntimeHelper.apply_multi_timeframe_confirmation(
+                self._build_multi_timeframe_runtime_deps(),
+                sym,
+                sigs,
+                mtf,
+            ),
             state_machine_enabled=bool(getattr(self, "_state_machine_enabled", False)),
             state_manager=getattr(self, "_state_manager", None),
             last_state_gate_logged=self.__dict__.setdefault("_last_state_gate_logged", {}),
@@ -2124,7 +2137,10 @@ class TradingBotOrchestrator:
         return False
     
     def _run_iteration(self):
-        """Run one iteration of the trading logic for all pairs."""
+        """One iteration: auth/circuit/clock/pause/kill-switch → position checks → each ready pair.
+
+        Per pair: `SignalRuntimeHelper.process_pair_iteration` (see `trading/signal_runtime.py`).
+        """
         if self._auth_degraded:
             if not self._auth_degraded_logged:
                 logger.warning(

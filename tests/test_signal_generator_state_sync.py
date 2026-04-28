@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 
 from signal_generator import SignalGenerator, AggregatedSignal
-from strategy_base import SignalType, MarketCondition
+from strategy_base import SignalType, MarketCondition, TradingSignal
 from trade_executor import OrderSide, OrderResult, OrderStatus, ExecutionPlan
 
 
@@ -692,6 +692,85 @@ class TestRefreshRiskConfigForMode:
         assert sg.risk_config["min_strategies_agree"] == 1
         assert sg.risk_config["max_positions"] == 5
         assert sg.risk_config["max_daily_trades"] == 8
+
+    def test_profile_sets_independent_execution(self):
+        sg = SignalGenerator(
+            {
+                "strategies": {"independent_strategy_execution": False},
+                "mode_indicator_profiles": {
+                    "scalping": {"independent_strategy_execution": True},
+                },
+            }
+        )
+        sg.refresh_risk_config_for_mode("scalping")
+        assert sg.risk_config["independent_strategy_execution"] is True
+
+
+class TestIndependentStrategyExecution:
+    def test_risk_check_skips_strategy_agreement_when_independent(self):
+        sg = SignalGenerator(
+            {
+                "strategies": {
+                    "min_strategies_agree": 9,
+                    "independent_strategy_execution": True,
+                },
+            }
+        )
+        sg.risk_config["min_confidence"] = 0.1
+        sg.risk_config["max_risk_score"] = 100
+        sg.sync_state(0, 0)
+        agg = AggregatedSignal(
+            symbol="BTCUSDT",
+            signal_type=SignalType.BUY,
+            combined_confidence=0.8,
+            signals=[],
+            avg_price=100.0,
+            avg_stop_loss=98.0,
+            avg_take_profit=104.0,
+            avg_risk_reward=2.0,
+            strategy_votes={"simple_scalp_plus": 1},
+            risk_score=35.0,
+            market_condition=MarketCondition.TRENDING_UP,
+        )
+        rc = sg.check_risk(agg, {"balance": 10000})
+        assert rc.passed is True
+
+    def test_aggregate_emits_one_candidate_per_raw_when_independent(self):
+        sg = SignalGenerator(
+            {
+                "strategies": {"independent_strategy_execution": True},
+            }
+        )
+        df = _make_ohlcv(80)
+        a = TradingSignal(
+            strategy_name="simple_scalp_plus",
+            symbol="BTCUSDT",
+            signal_type=SignalType.BUY,
+            confidence=0.7,
+            price=100.0,
+            stop_loss=98.0,
+            take_profit=105.0,
+            risk_reward_ratio=2.0,
+        )
+        b = TradingSignal(
+            strategy_name="sniper",
+            symbol="BTCUSDT",
+            signal_type=SignalType.BUY,
+            confidence=0.65,
+            price=100.0,
+            stop_loss=97.0,
+            take_profit=106.0,
+            risk_reward_ratio=2.0,
+        )
+        out = sg._aggregate_signals(
+            [a, b],
+            MarketCondition.TRENDING_UP,
+            "BTCUSDT",
+            df,
+        )
+        assert len(out) == 2
+        vote_keys = {tuple(sorted(x.strategy_votes.keys())) for x in out}
+        assert vote_keys == {("simple_scalp_plus",), ("sniper",)}
 
 
 class TestApplyRuntimeStrategyRefresh:
