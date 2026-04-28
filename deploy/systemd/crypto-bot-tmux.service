@@ -5,6 +5,8 @@
 Description=Crypto Bot V1 tmux Runtime
 Wants=network-online.target
 After=network-online.target
+# Starting this unit stops direct-Python bots so only one main.py runs (inside tmux).
+Conflicts=crypto-bot-runtime.service crypto-sniper.service
 
 [Service]
 Type=oneshot

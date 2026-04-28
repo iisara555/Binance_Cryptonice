@@ -317,6 +317,29 @@ class TradeExecutor:
         """Convert side-like values to OrderSide enum with a deterministic fallback."""
         return OrderSide.BUY if self._normalize_side(side) == "buy" else default
 
+    @staticmethod
+    def _display_strategy_name(strategy_key: str) -> str:
+        key = str(strategy_key or "").strip().lower()
+        mapping = {
+            "machete_v8b_lite": "MacheteV8bLite",
+            "simple_scalp_plus": "SimpleScalpPlus",
+        }
+        if key in mapping:
+            return mapping[key]
+        if not key:
+            return "-"
+        return "".join(part.capitalize() for part in key.split("_"))
+
+    def _resolve_strategy_source(self, strategy_votes: Any) -> str:
+        votes = strategy_votes if isinstance(strategy_votes, dict) else {}
+        if not votes:
+            return "-"
+        winner = max(
+            ((str(name), int(votes.get(name, 0) or 0)) for name in votes.keys()),
+            key=lambda item: (item[1], item[0]),
+        )[0]
+        return self._display_strategy_name(winner)
+
     def _split_symbol(self, symbol: Optional[str]) -> Tuple[str, str]:
         """Return (base_asset, quote_asset) for THB_BTC, BTC_THB, or BTCUSDT."""
         sym = str(symbol or "").strip().upper()
@@ -1455,6 +1478,7 @@ class TradeExecutor:
                     "is_partial_fill": True, "remaining_amount": result.remaining_amount,
                     "total_entry_cost": _entry_cost,
                     "filled": False,
+                    "strategy_source": self._resolve_strategy_source(plan.strategy_votes),
                 }
                 with self._orders_lock:
                     self._open_orders[result.order_id] = pos_data
@@ -1492,6 +1516,7 @@ class TradeExecutor:
                         "total_entry_cost": _entry_cost, "filled": is_filled_now,
                         "filled_amount": actual_filled if is_filled_now else 0.0,
                         "filled_price": actual_price if is_filled_now else 0.0,
+                        "strategy_source": self._resolve_strategy_source(plan.strategy_votes),
                     }
                     self._open_orders[result.order_id] = pos_data
                 self._persist_position(result.order_id, pos_data)

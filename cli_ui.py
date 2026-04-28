@@ -81,6 +81,8 @@ class CLICommandCenter:
         "risk": (_EMBER, f"bold {_EMBER}"),
         "footer": (_BORDER_DIM, f"bold {_WHITE}"),
     }
+    # SigFlow block: max chars for "Why" (table column max_width should fit this + ellipsis).
+    _SIGFLOW_WHY_MAX_LEN = 60
 
     def __init__(
         self,
@@ -302,16 +304,15 @@ class CLICommandCenter:
             layout["body"].split_column(
                 Layout(self._build_runtime_overview_panel(snapshot), ratio=2, name="overview"),
                 Layout(self._build_positions_table(snapshot, compact=True), ratio=4, name="positions"),
-                Layout(self._build_signal_alignment_panel(snapshot), ratio=4, name="alignment"),
-                Layout(self._build_signal_flow_panel(snapshot), ratio=3, name="signal_flow"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=6, name="signal_flow"),
                 Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
                 Layout(self._build_log_stream_panel(snapshot), ratio=2, name="logs"),
             )
         else:
             layout["body"].split_row(
-                Layout(name="left", ratio=3),
-                Layout(name="center", ratio=4),
-                Layout(name="right", ratio=3),
+                Layout(name="left", ratio=2),
+                Layout(name="center", ratio=6),
+                Layout(name="right", ratio=2),
             )
             layout["left"].split_column(
                 Layout(self._build_runtime_overview_panel(snapshot), ratio=4, name="overview"),
@@ -320,8 +321,7 @@ class CLICommandCenter:
             )
             layout["center"].split_column(
                 Layout(self._build_positions_table(snapshot, compact=False), ratio=5, name="positions"),
-                Layout(self._build_signal_alignment_panel(snapshot), ratio=5, name="alignment"),
-                Layout(self._build_signal_flow_panel(snapshot), ratio=4, name="signal_flow"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=9, name="signal_flow"),
             )
             layout["right"].split_column(
                 Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
@@ -492,8 +492,8 @@ class CLICommandCenter:
         return CLICommandCenter._truncate_inline(label, 9)
 
     @staticmethod
-    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 20) -> str:
-        """Ultra-short English for one-row-per-pair SigFlow (details stay in logs)."""
+    def _humanize_signal_flow_reason(step: str, result: str, raw: str, max_len: int = 60) -> str:
+        """Short English for one-row-per-pair SigFlow; longer tail still truncated at max_len."""
         st = str(step or "").strip()
         rt = str(result or "").upper().strip()
         s = str(raw or "").strip()
@@ -561,9 +561,47 @@ class CLICommandCenter:
             return CLICommandCenter._truncate_inline(s, max_len)
 
         if st.startswith("Strategy:"):
+            strategy_name = st.replace("Strategy:", "", 1).strip()
+            strategy_label = strategy_name or "strategy"
+            reason_code_match = re.search(r"reason_code=([A-Z0-9_]+)", s, re.I)
+            conf_match = re.search(r"conf=([0-9.]+)", s, re.I)
+            rr_match = re.search(r"RR=([0-9.]+|N/A)", s, re.I)
+            type_match = re.search(r"type=([A-Z]+)", s, re.I)
+
             if rt == "REJECT":
-                return "str skip"
-            return "str ok"
+                if reason_code_match:
+                    return CLICommandCenter._truncate_inline(
+                        f"{strategy_label} reject: {reason_code_match.group(1)}",
+                        max_len,
+                    )
+                if "generate_signal() returned none" in low:
+                    return CLICommandCenter._truncate_inline(
+                        f"{strategy_label} reject: no setup",
+                        max_len,
+                    )
+                if "validate_signal() returned false" in low:
+                    return CLICommandCenter._truncate_inline(
+                        f"{strategy_label} reject: validate false",
+                        max_len,
+                    )
+                return CLICommandCenter._truncate_inline(
+                    f"{strategy_label} reject",
+                    max_len,
+                )
+
+            if rt == "PASS":
+                type_part = type_match.group(1).upper() if type_match else "PASS"
+                conf_part = f" conf {conf_match.group(1)}" if conf_match else ""
+                rr_part = f" rr {rr_match.group(1)}" if rr_match else ""
+                return CLICommandCenter._truncate_inline(
+                    f"{strategy_label} {type_part}{conf_part}{rr_part}",
+                    max_len,
+                )
+
+            return CLICommandCenter._truncate_inline(
+                f"{strategy_label} {s or 'ok'}",
+                max_len,
+            )
 
         return CLICommandCenter._truncate_inline(s, max_len)
 
@@ -690,6 +728,7 @@ class CLICommandCenter:
     def _build_positions_table(self, snapshot: Dict[str, Any], compact: bool = False) -> Panel:
         table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
         table.add_column("Symbol", style=self._WHITE, no_wrap=True)
+        table.add_column("Source", style=self._DIM, no_wrap=True)
         table.add_column("Side", justify="center", no_wrap=True)
         table.add_column("Entry", justify="right", style=self._DIM)
         table.add_column("Current", justify="right")
@@ -708,9 +747,9 @@ class CLICommandCenter:
         losers = sum(1 for value in valid_pnl_values if value < 0)
         if not positions:
             if compact:
-                table.add_row("-", "-", "-", "-", "No open positions", "-")
+                table.add_row("-", "-", "-", "-", "-", "No open positions", "-")
             else:
-                table.add_row("-", "-", "-", "-", "No open positions", "-", "-")
+                table.add_row("-", "-", "-", "-", "-", "No open positions", "-", "-")
         else:
             for position in positions:
                 sltp_text = f"{self._fmt_price(position.get('stop_loss'))} / {self._fmt_price(position.get('take_profit'))}"
@@ -727,9 +766,11 @@ class CLICommandCenter:
                 elif bsrc == "estimated_from_ticker":
                     src_tag = " [EST]"
                 symbol_display = str(position.get("symbol", "-")) + src_tag
+                strategy_source = str(position.get("strategy_source") or "-")
                 if compact:
                     table.add_row(
                         symbol_display,
+                        strategy_source,
                         self._side_text(str(position.get("side", "-"))),
                         self._fmt_price(position.get("entry_price")),
                         self._fmt_price(position.get("current_price")),
@@ -739,6 +780,7 @@ class CLICommandCenter:
                 else:
                     table.add_row(
                         symbol_display,
+                        strategy_source,
                         self._side_text(str(position.get("side", "-"))),
                         self._fmt_price(position.get("entry_price")),
                         self._fmt_price(position.get("current_price")),
@@ -997,29 +1039,67 @@ class CLICommandCenter:
         return self._panel(Group(*summary_lines, table), title="◎ Signal Radar", theme=self._resolve_signal_theme(rows))
 
     def _build_signal_flow_panel(self, snapshot: Dict[str, Any]) -> Panel:
-        """Render Signal Flow: one row per pair (latest step only); short Why text."""
+        """Render Signal Flow by strategy: Machete and SimpleScalpPlus."""
         try:
             flow_snapshot = get_latest_signal_flow_snapshot()
         except Exception as exc:
             self._safe_stderr_write(f"[cli_ui] signal flow snapshot error: {exc}\n")
             flow_snapshot = {}
 
-        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
-        table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
-        table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
-        table.add_column("\u2713", justify="center", no_wrap=True, width=2)
-        table.add_column("Why", style=self._DIM, ratio=1, overflow="ellipsis", max_width=22)
+        _term_w, term_h = self._layout_term_dimensions(self.console)
+        max_rows = max(8, min(24, term_h - 16))
 
         if not isinstance(flow_snapshot, dict) or not flow_snapshot:
-            table.add_row("-", "—", "·", "no data")
-            return self._panel(table, title="◬ SigFlow", theme="signal_flow")
+            empty = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+            empty.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
+            empty.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
+            empty.add_column("\u2713", justify="center", no_wrap=True, width=2)
+            empty.add_column("Why", style=self._DIM, ratio=2, overflow="ellipsis", min_width=40, max_width=68)
+            empty.add_row("-", "—", "·", "no data")
+            return self._panel(empty, title="◬ SigFlow", theme="signal_flow")
 
         sorted_pairs = sorted(flow_snapshot.items(), key=lambda kv: str(kv[0] or ""))
+        total_pairs = len(sorted_pairs)
+        page_count = max(1, math.ceil(total_pairs / max_rows)) if max_rows > 0 else 1
+        page_index = 0
+        if page_count > 1:
+            rotate_seconds = max(2, int(self.refresh_interval_seconds * 3))
+            page_index = int(datetime.now(timezone.utc).timestamp() // rotate_seconds) % page_count
+        start_idx = page_index * max_rows
+        end_idx = start_idx + max_rows
+        visible_pairs = sorted_pairs[start_idx:end_idx]
+        strategy_headers = (
+            ("machete_v8b_lite", "MacheteV8bLite"),
+            ("simple_scalp_plus", "SimpleScalpPlus"),
+        )
 
-        pass_count = 0
-        reject_count = 0
+        def _new_strategy_table() -> Table:
+            strategy_table = Table(
+                expand=True,
+                show_lines=False,
+                row_styles=["", "on #111111"],
+                padding=(0, 0),
+                pad_edge=False,
+            )
+            strategy_table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
+            strategy_table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
+            strategy_table.add_column("\u2713", justify="center", no_wrap=True, width=2)
+            strategy_table.add_column(
+                "Why",
+                style=self._DIM,
+                ratio=2,
+                overflow="ellipsis",
+                min_width=48,
+                max_width=96,
+            )
+            return strategy_table
 
-        for pair, flow in sorted_pairs:
+        tables: Dict[str, Table] = {key: _new_strategy_table() for key, _ in strategy_headers}
+        stats: Dict[str, Dict[str, int]] = {
+            key: {"pass": 0, "reject": 0, "buy": 0, "sell": 0} for key, _ in strategy_headers
+        }
+
+        for pair, flow in visible_pairs:
             if not isinstance(flow, dict):
                 continue
             updated_at = str(flow.get("updated_at") or "-")
@@ -1027,62 +1107,71 @@ class CLICommandCenter:
             steps_dict = flow.get("steps") or {}
             if not isinstance(steps_dict, dict):
                 steps_dict = {}
-            step_items = list(steps_dict.items())
 
             symbol_label = self._short_symbol_label(pair or "-")
             pair_cell = Text.assemble((symbol_label, self._WHITE), (" " + time_only, self._DIM))
 
-            # One row per pair: latest recorded step only (dict order = insertion order).
-            iter_steps = step_items[-1:] if step_items else []
-            if not iter_steps:
-                table.add_row(
-                    pair_cell,
-                    "—",
-                    Text("\u00b7", style=self._DIM),
-                    "warmup",
+            for strategy_key, _title in strategy_headers:
+                step_key = f"Strategy:{strategy_key}"
+                step_data = steps_dict.get(step_key)
+                if not isinstance(step_data, dict):
+                    tables[strategy_key].add_row(pair_cell, "Strat", Text("\u00b7", style=self._DIM), "warmup")
+                    continue
+
+                result_raw = str(step_data.get("result") or "").upper()
+                reason_raw = str(step_data.get("reason") or "")
+                why = self._humanize_signal_flow_reason(
+                    step_key, result_raw, reason_raw, max_len=CLICommandCenter._SIGFLOW_WHY_MAX_LEN
                 )
-                continue
 
-            step_name, step_data = iter_steps[0]
-            if not isinstance(step_data, dict):
-                table.add_row(pair_cell, "—", Text("\u00b7", style=self._DIM), "—")
-                continue
-            result_raw = str(step_data.get("result") or "").upper()
-            reason_raw = str(step_data.get("reason") or "")
-            step_key = str(step_name or "")
-            why = self._humanize_signal_flow_reason(step_key, result_raw, reason_raw, max_len=22)
+                if result_raw == "PASS":
+                    result_cell = Text("\u2713", style=f"bold {self._GREEN}")
+                    stats[strategy_key]["pass"] += 1
+                    reason_upper = reason_raw.upper()
+                    if "TYPE=BUY" in reason_upper:
+                        stats[strategy_key]["buy"] += 1
+                    elif "TYPE=SELL" in reason_upper:
+                        stats[strategy_key]["sell"] += 1
+                elif result_raw == "REJECT":
+                    result_cell = Text("\u2717", style=f"bold {self._RED}")
+                    stats[strategy_key]["reject"] += 1
+                elif result_raw == "INFO":
+                    result_cell = Text("\u00b7", style=f"bold {self._WHITE}")
+                else:
+                    result_cell = Text("\u00b7", style=self._DIM)
 
-            if result_raw == "PASS":
-                result_cell = Text("\u2713", style=f"bold {self._GREEN}")
-                pass_count += 1
-            elif result_raw == "REJECT":
-                result_cell = Text("\u2717", style=f"bold {self._RED}")
-                reject_count += 1
-            elif result_raw == "INFO":
-                result_cell = Text("\u00b7", style=f"bold {self._WHITE}")
-            else:
-                result_cell = Text("\u00b7", style=self._DIM)
+                tables[strategy_key].add_row(pair_cell, "Strat", result_cell, why)
 
-            table.add_row(
-                pair_cell,
-                self._abbrev_signal_flow_step(step_key),
-                result_cell,
-                why,
-            )
-
-        summary_line = Text.assemble(
+        blocks: List[Any] = []
+        top_summary = Text.assemble(
             ("\u25b8 ", f"bold {self._CYAN}"),
-            (f"{len(sorted_pairs)} pairs", self._DIM),
+            (f"{total_pairs} pairs", self._DIM),
             (" \u2502 ", self._DIM),
-            ("\u2713", f"bold {self._GREEN}"),
-            (str(pass_count), f"bold {self._GREEN}"),
-            (" \u2717", f"bold {self._RED}"),
-            (str(reject_count), f"bold {self._RED}"),
-            (" \u2502 ", self._DIM),
-            ("latest", f"bold {self._WHITE}"),
+            (f"page {page_index + 1}/{page_count}", self._DIM),
         )
+        blocks.append(top_summary)
 
-        return self._panel(Group(summary_line, table), title="\u25ec SigFlow", theme="signal_flow")
+        for idx, (strategy_key, strategy_label) in enumerate(strategy_headers):
+            strategy_stats = stats[strategy_key]
+            strategy_summary = Text.assemble(
+                ("\u2022 ", self._DIM),
+                (strategy_label, f"bold {self._WHITE}"),
+                (" \u2502 ", self._DIM),
+                ("\u2713", f"bold {self._GREEN}"),
+                (str(strategy_stats["pass"]), f"bold {self._GREEN}"),
+                (" \u2717", f"bold {self._RED}"),
+                (str(strategy_stats["reject"]), f"bold {self._RED}"),
+                (" \u2502 BUY ", self._DIM),
+                (str(strategy_stats["buy"]), f"bold {self._GREEN}"),
+                ("  SELL ", self._DIM),
+                (str(strategy_stats["sell"]), f"bold {self._RED}"),
+            )
+            blocks.append(strategy_summary)
+            blocks.append(tables[strategy_key])
+            if idx < len(strategy_headers) - 1:
+                blocks.append(Text("", style=self._DIM))
+
+        return self._panel(Group(*blocks), title="\u25ec SigFlow", theme="signal_flow")
 
     def _build_recent_events_panel(self, snapshot: Dict[str, Any]) -> Panel:
         rows = list(snapshot.get("recent_events") or [])

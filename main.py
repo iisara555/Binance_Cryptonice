@@ -210,6 +210,31 @@ def _merge_unique_timeframes(existing: Iterable[str], additions: Iterable[str]) 
     return merged
 
 
+def _resolve_mode_active_strategies(
+    runtime_config: Dict[str, Any],
+    active_mode: str,
+    *,
+    fallback: Iterable[str],
+) -> List[str]:
+    """Resolve active strategies from mode profile, then fallback list."""
+    mode_profiles = dict(runtime_config.get("mode_indicator_profiles", {}) or {})
+    profile = dict(mode_profiles.get(str(active_mode or "").strip().lower(), {}) or {})
+    configured = profile.get("active_strategies")
+    candidates = configured if isinstance(configured, list) and configured else list(fallback or [])
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for strategy_name in candidates:
+        name = str(strategy_name or "").strip()
+        if not name:
+            continue
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(name)
+    return normalized
+
+
 def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     runtime_config = dict(config or {})
     strategy_mode = dict(runtime_config.get("strategy_mode", {}) or {})
@@ -233,7 +258,11 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
         hold_hours = float(trend_mode.get("max_hold_hours", auto_exit_cfg.get("max_hold_hours", 48)) or 48)
 
         trading_cfg["timeframe"] = trend_tf
-        strategies_cfg["enabled"] = ["trend_following"]
+        strategies_cfg["enabled"] = _resolve_mode_active_strategies(
+            runtime_config,
+            active_mode,
+            fallback=["trend_following"],
+        )
         strategies_cfg["min_confidence"] = float(trend_mode.get("min_confidence", strategies_cfg.get("min_confidence", 0.35)))
         strategies_cfg["min_strategies_agree"] = int(trend_mode.get("min_strategies_agree", 1) or 1)
 
@@ -265,7 +294,11 @@ def _apply_strategy_mode_profile(config: Optional[Dict[str, Any]]) -> Dict[str, 
     bootstrap_timeout_hours = float(scalping_mode.get("bootstrap_position_timeout_hours", 24) or 24)
 
     trading_cfg["timeframe"] = primary_tf
-    strategies_cfg["enabled"] = ["scalping"]
+    strategies_cfg["enabled"] = _resolve_mode_active_strategies(
+        runtime_config,
+        active_mode,
+        fallback=["scalping"],
+    )
     strategies_cfg["min_confidence"] = float(scalping_mode.get("min_confidence", strategies_cfg.get("min_confidence", 0.35)))
     strategies_cfg["min_strategies_agree"] = int(scalping_mode.get("min_strategies_agree", 1) or 1)
 
@@ -2313,6 +2346,7 @@ class TradingBotApp:
         data_check_reason = str(data_check.get("reason") or "").strip()
         bootstrap = steps.get("Bootstrap", {})
         bootstrap_reason = str(bootstrap.get("reason") or "").strip()
+        has_sniper_diagnostics = any(str(name).startswith("Sniper:") for name in (steps or {}).keys())
 
         if not record:
             return "Waiting for signal data"
@@ -2320,7 +2354,8 @@ class TradingBotApp:
             return TradingBotApp._humanize_alignment_wait_reason(data_check_reason)
         if data_check_result == "REJECT":
             return "Waiting for candles"
-        if bootstrap_reason:
+        # Ignore stale bootstrap text after we have real sniper diagnostics.
+        if bootstrap_reason and not has_sniper_diagnostics:
             return TradingBotApp._humanize_alignment_wait_reason(bootstrap_reason)
         return "Ready"
 
@@ -2494,6 +2529,12 @@ class TradingBotApp:
             side = str(getattr(side_value, "value", side_value) or "")
             entry_price = float(position.get("entry_price") or 0.0)
             bootstrap_src = position.get("bootstrap_source") or ""
+            strategy_source = str(
+                position.get("strategy_source")
+                or position.get("source_strategy")
+                or position.get("signal_strategy")
+                or "-"
+            ).strip() or "-"
             current_price = self._get_cli_price(symbol, False) if symbol else None
             # If WS-only returned nothing, use stale cache rather than blocking REST
             if (not current_price or current_price <= 0) and symbol:
@@ -2559,6 +2600,7 @@ class TradingBotApp:
                 "sl_distance_pct": sl_distance_pct,
                 "tp_distance_pct": tp_distance_pct,
                 "bootstrap_source": bootstrap_src,
+                "strategy_source": strategy_source,
             })
         _warn_snapshot_step("positions", step_started)
 
@@ -3523,8 +3565,10 @@ class TradingBotApp:
             if not active:
                 reporter.warning("no strategies enabled — bot will idle")
 
-        bot.start()
+        # Start health endpoint before the trading loop so probes stay available
+        # even if startup/backfill work takes longer than expected.
         self._start_health_server()
+        bot.start()
         self._start_pair_hot_reload()
         self._start_weekly_review_scheduler()
 

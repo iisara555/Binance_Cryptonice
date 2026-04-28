@@ -274,7 +274,7 @@ def test_render_exposes_btop_style_dashboard_panels(tmp_path):
     assert "Risk Rails" in rendered
     assert "Event Tape" in rendered
     assert "Position Book" in rendered
-    assert "Signal Radar" in rendered
+    assert "SigFlow" in rendered
 
 
 def test_render_records_real_snapshot_metric_history(tmp_path):
@@ -310,14 +310,14 @@ def test_positions_panel_shows_book_summary_and_pnl_trend(tmp_path):
 
     snapshot_1 = app.get_cli_snapshot()
     snapshot_1["positions"] = [
-        {"symbol": "THB_BTC", "side": "buy", "entry_price": 100.0, "current_price": 105.0, "pnl_pct": 5.0, "sl_distance_pct": -1.5, "tp_distance_pct": 2.0},
+        {"symbol": "THB_BTC", "side": "buy", "entry_price": 100.0, "current_price": 105.0, "pnl_pct": 5.0, "sl_distance_pct": -1.5, "tp_distance_pct": 2.0, "strategy_source": "SimpleScalpPlus"},
     ]
     command_center.render(snapshot_1)
 
     snapshot_2 = json.loads(json.dumps(snapshot_1))
     snapshot_2["positions"] = [
-        {"symbol": "THB_BTC", "side": "buy", "entry_price": 100.0, "current_price": 104.0, "pnl_pct": 4.0, "sl_distance_pct": -1.0, "tp_distance_pct": 2.5},
-        {"symbol": "THB_ETH", "side": "buy", "entry_price": 200.0, "current_price": 196.0, "pnl_pct": -2.0, "sl_distance_pct": -1.2, "tp_distance_pct": 3.0},
+        {"symbol": "THB_BTC", "side": "buy", "entry_price": 100.0, "current_price": 104.0, "pnl_pct": 4.0, "sl_distance_pct": -1.0, "tp_distance_pct": 2.5, "strategy_source": "SimpleScalpPlus"},
+        {"symbol": "THB_ETH", "side": "buy", "entry_price": 200.0, "current_price": 196.0, "pnl_pct": -2.0, "sl_distance_pct": -1.2, "tp_distance_pct": 3.0, "strategy_source": "MacheteV8bLite"},
     ]
     command_center.render(snapshot_2)
 
@@ -327,9 +327,42 @@ def test_positions_panel_shows_book_summary_and_pnl_trend(tmp_path):
     rendered = console.export_text()
 
     assert "Position Book" in rendered
+    assert "Source" in rendered
+    assert "SimpleScalpPlus" in rendered
     assert "PnL" in rendered
     assert "W/L" in rendered
     assert list(command_center._trend_history["avg_pnl_pct"])[-2:] == [5.0, 1.0]
+
+
+def test_cli_snapshot_includes_position_strategy_source(tmp_path):
+    app = _build_app(tmp_path)
+    app.executor = Mock()
+    app.executor.get_open_orders.return_value = [
+        {
+            "symbol": "THB_BTC",
+            "side": "buy",
+            "entry_price": 100.0,
+            "stop_loss": 98.0,
+            "take_profit": 104.0,
+            "strategy_source": "MacheteV8bLite",
+        }
+    ]
+    app.bot = Mock()
+    app.bot.get_status.return_value = {
+        "mode": "full_auto",
+        "trading_pairs": ["THB_BTC"],
+        "strategy_engine": {"strategies": []},
+        "risk_summary": {},
+        "last_loop": None,
+        "multi_timeframe": {},
+    }
+    app.bot._get_portfolio_state.return_value = {"balance": 500.0, "timestamp": None}
+    app._sample_api_latency = Mock(return_value=None)
+    app._get_cli_price = Mock(return_value=102.0)
+
+    snapshot = app.get_cli_snapshot()
+
+    assert snapshot["positions"][0]["strategy_source"] == "MacheteV8bLite"
 
 
 def test_signal_and_portfolio_panels_show_history_based_quality_and_mix(tmp_path):

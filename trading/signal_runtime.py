@@ -57,8 +57,11 @@ def _reduce_opposing_signals_single_direction(signals: List[Any], symbol: str) -
 
 @dataclass(slots=True)
 class SignalRuntimeDeps:
+    """Deps for one pair iteration. End-to-end: orchestrator `_run_iteration` → here → `ExecutionRuntimeHelper`."""
+
     get_portfolio_state: Callable[[], Dict[str, Any]]
     get_mtf_signal_for_symbol: Callable[[str, Dict[str, Any]], Any]
+    apply_mtf_confirmation: Callable[[str, List[AggregatedSignal], Any], List[AggregatedSignal]]
     state_machine_enabled: bool
     state_manager: Any
     last_state_gate_logged: Dict[str, str]
@@ -108,8 +111,12 @@ class ExecutionPlanDeps:
 class SignalRuntimeHelper:
     @staticmethod
     def process_pair_iteration(deps: SignalRuntimeDeps, symbol: str) -> None:
+        """Per-pair path: MTF snapshot → primary OHLCV → sync_state → generate_signals →
+        opposing-direction collapse → **MTF confirmation** → DB signal log → check_risk →
+        execution plan → `process_full_auto` / semi / dry (see `trading/execution_runtime.py`).
+        """
         portfolio = deps.get_portfolio_state()
-        deps.get_mtf_signal_for_symbol(symbol, portfolio)
+        mtf_signal = deps.get_mtf_signal_for_symbol(symbol, portfolio)
         lifecycle_gated = False
 
         if deps.state_machine_enabled:
@@ -158,6 +165,10 @@ class SignalRuntimeHelper:
         if not isinstance(signals, list):
             signals = []
         signals = _reduce_opposing_signals_single_direction(signals, symbol)
+
+        aggs = [s for s in signals if isinstance(s, AggregatedSignal)]
+        aggs = deps.apply_mtf_confirmation(symbol, aggs, mtf_signal)
+        signals = aggs
 
         current_market_condition = None
         for generated_signal in signals:

@@ -5,6 +5,8 @@
 Description=Crypto Bot V1 Trading Runtime
 Wants=network-online.target
 After=network-online.target
+# Prefer crypto-bot-tmux.service on VPS when you need Rich CLI + attach; do not enable both.
+Conflicts=crypto-bot-tmux.service
 
 [Service]
 Type=simple
