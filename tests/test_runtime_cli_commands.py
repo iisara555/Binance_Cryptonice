@@ -274,7 +274,7 @@ def test_render_exposes_btop_style_dashboard_panels(tmp_path):
     assert "Risk Rails" in rendered
     assert "Event Tape" in rendered
     assert "Position Book" in rendered
-    assert "Signal Radar" in rendered
+    assert "SigFlow" in rendered
 
 
 def test_render_records_real_snapshot_metric_history(tmp_path):
