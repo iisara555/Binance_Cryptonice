@@ -358,6 +358,22 @@ class SignalGenerator:
                 logger.debug("Failed to load strategy performance: %s", exc)
         return self._strategy_perf_cache
 
+    @staticmethod
+    def _emit_sniper_diagnostics(symbol: str, strategy: Any) -> None:
+        """Emit sniper step diagnostics so Signal Radar M/m/T can render."""
+        diagnostics = getattr(strategy, "get_last_diagnostics", lambda: {})()
+        for step in (
+            "Sniper:DataCheck",
+            "Sniper:MacroTrend",
+            "Sniper:MicroTrend",
+            "Sniper:MACDTrigger",
+            "Sniper:ATR",
+            "Sniper:Result",
+        ):
+            record = diagnostics.get(step)
+            if record:
+                _diag(symbol, step, record.get("result", ""), record.get("reason", ""))
+
     def generate_signals(
         self,
         data: pd.DataFrame,
@@ -422,6 +438,7 @@ class SignalGenerator:
 
         # Collect signals from each strategy
         all_signals: List[TradingSignal] = []
+        strategy_reject_reasons: Dict[str, str] = {}
 
         strategies_to_use = use_strategies or list(self._aggregate_strategy_names)
 
@@ -433,6 +450,8 @@ class SignalGenerator:
 
             try:
                 signal = strategy.generate_signal(data, symbol)
+                if str(name).lower() == "sniper":
+                    self._emit_sniper_diagnostics(symbol, strategy)
                 if signal:
                     # Validate signal
                     if strategy.validate_signal(signal, data):
@@ -441,12 +460,24 @@ class SignalGenerator:
                               f"type={signal.signal_type.value}, conf={signal.confidence:.3f}, "
                               f"price={signal.price:.2f}, RR={signal.risk_reward_ratio or 'N/A'}")
                     else:
+                        strategy_reason = ""
+                        if hasattr(strategy, "get_last_reject_reason"):
+                            strategy_reason = str(getattr(strategy, "get_last_reject_reason")() or "").strip()
+                        if strategy_reason:
+                            strategy_reject_reasons[str(name)] = strategy_reason
                         _diag(symbol, f"Strategy:{name}", "REJECT",
                               f"validate_signal() returned False (type={signal.signal_type.value}, "
-                              f"conf={signal.confidence:.3f})")
+                              f"conf={signal.confidence:.3f})"
+                              + (f", reason_code={strategy_reason}" if strategy_reason else ""))
                 else:
+                    strategy_reason = ""
+                    if hasattr(strategy, "get_last_reject_reason"):
+                        strategy_reason = str(getattr(strategy, "get_last_reject_reason")() or "").strip()
+                    if strategy_reason:
+                        strategy_reject_reasons[str(name)] = strategy_reason
                     _diag(symbol, f"Strategy:{name}", "REJECT",
-                          "generate_signal() returned None (no setup detected)")
+                          "generate_signal() returned None (no setup detected)"
+                          + (f", reason_code={strategy_reason}" if strategy_reason else ""))
             except Exception as e:
                 logger.warning(
                     "Signal strategy error | pair=%s strategy=%s %s: %s",
@@ -476,7 +507,12 @@ class SignalGenerator:
                     ", ".join(f"{key}={value}" for key, value in sorted(raw_mix.items())) or "none",
                 )
             _diag(symbol, "Aggregation", "REJECT",
-                  "No actionable aggregated signals (all HOLD or empty)")
+                  "No actionable aggregated signals (all HOLD or empty)"
+                  + (
+                      f", strategy_rejects={strategy_reject_reasons}"
+                      if strategy_reject_reasons
+                      else ""
+                  ))
         else:
             for agg in aggregated:
                 _diag(symbol, "Aggregation", "PASS",
@@ -518,18 +554,7 @@ class SignalGenerator:
             )
             _diag(symbol, "Sniper:Exception", "REJECT", f"{type(e).__name__}: {e}")
             return []
-        diagnostics = getattr(strategy, "get_last_diagnostics", lambda: {})()
-        for step in (
-            "Sniper:DataCheck",
-            "Sniper:MacroTrend",
-            "Sniper:MicroTrend",
-            "Sniper:MACDTrigger",
-            "Sniper:ATR",
-            "Sniper:Result",
-        ):
-            record = diagnostics.get(step)
-            if record:
-                _diag(symbol, step, record.get("result", ""), record.get("reason", ""))
+        self._emit_sniper_diagnostics(symbol, strategy)
 
         if not raw_signal:
             return []
@@ -990,10 +1015,17 @@ class SignalGenerator:
             _diag(pair, "RiskCheck:PositionSize", "PASS",
                   f"position_value={position_value_thb:.2f}, balance={balance:.2f}")
         
-        # 7. Risk-reward ratio check — aligned with MIN_RISK_REWARD_RATIO from config
-        # Using 1.3 as minimum (from config.py MIN_RISK_REWARD_RATIO)
+        # 7. Risk-reward ratio check — BUY/entry only.
+        # SELL signals are usually exit-style in this runtime and may intentionally omit RR.
         from config import MIN_RISK_REWARD_RATIO
-        if signal.avg_risk_reward < MIN_RISK_REWARD_RATIO:
+        if signal.signal_type == SignalType.SELL:
+            _diag(
+                pair,
+                "RiskCheck:RiskReward",
+                "PASS",
+                "RR gate skipped for SELL/exit candidate in independent execution flow",
+            )
+        elif signal.avg_risk_reward < MIN_RISK_REWARD_RATIO:
             result.passed = False
             reason = (f"Risk-reward ratio {signal.avg_risk_reward:.2f} below minimum "
                       f"{MIN_RISK_REWARD_RATIO}")

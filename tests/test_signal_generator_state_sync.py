@@ -12,9 +12,17 @@ from unittest.mock import Mock, MagicMock, patch, call
 import pandas as pd
 import numpy as np
 
-from signal_generator import SignalGenerator, AggregatedSignal
+from signal_generator import (
+    SignalGenerator,
+    AggregatedSignal,
+    get_latest_signal_flow_snapshot,
+    _LATEST_SIGNAL_FLOW,
+    _SIGNAL_FLOW_LOCK,
+)
 from strategy_base import SignalType, MarketCondition, TradingSignal
 from trade_executor import OrderSide, OrderResult, OrderStatus, ExecutionPlan
+from strategies.machete_v8b_lite import MacheteV8bLite
+from strategies.simple_scalp_plus import SimpleScalpPlus
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -705,6 +713,24 @@ class TestRefreshRiskConfigForMode:
         sg.refresh_risk_config_for_mode("scalping")
         assert sg.risk_config["independent_strategy_execution"] is True
 
+    def test_mode_profile_active_strategies_stay_on_two_strategy_set(self):
+        sg = SignalGenerator(
+            {
+                "mode_indicator_profiles": {
+                    "standard": {
+                        "active_strategies": ["machete_v8b_lite", "simple_scalp_plus"],
+                    },
+                },
+                "strategies": {
+                    "enabled": ["machete_v8b_lite", "simple_scalp_plus"],
+                },
+            }
+        )
+        assert sg.get_active_strategies_for_mode("standard") == [
+            "machete_v8b_lite",
+            "simple_scalp_plus",
+        ]
+
 
 class TestIndependentStrategyExecution:
     def test_risk_check_skips_strategy_agreement_when_independent(self):
@@ -772,6 +798,211 @@ class TestIndependentStrategyExecution:
         vote_keys = {tuple(sorted(x.strategy_votes.keys())) for x in out}
         assert vote_keys == {("simple_scalp_plus",), ("sniper",)}
 
+    def test_sell_signal_skips_risk_reward_gate(self):
+        sg = SignalGenerator({"strategies": {"independent_strategy_execution": True}})
+        sg.risk_config["min_confidence"] = 0.1
+        sg.risk_config["max_risk_score"] = 100
+        sg.sync_state(0, 0)
+        sell = AggregatedSignal(
+            symbol="BTCUSDT",
+            signal_type=SignalType.SELL,
+            combined_confidence=0.8,
+            signals=[],
+            avg_price=100.0,
+            avg_stop_loss=0.0,
+            avg_take_profit=0.0,
+            avg_risk_reward=0.0,
+            strategy_votes={"machete_v8b_lite": 1},
+            risk_score=35.0,
+            market_condition=MarketCondition.TRENDING_DOWN,
+        )
+        rc = sg.check_risk(sell, {"balance": 10000})
+        assert rc.passed is True
+        assert not any("Risk-reward ratio" in reason for reason in rc.reasons)
+
+
+class TestMacheteRejectReasonCodes:
+    def test_exposes_reason_code_on_insufficient_bars(self):
+        strategy = MacheteV8bLite({"enabled": True})
+        df = _make_ohlcv(rows=10)
+        signal = strategy.generate_signal(df, "BTCUSDT")
+        assert signal is None
+        assert strategy.get_last_reject_reason() == "INSUFFICIENT_BARS"
+
+    def test_signal_flow_reject_includes_reason_code(self):
+        with _SIGNAL_FLOW_LOCK:
+            _LATEST_SIGNAL_FLOW.clear()
+        sg = SignalGenerator({"strategies": {"enabled": ["machete_v8b_lite"]}})
+        df = _make_ohlcv(rows=10)
+        sg.generate_signals(df, "BTCUSDT", use_strategies=["machete_v8b_lite"])
+        snapshot = get_latest_signal_flow_snapshot()
+        reason = (
+            snapshot.get("BTCUSDT", {})
+            .get("steps", {})
+            .get("Strategy:machete_v8b_lite", {})
+            .get("reason", "")
+        )
+        assert "reason_code=INSUFFICIENT_BARS" in reason
+
+
+class TestMacheteRelaxedConfirmationGate:
+    @staticmethod
+    def _series(values):
+        return pd.Series(values, dtype=float)
+
+    def test_relaxed_gate_passes_when_adx_and_volume_confirm(self):
+        strategy = MacheteV8bLite(
+            {
+                "enabled": True,
+                "min_confirmations_buy": 2,
+                "enable_relaxed_confirmation": True,
+                "relaxed_requires_adx_and_volume": True,
+                "relaxed_confirmation_delta": 1,
+                "min_buy_confidence": 0.0,
+                "sr_proximity_pct": 0.0,
+                "sr_lookback": 20,
+            }
+        )
+        df = _make_ohlcv(rows=120)
+        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([0] * len(df))), \
+             patch("strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([0] * len(df))), \
+             patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), \
+             patch("strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([True] * len(df))), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._is_ichimoku_bullish", return_value=True), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._dynamic_sr", return_value=(100.0, 10_000_000.0)), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_ssl_channel", return_value=(self._series([2.0] * len(df)), self._series([1.0] * len(df)))), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_rmi", return_value=self._series([65.0] * len(df))), \
+             patch(
+                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx",
+                 return_value=self._series([30.0] * len(df)),
+             ), \
+             patch(
+                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
+                 return_value=self._series([2.0] * len(df)),
+             ):
+            signal = strategy.generate_signal(df, "ETHUSDT")
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.BUY
+        assert signal.metadata.get("gate_mode") == "relaxed"
+        assert signal.metadata.get("required_confirmations_effective") == 1
+
+    def test_relaxed_gate_stays_reject_without_adx_volume_pair(self):
+        strategy = MacheteV8bLite(
+            {
+                "enabled": True,
+                "min_confirmations_buy": 2,
+                "enable_relaxed_confirmation": True,
+                "relaxed_requires_adx_and_volume": True,
+                "relaxed_confirmation_delta": 1,
+                "sr_proximity_pct": 0.0,
+                "sr_lookback": 20,
+            }
+        )
+        df = _make_ohlcv(rows=120)
+        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([0] * len(df))), \
+             patch("strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([0] * len(df))), \
+             patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), \
+             patch("strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([False] * len(df))), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._is_ichimoku_bullish", return_value=False), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._dynamic_sr", return_value=(100.0, 10_000_000.0)), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_ssl_channel", return_value=(self._series([1.0] * len(df)), self._series([2.0] * len(df)))), \
+             patch("strategies.machete_v8b_lite.MacheteV8bLite._calculate_rmi", return_value=self._series([40.0] * len(df))), \
+             patch(
+                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx",
+                 return_value=self._series([5.0] * len(df)),
+             ), \
+             patch(
+                 "strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr",
+                 return_value=self._series([2.0] * len(df)),
+             ):
+            signal = strategy.generate_signal(df, "ETHUSDT")
+
+        assert signal is None
+        assert strategy.get_last_reject_reason() == "INSUFFICIENT_CONFIRMATIONS"
+
+
+class TestSimpleScalpPlusStrictFilters:
+    @staticmethod
+    def _series(values):
+        return pd.Series(values, dtype=float)
+
+    def test_simple_scalp_plus_passes_with_strict_confluence(self):
+        strategy = SimpleScalpPlus(
+            {
+                "enabled": True,
+                "min_buy_confidence": 0.70,
+                "min_confirmations_buy": 5,
+                "adx_threshold": 18.0,
+                "rsi_buy_min": 50.0,
+                "rsi_buy_max": 70.0,
+            }
+        )
+        df = _make_ohlcv(rows=120)
+        with patch("strategies.simple_scalp_plus.hull_signal", return_value=pd.Series([1] * len(df))), \
+             patch("strategies.simple_scalp_plus.volume_confirmation", return_value=pd.Series([True] * len(df))), \
+             patch("strategies.simple_scalp_plus.vwap", return_value=self._series([100.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_rsi", return_value=self._series([60.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_adx", return_value=self._series([30.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_stochastic", return_value=(self._series([55.0] * len(df)), self._series([50.0] * len(df)))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_atr", return_value=self._series([2.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_macd", return_value=(self._series([1.0] * len(df)), self._series([0.5] * len(df)), self._series([0.3] * len(df)))):
+            signal = strategy.generate_signal(df, "BTCUSDT")
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.BUY
+        assert strategy.validate_signal(signal, df) is True
+        assert float(signal.confidence) >= 0.70
+
+    def test_simple_scalp_plus_rejects_when_confluence_missing(self):
+        strategy = SimpleScalpPlus(
+            {
+                "enabled": True,
+                "min_buy_confidence": 0.70,
+                "min_confirmations_buy": 5,
+                "min_confirmations_sell": 7,
+            }
+        )
+        df = _make_ohlcv(rows=120)
+        with patch("strategies.simple_scalp_plus.hull_signal", return_value=pd.Series([0] * len(df))), \
+             patch("strategies.simple_scalp_plus.volume_confirmation", return_value=pd.Series([False] * len(df))), \
+             patch("strategies.simple_scalp_plus.vwap", return_value=self._series([10_000_000.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_rsi", return_value=self._series([60.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_adx", return_value=self._series([10.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_stochastic", return_value=(self._series([90.0] * len(df)), self._series([95.0] * len(df)))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_atr", return_value=self._series([2.0] * len(df))), \
+             patch("strategies.simple_scalp_plus.TechnicalIndicators.calculate_macd", return_value=(self._series([1.0] * len(df)), self._series([0.0] * len(df)), self._series([0.2] * len(df)))):
+            signal = strategy.generate_signal(df, "BTCUSDT")
+
+        assert signal is None
+        assert strategy.get_last_reject_reason() == "INSUFFICIENT_CONFIRMATIONS"
+
+
+class TestMacheteStrictGates:
+    @staticmethod
+    def _series(values):
+        return pd.Series(values, dtype=float)
+
+    def test_machete_rejects_on_high_atr_volatility_gate(self):
+        strategy = MacheteV8bLite(
+            {
+                "enabled": True,
+                "atr_volatility_cap_pct": 2.0,
+                "min_buy_confidence": 0.65,
+                "min_confirmations_buy": 1,
+            }
+        )
+        df = _make_ohlcv(rows=120)
+        with patch("strategies.machete_v8b_lite.fisher_signal", return_value=pd.Series([1] * len(df))), \
+             patch("strategies.machete_v8b_lite.tema_signal", return_value=pd.Series([1] * len(df))), \
+             patch("strategies.machete_v8b_lite.ao_signal", return_value=pd.Series([1] * len(df))), \
+             patch("strategies.machete_v8b_lite.volume_confirmation", return_value=pd.Series([True] * len(df))), \
+             patch("strategies.machete_v8b_lite.TechnicalIndicators.calculate_adx", return_value=self._series([30.0] * len(df))), \
+             patch("strategies.machete_v8b_lite.TechnicalIndicators.calculate_atr", return_value=self._series([1_000_000.0] * len(df))):
+            signal = strategy.generate_signal(df, "ETHUSDT")
+
+        assert signal is None
+        assert strategy.get_last_reject_reason() == "ATR_VOLATILITY_TOO_HIGH"
 
 class TestApplyRuntimeStrategyRefresh:
     def test_updates_mode_generator_and_risk_manager(self):

@@ -2346,6 +2346,7 @@ class TradingBotApp:
         data_check_reason = str(data_check.get("reason") or "").strip()
         bootstrap = steps.get("Bootstrap", {})
         bootstrap_reason = str(bootstrap.get("reason") or "").strip()
+        has_sniper_diagnostics = any(str(name).startswith("Sniper:") for name in (steps or {}).keys())
 
         if not record:
             return "Waiting for signal data"
@@ -2353,7 +2354,8 @@ class TradingBotApp:
             return TradingBotApp._humanize_alignment_wait_reason(data_check_reason)
         if data_check_result == "REJECT":
             return "Waiting for candles"
-        if bootstrap_reason:
+        # Ignore stale bootstrap text after we have real sniper diagnostics.
+        if bootstrap_reason and not has_sniper_diagnostics:
             return TradingBotApp._humanize_alignment_wait_reason(bootstrap_reason)
         return "Ready"
 
@@ -2527,6 +2529,12 @@ class TradingBotApp:
             side = str(getattr(side_value, "value", side_value) or "")
             entry_price = float(position.get("entry_price") or 0.0)
             bootstrap_src = position.get("bootstrap_source") or ""
+            strategy_source = str(
+                position.get("strategy_source")
+                or position.get("source_strategy")
+                or position.get("signal_strategy")
+                or "-"
+            ).strip() or "-"
             current_price = self._get_cli_price(symbol, False) if symbol else None
             # If WS-only returned nothing, use stale cache rather than blocking REST
             if (not current_price or current_price <= 0) and symbol:
@@ -2592,6 +2600,7 @@ class TradingBotApp:
                 "sl_distance_pct": sl_distance_pct,
                 "tp_distance_pct": tp_distance_pct,
                 "bootstrap_source": bootstrap_src,
+                "strategy_source": strategy_source,
             })
         _warn_snapshot_step("positions", step_started)
 

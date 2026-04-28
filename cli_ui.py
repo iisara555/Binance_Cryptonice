@@ -692,6 +692,7 @@ class CLICommandCenter:
     def _build_positions_table(self, snapshot: Dict[str, Any], compact: bool = False) -> Panel:
         table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
         table.add_column("Symbol", style=self._WHITE, no_wrap=True)
+        table.add_column("Source", style=self._DIM, no_wrap=True)
         table.add_column("Side", justify="center", no_wrap=True)
         table.add_column("Entry", justify="right", style=self._DIM)
         table.add_column("Current", justify="right")
@@ -710,9 +711,9 @@ class CLICommandCenter:
         losers = sum(1 for value in valid_pnl_values if value < 0)
         if not positions:
             if compact:
-                table.add_row("-", "-", "-", "-", "No open positions", "-")
+                table.add_row("-", "-", "-", "-", "-", "No open positions", "-")
             else:
-                table.add_row("-", "-", "-", "-", "No open positions", "-", "-")
+                table.add_row("-", "-", "-", "-", "-", "No open positions", "-", "-")
         else:
             for position in positions:
                 sltp_text = f"{self._fmt_price(position.get('stop_loss'))} / {self._fmt_price(position.get('take_profit'))}"
@@ -729,9 +730,11 @@ class CLICommandCenter:
                 elif bsrc == "estimated_from_ticker":
                     src_tag = " [EST]"
                 symbol_display = str(position.get("symbol", "-")) + src_tag
+                strategy_source = str(position.get("strategy_source") or "-")
                 if compact:
                     table.add_row(
                         symbol_display,
+                        strategy_source,
                         self._side_text(str(position.get("side", "-"))),
                         self._fmt_price(position.get("entry_price")),
                         self._fmt_price(position.get("current_price")),
@@ -741,6 +744,7 @@ class CLICommandCenter:
                 else:
                     table.add_row(
                         symbol_display,
+                        strategy_source,
                         self._side_text(str(position.get("side", "-"))),
                         self._fmt_price(position.get("entry_price")),
                         self._fmt_price(position.get("current_price")),
@@ -999,12 +1003,15 @@ class CLICommandCenter:
         return self._panel(Group(*summary_lines, table), title="◎ Signal Radar", theme=self._resolve_signal_theme(rows))
 
     def _build_signal_flow_panel(self, snapshot: Dict[str, Any]) -> Panel:
-        """Render Signal Flow: one row per pair (latest step only); short Why text."""
+        """Render Signal Flow: all pairs with latest step/reason and auto pagination."""
         try:
             flow_snapshot = get_latest_signal_flow_snapshot()
         except Exception as exc:
             self._safe_stderr_write(f"[cli_ui] signal flow snapshot error: {exc}\n")
             flow_snapshot = {}
+
+        _term_w, term_h = self._layout_term_dimensions(self.console)
+        max_rows = max(8, min(24, term_h - 16))
 
         table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
         table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
@@ -1024,11 +1031,20 @@ class CLICommandCenter:
             return self._panel(table, title="◬ SigFlow", theme="signal_flow")
 
         sorted_pairs = sorted(flow_snapshot.items(), key=lambda kv: str(kv[0] or ""))
+        total_pairs = len(sorted_pairs)
+        page_count = max(1, math.ceil(total_pairs / max_rows)) if max_rows > 0 else 1
+        page_index = 0
+        if page_count > 1:
+            rotate_seconds = max(2, int(self.refresh_interval_seconds * 3))
+            page_index = int(datetime.now(timezone.utc).timestamp() // rotate_seconds) % page_count
+        start_idx = page_index * max_rows
+        end_idx = start_idx + max_rows
+        visible_pairs = sorted_pairs[start_idx:end_idx]
 
         pass_count = 0
         reject_count = 0
 
-        for pair, flow in sorted_pairs:
+        for pair, flow in visible_pairs:
             if not isinstance(flow, dict):
                 continue
             updated_at = str(flow.get("updated_at") or "-")
@@ -1041,7 +1057,6 @@ class CLICommandCenter:
             symbol_label = self._short_symbol_label(pair or "-")
             pair_cell = Text.assemble((symbol_label, self._WHITE), (" " + time_only, self._DIM))
 
-            # One row per pair: latest recorded step only (dict order = insertion order).
             iter_steps = step_items[-1:] if step_items else []
             if not iter_steps:
                 table.add_row(
@@ -1083,7 +1098,7 @@ class CLICommandCenter:
 
         summary_line = Text.assemble(
             ("\u25b8 ", f"bold {self._CYAN}"),
-            (f"{len(sorted_pairs)} pairs", self._DIM),
+            (f"{total_pairs} pairs", self._DIM),
             (" \u2502 ", self._DIM),
             ("\u2713", f"bold {self._GREEN}"),
             (str(pass_count), f"bold {self._GREEN}"),
@@ -1091,6 +1106,8 @@ class CLICommandCenter:
             (str(reject_count), f"bold {self._RED}"),
             (" \u2502 ", self._DIM),
             ("latest", f"bold {self._WHITE}"),
+            (" \u2502 ", self._DIM),
+            (f"page {page_index + 1}/{page_count}", self._DIM),
         )
 
         return self._panel(Group(summary_line, table), title="\u25ec SigFlow", theme="signal_flow")

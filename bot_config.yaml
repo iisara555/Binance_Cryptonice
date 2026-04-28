@@ -102,7 +102,7 @@ mode_indicator_profiles:
   scalping:
     # AUDIT FIX: dropped legacy "scalping" strategy — its always-on signaling was
     # the single biggest loss source. Keeping the rebuilt SimpleScalpPlus + Sniper.
-    active_strategies: ["simple_scalp_plus", "sniper"]
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "15m"
     min_confidence: 0.40                  # AUDIT FIX: was 0.30 — require stronger conviction
@@ -118,7 +118,7 @@ mode_indicator_profiles:
 
   trend_only:
     # AUDIT FIX: dropped legacy trend_following / breakout from default profile.
-    active_strategies: ["machete_v8b_lite", "sniper"]
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
@@ -132,7 +132,7 @@ mode_indicator_profiles:
 
   standard:
     # AUDIT FIX: dropped 4 legacy strategies that historically pyramided into trends.
-    active_strategies: ["machete_v8b_lite", "simple_scalp_plus", "sniper"]
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
@@ -258,7 +258,6 @@ strategies:
   enabled:
     - "machete_v8b_lite"
     - "simple_scalp_plus"
-    - "sniper"
   min_confidence: 0.40               # AUDIT FIX: was 0.35 — require stronger conviction
   min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
   independent_strategy_execution: true   # Overridden per mode in mode_indicator_profiles; default OR when profile omits it
@@ -277,21 +276,72 @@ strategies:
     bootstrap_position_timeout_hours: 24
   machete_v8b_lite:
     enabled: true
-    adx_threshold: 25.0
+    adx_threshold: 12.0
     atr_multiplier: 1.8
     risk_reward: 2.0
-    min_buy_confidence: 0.50
+    min_buy_confidence: 0.65
+    min_confirmations_buy: 1
+    min_confirmations_sell: 2
+    vol_threshold: 0.8
+    ssl_period: 10
+    rmi_period: 14
+    rmi_momentum: 5
+    rmi_buy_min: 52.0
+    atr_volatility_cap_pct: 4.0
+    sr_lookback: 50
+    sr_proximity_pct: 2.0
+    primary_timeframe: "15m"
+    informative_timeframe: "1h"
+    enable_relaxed_confirmation: true
+    relaxed_requires_adx_and_volume: true
+    relaxed_confirmation_delta: 1
+    # Freqtrade-style compatibility knobs (mapped into runtime metadata/policy)
+    stoploss: -0.10
+    custom_stoploss: "dynamic_bb_trailing_profit_divider"
+    trailing_stop: true
+    minimal_roi:
+      "0": 0.279
+      "92": 0.109
+      "245": 0.059
+      "561": 0.0
   simple_scalp_plus:
     enabled: true
     hull_period: 16
     ema_fast: 9
     ema_slow: 21
-    rsi_period: 7
-    rsi_buy_min: 48
-    rsi_sell_max: 52
+    rsi_period: 14
+    rsi_buy_min: 50
+    rsi_buy_max: 70
+    rsi_sell_max: 48
+    adx_period: 14
+    adx_threshold: 18.0
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    stoch_period: 14
+    stoch_buy_k_min: 20
+    stoch_buy_k_max: 80
+    stoch_sell_k_max: 80
     volume_threshold: 1.05
     atr_multiplier: 1.2
     risk_reward: 1.8
+    min_buy_confidence: 0.70
+    min_confirmations_buy: 5
+    min_confirmations_sell: 4
+    primary_timeframe: "5m"
+    informative_timeframe: "15m"
+    # Freqtrade-style compatibility knobs (mapped into runtime metadata/policy)
+    stoploss: -0.015
+    trailing_stop: true
+    trailing_stop_positive: 0.01
+    trailing_stop_positive_offset: 0.015
+    trailing_only_offset_is_reached: true
+    minimal_roi:
+      "60": 0.02
+      "30": 0.015
+      "20": 0.01
+      "0": 0.007
+      "10": -0.02
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:
