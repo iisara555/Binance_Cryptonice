@@ -1046,8 +1046,9 @@ class SignalGenerator:
         sl = float(signal.avg_stop_loss or 0.0)
         if portfolio_value <= 0 or entry <= 0 or sl <= 0:
             return 0.0
-        max_risk_pct = min(float(self.config.get("max_risk_per_trade_pct", 1.5)), 1.0)
-        max_pos_pct = float(self.config.get("max_position_per_trade_pct", 10.0))
+        risk_cfg = dict(self.config.get("risk") or {})
+        max_risk_pct = float(risk_cfg.get("max_risk_per_trade_pct", 0.5))
+        max_pos_pct = float(risk_cfg.get("max_position_per_trade_pct", 10.0))
         hard_cap_thb = portfolio_value * (max_pos_pct / 100.0)
         risk_amount = portfolio_value * (max_risk_pct / 100.0)
         risk_per_unit = abs(entry - sl)
