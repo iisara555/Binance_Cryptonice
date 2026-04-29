@@ -1131,7 +1131,7 @@ class ConfirmationGate:
 MAX_SLIPPAGE_PCT: Dict[str, float] = {
     # Scalping entries may be evaluated 30–60s after the signal bar; 0.15% was too
     # tight vs real drift. Override via risk/trading ``max_slippage_pct`` maps.
-    "scalping": 1.0,
+    "scalping": 2.0,
     "trend_only": 0.30,
     "standard": 0.20,
 }
