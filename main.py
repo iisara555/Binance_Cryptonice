@@ -1176,6 +1176,7 @@ class TradingBotApp:
                 strategies_config = self.config.get("strategies", {})
                 self.signal_generator = SignalGenerator(
                     {
+                        "risk": dict(self.config.get("risk", {}) or {}),
                         "min_confidence": strategies_config.get("min_confidence", 0.5),
                         "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
                         "max_open_positions": self.config.get("risk", {}).get("max_open_positions", 3),
@@ -1701,6 +1702,7 @@ class TradingBotApp:
         risk_section = dict(self.config.get("risk", {}) or {})
         self.signal_generator = SignalGenerator(
             {
+                "risk": risk_section,
                 "min_confidence": strategies_config.get("min_confidence", 0.5),
                 "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
                 "max_open_positions": risk_section.get("max_open_positions", 3),
