@@ -2317,7 +2317,52 @@ class TestCliSnapshot:
         ]
         assert snapshot["system"]["trade_count"] == "3"
 
-    def test_cli_snapshot_exposes_service_health_indicators(self):
+    def test_cli_snapshot_includes_risk_nav_vs_min_balance_floor(self):
+        app = TradingBotApp.__new__(TradingBotApp)
+        app.config = {
+            "mode": "full_auto",
+            "simulate_only": False,
+            "read_only": False,
+            "auth_degraded": False,
+            "data": {"pairs": ["BTCUSDT"]},
+            "portfolio": {"min_balance_threshold": 100.0},
+        }
+        app._cli_bot_name = "Test Bot"
+        app._derive_risk_level = Mock(return_value=("NORMAL", "green"))
+        app._sample_api_latency = Mock(return_value=25.0)
+        app._format_cli_timestamp = Mock(return_value="12:34:56")
+        app._get_cli_price = Mock(return_value=2_000_000.0)
+        app.api_client = Mock()
+        app.api_client.get_balances.return_value = {
+            "USDT": {"available": 42.27, "reserved": 0.0},
+        }
+        app.executor = Mock()
+        app.executor.get_open_orders.return_value = []
+        app.bot = Mock()
+        app.bot.get_status.return_value = {
+            "mode": "full_auto",
+            "trading_pairs": ["BTCUSDT"],
+            "strategy_engine": {"strategies": ["machete_v8b_lite"]},
+            "risk_summary": {"trades_today": 0, "max_daily_trades": 15},
+            "last_loop": None,
+        }
+        app.bot._get_portfolio_state.return_value = {"balance": 42.27, "timestamp": None}
+
+        def _fake_resolve(asset: str, quote: str, *_args):
+            ua, uq = str(asset or "").upper(), str(quote or "").upper()
+            if {ua, uq} == {"USDT", "THB"}:
+                return None
+            return None
+
+        app._resolve_cli_asset_quote_rate = Mock(side_effect=_fake_resolve)
+
+        snapshot = TradingBotApp.get_cli_snapshot(app)
+
+        assert snapshot["system"]["min_balance_threshold_quote"] == 100.0
+        assert snapshot["system"]["risk_portfolio_value_quote"] == pytest.approx(42.27)
+        assert snapshot["system"]["portfolio_meets_trade_floor"] is False
+        assert "BELOW MIN" in snapshot["system"]["risk_floor_display"]
+
         app = TradingBotApp.__new__(TradingBotApp)
         app.config = {
             "mode": "full_auto",

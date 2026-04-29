@@ -85,4 +85,12 @@ def collect_raw_trading_signals(
             )
             diag_fn(symbol, f"Strategy:{name}", "REJECT", f"{type(e).__name__}: {e}")
 
+    if strategy_reject_reasons:
+        # grep StrategyRejectSnapshot; enable DEBUG log level on `crypto-bot.signal` to correlate per-strategy reject codes (SR_GUARD_BLOCKED, INSUFFICIENT_CONFIRMATIONS, ...) without noisy INFO loops.
+        logger.debug(
+            "[StrategyRejectSnapshot] pair=%s %s",
+            symbol,
+            " ".join(f"{nm}={rs}" for nm, rs in sorted(strategy_reject_reasons.items())),
+        )
+
     return all_signals, strategy_reject_reasons

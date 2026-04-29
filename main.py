@@ -69,6 +69,7 @@ from state_management import normalize_buy_quantity
 from strategies.adaptive_router import AdaptiveStrategyRouter, ModeDecision
 from symbol_registry import set_whitelist_json_path
 from telegram_bot import TelegramBotHandler
+from trading.portfolio_runtime import PortfolioRuntimeHelper
 from execution import quantize_decimal
 from trade_executor import TradeExecutor
 from trading_bot import TradingBotOrchestrator
@@ -2754,6 +2755,17 @@ class TradingBotApp:
         if total_elapsed_ms >= 1000.0:
             logger.warning("[CLI PERF] get_cli_snapshot total took %.1fms", total_elapsed_ms)
 
+        risk_portfolio_value = float(PortfolioRuntimeHelper.get_risk_portfolio_value(portfolio_state))
+        try:
+            min_balance_floor = float((self.config.get("portfolio") or {}).get("min_balance_threshold", 100.0) or 100.0)
+        except (TypeError, ValueError):
+            min_balance_floor = 100.0
+        portfolio_meets_floor = risk_portfolio_value >= min_balance_floor
+        risk_floor_display = (
+            f"{risk_portfolio_value:.2f} / {min_balance_floor:.0f} {quote_asset} "
+            f"({'OK' if portfolio_meets_floor else 'BELOW MIN — entries blocked'})"
+        )
+
         return {
             "bot_name": bot_name or self._cli_bot_name,
             "mode": self._derive_cli_mode(bot_status),
@@ -2800,6 +2812,10 @@ class TradingBotApp:
                 "max_open_positions": str(risk_summary.get("max_open_positions", "-")),
                 "cooling_down": "Yes" if risk_summary.get("cooling_down") else "No",
                 "risk_per_trade": f"{float((self.config.get('risk', {}) or {}).get('max_risk_per_trade_pct', 0.0) or 0.0):.1f}%",
+                "risk_portfolio_value_quote": round(risk_portfolio_value, 4),
+                "min_balance_threshold_quote": min_balance_floor,
+                "portfolio_meets_trade_floor": portfolio_meets_floor,
+                "risk_floor_display": risk_floor_display,
             },
             "auth_degraded_reason": str(self.config.get("auth_degraded_reason") or ""),
         }

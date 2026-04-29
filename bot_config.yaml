@@ -38,7 +38,7 @@ trading:
   interval_seconds: 60               # Main loop interval in seconds
   timeframe: "15m"                    # Locked to 15m for runtime trading loop
   mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
-  min_order_amount: 15.0            # Minimum order notional (quote); for *USDT pairs = USDT (see also MIN_ORDER_AMOUNT in .env)
+  min_order_amount: 10.0            # Quote notional minimum (Binance spot USDT pairs ~10); aligns with executor + PreTradeGate; use with portfolio.min_balance_threshold
 
 # strategy_mode: which *mode* is active for risk/TF/thresholds (SL/TP %, intervals, etc.).
 # The per-pair list of strategy *names* that actually run in the signal loop comes from
@@ -469,7 +469,7 @@ candle_retention:
 # Portfolio
 portfolio:
   initial_balance: 500.0            # Initial balance (for simulation)
-  min_balance_threshold: 100.0      # Minimum balance to continue trading
+  min_balance_threshold: 40.0       # PreTradeGate / RiskGate floor; must be below NAV (e.g. ~42 USDT live)
   read_only: false                  # Mirror top-level read_only; executor reads top-level + BOT_READ_ONLY env
   persist_path: "portfolio_state.json"  # Persist rebalancer state (cooldown survives restart)
 

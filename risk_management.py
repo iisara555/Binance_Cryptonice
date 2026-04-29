@@ -35,7 +35,7 @@ def _diag(pair: str, step: str, result: str, reason: str = ""):
 BINANCE_TH_FEE_PER_SIDE = 0.001
 BINANCE_TH_FEE_ROUND_TRIP = 0.002
 
-DEFAULT_MIN_ORDER_QUOTE = 15.0
+DEFAULT_MIN_ORDER_QUOTE = 10.0
 MIN_ORDER_BUFFER = 1.10  # 10% safety buffer
 
 

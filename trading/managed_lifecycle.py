@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from risk_management import DEFAULT_MIN_ORDER_QUOTE
 from state_management import TradeLifecycleState, TradeStateSnapshot, normalize_buy_quantity
 from trade_executor import OrderResult, OrderSide, OrderStatus
 from trading.cost_basis import resolve_sane_entry_cost
@@ -293,8 +294,10 @@ class ManagedLifecycleHelper:
         exit_side = OrderSide.SELL if side == OrderSide.BUY else OrderSide.BUY
 
         # ── Pre-check: detect dust before hitting the API ──
-        _raw_min = getattr(self.bot.executor, "_min_order_thb", None)
-        min_order_quote = float(_raw_min) if isinstance(_raw_min, (int, float)) else 15.0
+        _raw_min = getattr(self.bot.executor, "_min_order_quote", None) or getattr(
+            self.bot.executor, "_min_order_thb", None
+        )
+        min_order_quote = float(_raw_min) if isinstance(_raw_min, (int, float)) else float(DEFAULT_MIN_ORDER_QUOTE)
         order_value_quote = amount * exit_price
         if order_value_quote < min_order_quote:
             logger.warning(

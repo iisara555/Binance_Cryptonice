@@ -23,6 +23,7 @@ from execution import (
     to_decimal,
 )
 from financial_precision import precise_add, precise_divide, precise_multiply
+from risk_management import DEFAULT_MIN_ORDER_QUOTE
 from state_management import normalize_buy_quantity
 
 logger = logging.getLogger(__name__)
@@ -418,11 +419,16 @@ class TradeExecutor:
         self.order_type = config.get("order_type", "limit")
         try:
             trading_cfg = config.get("trading", {}) if isinstance(config, dict) else {}
-            self._min_order_thb = float(
-                trading_cfg.get("min_order_amount", config.get("min_order_amount", 15.0)) or 15.0
+            # Minimum quote-side notional (Binance Spot: commonly USDT for *USDT pairs).
+            self._min_order_quote = float(
+                trading_cfg.get(
+                    "min_order_amount",
+                    config.get("min_order_amount", float(DEFAULT_MIN_ORDER_QUOTE)),
+                )
+                or float(DEFAULT_MIN_ORDER_QUOTE)
             )
         except (TypeError, ValueError):
-            self._min_order_thb = 15.0
+            self._min_order_quote = float(DEFAULT_MIN_ORDER_QUOTE)
 
         self._fill_tracker = PartialFillTracker(max_wait_seconds=config.get("partial_fill_max_wait", 60.0))
         self._open_orders: Dict[str, Dict] = {}
@@ -1097,7 +1103,7 @@ class TradeExecutor:
             symbol = order.symbol
             price = 0.0 if order.order_type == "market" else (order.price or 0.0)
             price_dec = to_decimal(price)
-            min_order_quote = to_decimal(getattr(self, "_min_order_thb", 15.0))
+            min_order_quote = to_decimal(getattr(self, "_min_order_quote", float(DEFAULT_MIN_ORDER_QUOTE)))
 
             if order.side == OrderSide.BUY:
                 _, quote_asset = self._split_symbol(symbol)
@@ -1201,8 +1207,8 @@ class TradeExecutor:
                     "  Price: %s %s", self._format_balance_for_display(quote_asset_upper, price_dec), quote_asset_upper
                 )
 
-                # Only check THB value — don't reject by balance amount
-                # Bitkub min trade value is ~10-15 THB
+                # Quote notional vs minimum — do not infer from raw balance amount alone.
+                # Binance min notional is often ~5–10 USDT (historic Bitkub used ~10–15 THB).
                 check_price = price_dec
                 if check_price <= 0:
                     try:
@@ -1492,7 +1498,7 @@ class TradeExecutor:
         amount_dec = to_decimal(amount)
         quote_asset_upper = self._extract_quote_asset(plan.symbol).upper()
         order_value_quote = amount_dec if plan.side == OrderSide.BUY else (amount_dec * to_decimal(plan.entry_price))
-        min_order_quote = to_decimal(getattr(self, "_min_order_thb", 15.0))
+        min_order_quote = to_decimal(getattr(self, "_min_order_quote", float(DEFAULT_MIN_ORDER_QUOTE)))
         if plan.side == OrderSide.SELL and not plan.close_position:
             if amount_dec <= 0 or order_value_quote < min_order_quote:
                 logger.info("SELL signal but insufficient balance — skipping")

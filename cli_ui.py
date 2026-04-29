@@ -987,6 +987,22 @@ class CLICommandCenter:
                 (str(system.get("total_balance", "-")), f"bold {self._GREEN}"),
             ),
             Text.assemble(
+                ("▸ ", f"bold {self._CYAN}"),
+                ("Floor     ", self._DIM),
+                (
+                    str(system.get("risk_floor_display") or "-"),
+                    (
+                        self._RED
+                        if system.get("portfolio_meets_trade_floor") is False
+                        else (
+                            self._GREEN
+                            if system.get("portfolio_meets_trade_floor") is True
+                            else self._WHITE
+                        )
+                    ),
+                ),
+            ),
+            Text.assemble(
                 ("▸ ", f"bold {self._WHITE}"),
                 ("Trades    ", self._DIM),
                 (f"{system.get('trade_count', '-')}/{system.get('max_daily_trades', '-')}", self._WHITE),

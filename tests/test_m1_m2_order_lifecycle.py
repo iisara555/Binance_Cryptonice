@@ -191,7 +191,7 @@ def test_oms_processing_is_cleared_when_replacement_thread_fails_to_start():
 
 def test_place_order_buy_uses_rec_quantity_as_immediate_fill():
     ex = _make_executor()
-    ex._min_order_thb = 15.0
+    ex._min_order_quote = 15.0
     ex.api_client.get_balances.return_value = {"THB": {"available": 200.0}}
     ex.api_client.place_bid.return_value = {
         "result": {
@@ -221,7 +221,7 @@ def test_place_order_buy_uses_rec_quantity_as_immediate_fill():
 
 def test_place_order_buy_rounds_down_thb_amount_to_two_decimals():
     ex = _make_executor()
-    ex._min_order_thb = 15.0
+    ex._min_order_quote = 15.0
     ex.api_client.get_balances.return_value = {"THB": {"available": 200.0}}
     ex.api_client.place_bid.return_value = {"result": {"id": "ord-buy-round-1"}}
 
@@ -241,7 +241,7 @@ def test_place_order_buy_rounds_down_thb_amount_to_two_decimals():
 
 def test_place_order_rejects_malformed_place_bid_response():
     ex = _make_executor()
-    ex._min_order_thb = 15.0
+    ex._min_order_quote = 15.0
     ex.api_client.get_balances.return_value = {"THB": {"available": 200.0}}
     ex.api_client.place_bid.return_value = {"result": {}}
 

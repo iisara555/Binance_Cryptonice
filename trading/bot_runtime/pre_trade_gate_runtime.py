@@ -12,6 +12,36 @@ from trading.orchestrator import TradeDecision
 logger = logging.getLogger(__name__)
 
 
+def _estimate_buy_quote_for_gate(bot: Any, plan: Any, portfolio: Dict[str, Any]) -> float:
+    """Quote (USDT) size for BUY checks — aligned with TradeExecutor sizing.
+
+    ``ExecutionPlan.amount`` for new BUY entries is intentionally 0; actual size is
+    computed inside ``TradeExecutor.execute_entry`` via ``RiskManager.calculate_position_size``.
+    Pre-trade checks (min order, max % portfolio) must use the same prospective quote.
+    """
+    preset = float(getattr(plan, "amount", 0.0) or 0.0)
+    if preset > 0:
+        return preset
+    rm = getattr(bot, "risk_manager", None)
+    if rm is None:
+        return 0.0
+    pv = float(bot._get_risk_portfolio_value(portfolio))
+    entry = float(getattr(plan, "entry_price", 0.0) or 0.0)
+    sl = getattr(plan, "stop_loss", None)
+    tp = getattr(plan, "take_profit", None)
+    conf = float(getattr(plan, "confidence", 0.0) or 0.0)
+    sizing = rm.calculate_position_size(
+        portfolio_value=pv,
+        entry_price=entry,
+        stop_loss_price=sl,
+        take_profit_price=tp,
+        confidence=conf,
+    )
+    if sizing.allowed:
+        return float(getattr(sizing, "suggested_size", None) or 0.0)
+    return 0.0
+
+
 def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str, Any]) -> bool:
     """Return True when the trade may proceed past PreTradeGate."""
     if not bool(getattr(bot, "_pre_trade_gate_enabled", True)):
@@ -37,9 +67,17 @@ def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str,
             exc,
         )
 
-    proposed_quote = float(getattr(plan, "amount", 0.0) or 0.0)
-    if side_value == "SELL":
-        proposed_quote *= max(float(getattr(plan, "entry_price", 0.0) or current_price or 0.0), 0.0)
+    if side_value == "BUY":
+        proposed_quote = _estimate_buy_quote_for_gate(bot, plan, portfolio)
+        logger.debug(
+            "[PreTradeGate] BUY size preview symbol=%s quote_est=%.2f (aligned with RiskManager.calculate_position_size)",
+            plan.symbol,
+            proposed_quote,
+        )
+    else:
+        proposed_quote = float(getattr(plan, "amount", 0.0) or 0.0)
+        if side_value == "SELL":
+            proposed_quote *= max(float(getattr(plan, "entry_price", 0.0) or current_price or 0.0), 0.0)
 
     if getattr(bot, "_state_machine_enabled", False) and getattr(bot, "_state_manager", None):
         open_positions_count = len(bot._state_manager.list_active_states())
@@ -64,7 +102,14 @@ def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str,
     if result.passed:
         return True
 
-    logger.warning("[PreTradeGate] %s blocked: %s", plan.symbol, result.summary())
+    # grep: `failed_checks=` exposes PreTradeGate failure names without parsing emoji summary text
+    failed_csv = ",".join(result.failed_checks) if getattr(result, "failed_checks", None) else ""
+    logger.warning(
+        "[PreTradeGate] %s blocked: %s | failed_checks=%s",
+        plan.symbol,
+        result.summary(),
+        failed_csv,
+    )
     if bot.send_alerts:
         bot._send_alert(f"PreTradeGate blocked {plan.symbol}: {result.summary()}", to_telegram=False)
     return False
