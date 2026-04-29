@@ -250,6 +250,7 @@ def risk_manager_from_config(config: Dict[str, Any]) -> RiskManager:
         atr_multiplier=risk_config.get("atr_multiplier", 3.0),
         atr_period=risk_config.get("atr_period", 14),
         use_dynamic_sl_tp=risk_config.get("use_dynamic_sl_tp", True),
+        use_fractional_kelly=bool(risk_config.get("use_fractional_kelly", True)),
         initial_balance=config.get("portfolio", {}).get("initial_balance", 1000.0),
         min_balance_threshold=config.get("portfolio", {}).get("min_balance_threshold", 100.0),
         max_open_positions=risk_config.get("max_open_positions", 3),

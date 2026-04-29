@@ -37,6 +37,7 @@ def _buy_quote_and_risk_sizing(
         stop_loss_price=sl,
         take_profit_price=tp,
         confidence=conf,
+        symbol=str(getattr(plan, "symbol", "") or "") or None,
     )
     if sizing.allowed:
         return float(getattr(sizing, "suggested_size", None) or 0.0), sizing

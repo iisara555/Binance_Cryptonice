@@ -36,6 +36,7 @@ def test_estimate_buy_quote_matches_risk_manager_sizing() -> None:
         stop_loss_price=41_000.0,
         take_profit_price=43_000.0,
         confidence=0.75,
+        symbol="BTCUSDT",
     )
 
 

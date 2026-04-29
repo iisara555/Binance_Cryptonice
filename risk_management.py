@@ -205,6 +205,8 @@ class RiskConfig:
     atr_multiplier: float = 2.5  # SL distance = ATR * this
     atr_period: int = 14  # ATR lookback period
     use_dynamic_sl_tp: bool = True  # Use pair-specific SL/TP
+    # When False and Kelly edge is non-positive, keep fixed max_risk_per_trade_pct (no hard reject).
+    use_fractional_kelly: bool = True
 
     def __post_init__(self):
         # Hard reject anything above 8.0% (obvious misconfiguration).
@@ -239,6 +241,7 @@ class RiskConfig:
             atr_multiplier=risk.get("atr_multiplier", 3.0),
             atr_period=risk.get("atr_period", 14),
             use_dynamic_sl_tp=risk.get("use_dynamic_sl_tp", True),
+            use_fractional_kelly=bool(risk.get("use_fractional_kelly", True)),
             initial_balance=data.get("portfolio", {}).get("initial_balance", 1000.0),
             min_balance_threshold=data.get("portfolio", {}).get("min_balance_threshold", 100.0),
             max_open_positions=data.get("trading", {}).get("max_open_positions", 5),
@@ -262,6 +265,7 @@ class RiskConfig:
                 "atr_multiplier": self.atr_multiplier,
                 "atr_period": self.atr_period,
                 "use_dynamic_sl_tp": self.use_dynamic_sl_tp,
+                "use_fractional_kelly": self.use_fractional_kelly,
             },
             "portfolio": {
                 "initial_balance": self.initial_balance,
@@ -422,6 +426,7 @@ class RiskManager:
         stop_loss_price: Optional[float] = None,
         take_profit_price: Optional[float] = None,
         confidence: Optional[float] = None,
+        symbol: Optional[str] = None,
     ) -> RiskCheckResult:
         """
         Calculate how much to invest in a single trade based on risk tolerance and Fractional Kelly.
@@ -452,24 +457,43 @@ class RiskManager:
                 b = reward_dist / risk_dist  # Risk-Reward Payout Ratio
                 # Full Kelly Fraction
                 kelly_pct = p - (q / b)
-                if kelly_pct <= 0.0:
-                    reason = f"Non-positive Kelly edge: kelly={kelly_pct:.4f} " f"(p={p:.2f}, b={b:.2f})"
-                    _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", reason)
-                    logger.info("[Kelly Sizing] Trade rejected due to non-positive edge: %s", reason)
-                    return RiskCheckResult(False, reason)
-
-                # Apply Half-Kelly (Fractional) for safety in crypto
-                half_kelly = kelly_pct / 2.0
-
-                # Bound between min 0.1% and max_risk_per_trade_pct
-                # Max constraint: If Kelly wants to bet 5%, we still limit to 1.0% max
-                # A zero Kelly edge (break-even) falls back to the minimum floor.
-                dynamic_risk = max(0.1, min(half_kelly * 100, effective_risk_pct))
-
+                sym = (symbol or "").strip() or "?"
                 logger.debug(
-                    f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%"
+                    "[Kelly] %s p=%.3f b=%.3f kelly=%.4f SL=%s TP=%s",
+                    sym,
+                    p,
+                    b,
+                    kelly_pct,
+                    stop_loss_price,
+                    take_profit_price,
                 )
-                effective_risk_pct = dynamic_risk
+                if kelly_pct <= 0.0:
+                    if self.config.use_fractional_kelly:
+                        reason = f"Non-positive Kelly edge: kelly={kelly_pct:.4f} " f"(p={p:.2f}, b={b:.2f})"
+                        _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", reason)
+                        logger.info("[Kelly Sizing] Trade rejected due to non-positive edge: %s", reason)
+                        return RiskCheckResult(False, reason)
+                    logger.warning(
+                        "[Kelly] %s edge non-positive (kelly=%.4f); use_fractional_kelly=false — "
+                        "using fixed risk %% fallback (max_risk_per_trade_pct=%.2f%%)",
+                        sym,
+                        kelly_pct,
+                        self.config.max_risk_per_trade_pct,
+                    )
+                    # Leave effective_risk_pct at max_risk_per_trade_pct from above.
+                else:
+                    # Apply Half-Kelly (Fractional) for safety in crypto
+                    half_kelly = kelly_pct / 2.0
+
+                    # Bound between min 0.1% and max_risk_per_trade_pct
+                    # Max constraint: If Kelly wants to bet 5%, we still limit to 1.0% max
+                    # A zero Kelly edge (break-even) falls back to the minimum floor.
+                    dynamic_risk = max(0.1, min(half_kelly * 100, effective_risk_pct))
+
+                    logger.debug(
+                        f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%"
+                    )
+                    effective_risk_pct = dynamic_risk
 
         drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
         drawdown_multiplier = self._get_drawdown_risk_multiplier(portfolio_value)

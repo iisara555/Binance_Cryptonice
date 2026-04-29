@@ -153,6 +153,31 @@ class TestSRG3NegativeKelly:
         assert not result.allowed
         assert "Non-positive Kelly edge" in result.reason
 
+    def test_non_positive_kelly_uses_fixed_risk_when_fractional_kelly_disabled(self):
+        """When use_fractional_kelly is false, negative Kelly does not reject — fixed max_risk%% applies."""
+        rm = RiskManager(
+            RiskConfig(
+                max_risk_per_trade_pct=1.0,
+                max_position_per_trade_pct=10.0,
+                use_fractional_kelly=False,
+            )
+        )
+        entry = 100_000.0
+        sl = 99_000.0
+        tp = 101_000.0
+        confidence = 0.30  # would give negative Kelly with b=1
+
+        result = rm.calculate_position_size(
+            portfolio_value=1_000_000.0,
+            entry_price=entry,
+            stop_loss_price=sl,
+            take_profit_price=tp,
+            confidence=confidence,
+            symbol="NEGUSDT",
+        )
+        assert result.allowed
+        assert result.suggested_size == pytest.approx(100_000.0, rel=0.01)
+
     def test_positive_edge_uses_kelly_sizing(self):
         """With win-rate=70% and payoff=2:1 the Kelly is strongly positive.
         Position size should be smaller than the hard cap because the

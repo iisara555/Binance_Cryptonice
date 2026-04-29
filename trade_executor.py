@@ -1480,6 +1480,7 @@ class TradeExecutor:
                     stop_loss_price=plan.stop_loss,
                     take_profit_price=plan.take_profit,
                     confidence=plan.confidence,
+                    symbol=getattr(plan, "symbol", None),
                 )
                 if not risk_result.allowed:
                     return OrderResult(False, OrderStatus.REJECTED, message="Sizing rejected: %s" % risk_result.reason)

@@ -227,6 +227,7 @@ multi_timeframe:
 #      volatility = table by pair class (DEFAULT_SL_TP); risk_config = use risk.stop_loss_pct / take_profit_pct below.
 #    main.py sets sl_tp_percent_source_when_dynamic=risk_config automatically for strategy_mode scalping / trend_only.
 risk:
+  use_fractional_kelly: false           # false = if Kelly edge <= 0, use fixed max_risk_per_trade_pct (no hard reject)
   max_risk_per_trade_pct: 2.5        # FIX: aligned with strategy_mode.scalping — unlock min notional with risk-based sizing
   max_daily_loss_pct: 3.0            # AUDIT FIX: was 5.0 — circuit breaker triggers earlier
   max_position_per_trade_pct: 28.0   # FIX: 25% cap 10.57 < min_viable 11 (10*1.1) — sizing rejected / PreTradeGate 0 quote
