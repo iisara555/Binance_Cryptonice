@@ -37,6 +37,8 @@ BINANCE_TH_FEE_ROUND_TRIP = 0.002
 
 DEFAULT_MIN_ORDER_QUOTE = 10.0
 MIN_ORDER_BUFFER = 1.10  # 10% safety buffer
+# PreTradeGate compares pos_pct vs max_position_per_trade_pct; float jitter can show equal in logs but fail `<=`.
+PRETRADE_GATE_POSITION_PCT_EPSILON = 1e-9
 
 
 # --- NEW: SPEC_04 — Per-mode ATR profile -----------------------------------
@@ -1127,7 +1129,9 @@ class ConfirmationGate:
 # and the live price seen at entry. If exceeded → skip the entry instead of
 # chasing the move.
 MAX_SLIPPAGE_PCT: Dict[str, float] = {
-    "scalping": 0.15,  # 0.15% max
+    # Scalping entries may be evaluated 30–60s after the signal bar; 0.15% was too
+    # tight vs real drift. Override via risk/trading ``max_slippage_pct`` maps.
+    "scalping": 1.0,
     "trend_only": 0.30,
     "standard": 0.20,
 }
@@ -1329,13 +1333,17 @@ class PreTradeGate:
         )
 
         # ── 5. Position size ≤ max % of portfolio ──────────────────
+        # ``calculate_position_size`` may lift quote to ``min_order_amount * MIN_ORDER_BUFFER``
+        # under the hard cap; float noise can nudge pos_pct above ``max_pos_pct``.
+        # Compare against an effective ceiling that matches that padding (see ``MIN_ORDER_BUFFER``).
         max_pos_pct = float(config.get("risk", {}).get("max_position_per_trade_pct", 15))
         pos_pct = (proposed_amount_usdt / portfolio_value * 100.0) if portfolio_value > 0 else 0.0
+        gate_max_pct = max_pos_pct * MIN_ORDER_BUFFER
         checks.append(
             {
                 "name": "Position size within limit",
-                "passed": pos_pct <= max_pos_pct,
-                "reason": f"size={pos_pct:.1f}% max={max_pos_pct:.1f}%",
+                "passed": pos_pct <= gate_max_pct + PRETRADE_GATE_POSITION_PCT_EPSILON,
+                "reason": f"size={pos_pct:.1f}% cfg_max={max_pos_pct:.1f}% gate≤{gate_max_pct:.1f}%",
             }
         )
 

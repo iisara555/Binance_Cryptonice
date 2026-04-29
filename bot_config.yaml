@@ -39,6 +39,9 @@ trading:
   timeframe: "15m"                    # Locked to 15m for runtime trading loop
   mode: "full_auto"                 # "semi_auto" = alert before trade, "full_auto" = auto trade
   min_order_amount: 10.0            # Quote notional minimum (Binance spot USDT pairs ~10); aligns with executor + PreTradeGate; use with portfolio.min_balance_threshold
+  # PreTradeGate resolves per-mode max drift % (signal_price vs ticker). ``trading`` wins over ``risk``.
+  max_slippage_pct:
+    scalping: 1.25                    # ~1% multi-pair loop lag + vol alts; tighten when loop is faster
 
 # strategy_mode: which *mode* is active for risk/TF/thresholds (SL/TP %, intervals, etc.).
 # The per-pair list of strategy *names* that actually run in the signal loop comes from

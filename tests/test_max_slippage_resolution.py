@@ -10,8 +10,8 @@ from risk_management import PreTradeGate, RiskCheckResult, resolve_max_slippage_
 
 
 def test_resolve_uses_hardcoded_when_no_config() -> None:
-    assert resolve_max_slippage_pct("scalping", {}) == pytest.approx(0.15)
-    assert resolve_max_slippage_pct("scalping", None) == pytest.approx(0.15)
+    assert resolve_max_slippage_pct("scalping", {}) == pytest.approx(1.0)
+    assert resolve_max_slippage_pct("scalping", None) == pytest.approx(1.0)
     assert resolve_max_slippage_pct("trend_only", None) == pytest.approx(0.30)
 
 

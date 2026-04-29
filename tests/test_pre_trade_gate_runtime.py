@@ -7,7 +7,12 @@ from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
-from risk_management import GateCheckResult, RiskCheckResult
+from risk_management import (
+    PRETRADE_GATE_POSITION_PCT_EPSILON,
+    GateCheckResult,
+    PreTradeGate,
+    RiskCheckResult,
+)
 from trade_executor import ExecutionPlan, OrderSide
 from trading.orchestrator import TradeDecision
 from trading.bot_runtime.pre_trade_gate_runtime import _estimate_buy_quote_for_gate, check_pre_trade_gate
@@ -143,3 +148,108 @@ def test_blocked_log_includes_failed_checks_csv(caplog: pytest.LogCaptureFixture
 
     assert "failed_checks=" in caplog.text
     assert "Portfolio above minimum,Order quote >= min_order_amount" in caplog.text
+
+
+def _minimal_pre_trade_gate_cfg(max_position_pct: float = 28.0):
+    """Config so check_all clears every gate except the ones under test."""
+    return {
+        "portfolio": {"min_balance_threshold": 10.0},
+        "risk": {
+            "max_open_positions": 6,
+            "max_daily_trades": 99,
+            "max_position_per_trade_pct": max_position_pct,
+            "max_drawdown_threshold_pct": 99.0,
+            "max_slippage_pct": {"scalping": 999.0},
+        },
+        "trading": {"min_order_amount": 1.0},
+        "mode_indicator_profiles": {"scalping": {"min_confidence": 0.1}},
+    }
+
+
+def test_position_size_within_limit_exact_cap_passes():
+    """At exactly max cap (28% of NAV), Position size gate must pass."""
+    gate = PreTradeGate()
+    rm = MagicMock()
+    rm.check_daily_loss_limit.return_value = RiskCheckResult(True, "OK")
+    rm.check_cooldown.return_value = False
+    rm._get_current_drawdown_pct.return_value = 0.0
+    cfg = _minimal_pre_trade_gate_cfg(28.0)
+    pv = 1000.0
+    proposed = pv * (28.0 / 100.0)
+    result = gate.check_all(
+        symbol="TSTUSDT",
+        side="BUY",
+        proposed_amount_usdt=proposed,
+        portfolio_value=pv,
+        open_positions_count=0,
+        daily_trades_today=0,
+        current_price=100.0,
+        signal_price=100.0,
+        signal_confidence=0.5,
+        mode="scalping",
+        config=cfg,
+        risk_manager=rm,
+        pair_loss_guard=None,
+    )
+    pos = next(c for c in result.checks if c["name"] == "Position size within limit")
+    assert pos["passed"] is True
+
+
+def test_position_size_within_limit_fp_jitter_below_epsilon_passes():
+    """Float noise just above nominal cap must not block (same .1f display)."""
+    gate = PreTradeGate()
+    rm = MagicMock()
+    rm.check_daily_loss_limit.return_value = RiskCheckResult(True, "OK")
+    rm.check_cooldown.return_value = False
+    rm._get_current_drawdown_pct.return_value = 0.0
+    cfg = _minimal_pre_trade_gate_cfg(28.0)
+    pv = 100.0
+    proposed = 28.0 + min(PRETRADE_GATE_POSITION_PCT_EPSILON, 1e-12) * 10
+    result = gate.check_all(
+        symbol="TSTUSDT",
+        side="BUY",
+        proposed_amount_usdt=proposed,
+        portfolio_value=pv,
+        open_positions_count=0,
+        daily_trades_today=0,
+        current_price=100.0,
+        signal_price=100.0,
+        signal_confidence=0.5,
+        mode="scalping",
+        config=cfg,
+        risk_manager=rm,
+        pair_loss_guard=None,
+    )
+    pos = next(c for c in result.checks if c["name"] == "Position size within limit")
+    assert pos["passed"] is True
+
+
+def test_position_size_gate_matches_min_order_buffer_ceiling_vs_nominal_pct():
+    """Nominal YAML cap 28% → gate compares to 28×MIN_ORDER_BUFFER (~30.8%) for headroom."""
+    gate = PreTradeGate()
+    rm = MagicMock()
+    rm.check_daily_loss_limit.return_value = RiskCheckResult(True, "OK")
+    rm.check_cooldown.return_value = False
+    rm._get_current_drawdown_pct.return_value = 0.0
+    cfg = _minimal_pre_trade_gate_cfg(28.0)
+    pv = 100.0
+    proposed = 29.5  # 29.5% of NAV — passes ceiling 30.8%, would fail nominal 28%
+    result = gate.check_all(
+        symbol="TSTUSDT",
+        side="BUY",
+        proposed_amount_usdt=proposed,
+        portfolio_value=pv,
+        open_positions_count=0,
+        daily_trades_today=0,
+        current_price=100.0,
+        signal_price=100.0,
+        signal_confidence=0.5,
+        mode="scalping",
+        config=cfg,
+        risk_manager=rm,
+        pair_loss_guard=None,
+    )
+    pos = next(c for c in result.checks if c["name"] == "Position size within limit")
+    assert pos["passed"] is True
+    assert "cfg_max=28.0%" in pos["reason"]
+    assert "gate≤" in pos["reason"]
