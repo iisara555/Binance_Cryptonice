@@ -24,8 +24,12 @@ $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $remoteServiceUser = if ($SshTarget -match '^(?<user>[^@]+)@') { $Matches['user'] } else { 'root' }
 
 $runtimeFiles = @(
+    'project_paths.py',
     'alerts.py',
     'main.py',
+    'cli_command_dispatch.py',
+    'cli_snapshot_build.py',
+    'cli_snapshot_dto.py',
     'api_client.py',
     'helpers.py',
     'portfolio_manager.py',
@@ -53,6 +57,12 @@ $runtimeFiles = @(
     'trading/signal_runtime.py',
     'trading/startup_runtime.py',
     'trading/status_runtime.py',
+    'trading/bootstrap_config.py',
+    'trading/cli_pair_normalize.py',
+    'trading/cli_snapshot_builder.py',
+    'trading/manual_trading_service.py',
+    'trading/runtime_pairlist_service.py',
+    'trading/runtime_process.py',
     'deploy/systemd/crypto-bot-tmux.sh',
     'deploy/systemd/crypto-bot-tmux.service',
     'deploy/systemd/crypto-bot-runtime.service',
