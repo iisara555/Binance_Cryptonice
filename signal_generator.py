@@ -980,10 +980,17 @@ class SignalGenerator:
         suggested_size = self._get_position_size(signal, balance)
         current_price = signal.avg_price  # THB per 1 BTC — same units as plan entry_price
         position_value_thb = suggested_size * current_price
-        if balance > 0 and position_value_thb > balance * 0.2:  # Max 20% per trade
+        risk_cfg = dict(self.config.get("risk") or {})
+        max_pos_pct = float(risk_cfg.get("max_position_per_trade_pct", 20.0))
+        if balance > 0 and position_value_thb > balance * (max_pos_pct / 100.0):
             pct = (position_value_thb / balance * 100) if balance > 0 else 0
             result.warnings.append(f"Position size ({pct:.1f}% of balance) is large")
-            _diag(pair, "RiskCheck:PositionSize", "PASS", f"WARNING — position {pct:.1f}% of balance (>20%)")
+            _diag(
+                pair,
+                "RiskCheck:PositionSize",
+                "PASS",
+                f"WARNING — position {pct:.1f}% of balance (>{max_pos_pct:.0f}% cap)",
+            )
         else:
             _diag(
                 pair,
@@ -1041,12 +1048,29 @@ class SignalGenerator:
         RiskManager uses: risk_based_quantity = risk_amount / risk_per_unit (BTC),
         then notional THB = quantity * entry_price. Using ``1.0`` here incorrectly
         treated the position as 1.0 BTC, blowing up the % of balance.
+
+        When strategies omit absolute SL prices, mirror :func:`risk_management.resolve_effective_sl_tp_percentages`
+        so this matches execution (which fills SL/TP via ATR or config). Otherwise ``sl`` stays 0 and
+        notional logs as 0.00 despite a later valid plan.
         """
+        from risk_management import resolve_effective_sl_tp_percentages
+
         entry = float(signal.avg_price or 0.0)
         sl = float(signal.avg_stop_loss or 0.0)
-        if portfolio_value <= 0 or entry <= 0 or sl <= 0:
+        if portfolio_value <= 0 or entry <= 0:
             return 0.0
         risk_cfg = dict(self.config.get("risk") or {})
+        if sl <= 0:
+            try:
+                sl_pct, _ = resolve_effective_sl_tp_percentages(
+                    str(getattr(signal, "symbol", "") or ""),
+                    risk_cfg,
+                )
+                sl = float(entry * (1.0 + sl_pct / 100.0))
+            except Exception:
+                return 0.0
+        if sl <= 0:
+            return 0.0
         max_risk_pct = float(risk_cfg.get("max_risk_per_trade_pct", 0.5))
         max_pos_pct = float(risk_cfg.get("max_position_per_trade_pct", 10.0))
         hard_cap_thb = portfolio_value * (max_pos_pct / 100.0)

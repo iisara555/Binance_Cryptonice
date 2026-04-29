@@ -1109,17 +1109,57 @@ MAX_SLIPPAGE_PCT: Dict[str, float] = {
 }
 
 
+def _merge_max_slippage_overlays(config: Optional[Dict[str, Any]]) -> Dict[str, float]:
+    """Parse optional per-mode overrides from ``risk.max_slippage_pct`` and
+    ``trading.max_slippage_pct`` (dicts). ``trading`` wins on duplicate keys.
+    """
+    out: Dict[str, float] = {}
+    if not config:
+        return out
+    for section_key in ("risk", "trading"):
+        branch = config.get(section_key)
+        if not isinstance(branch, dict):
+            continue
+        raw = branch.get("max_slippage_pct")
+        if not isinstance(raw, dict):
+            continue
+        for k, v in raw.items():
+            key = str(k).strip().lower()
+            if not key:
+                continue
+            try:
+                out[key] = float(v)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def resolve_max_slippage_pct(mode_key: str, config: Optional[Dict[str, Any]]) -> float:
+    """Effective max slippage % for :class:`PreTradeGate` (signal vs live ticker).
+
+    Defaults: :data:`MAX_SLIPPAGE_PCT`. Optional YAML maps (see
+    ``_merge_max_slippage_overlays``) override per mode.
+    """
+    rk = str(mode_key or "standard").strip().lower() or "standard"
+    overlays = _merge_max_slippage_overlays(config)
+    if rk in overlays:
+        return overlays[rk]
+    return float(MAX_SLIPPAGE_PCT.get(rk, 0.20))
+
+
 def check_slippage(
     signal_price: float,
     current_price: float,
     mode: str = "standard",
+    config: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Return True if slippage exceeds the per-mode tolerance (skip entry).
 
     Args:
         signal_price: price observed when the signal fired.
         current_price: price at which the entry would actually be placed.
-        mode: trading mode key into MAX_SLIPPAGE_PCT.
+        mode: trading mode key into MAX_SLIPPAGE_PCT / YAML overrides.
+        config: bot config dict; optional ``risk`` / ``trading`` ``max_slippage_pct`` maps.
 
     Returns:
         True  → slippage too high, caller should skip entry.
@@ -1134,7 +1174,7 @@ def check_slippage(
         return False
 
     slippage_pct = abs(c - s) / s * 100.0
-    max_slip = float(MAX_SLIPPAGE_PCT.get(str(mode or "standard").strip().lower(), 0.20))
+    max_slip = resolve_max_slippage_pct(mode, config)
     if slippage_pct > max_slip:
         logger.info(
             "[Slippage] Skip entry: slippage=%.3f%% > max=%.3f%% " "(mode=%s, signal=%.6f, current=%.6f)",
@@ -1156,8 +1196,9 @@ def check_slippage(
 #
 # PreTradeGate is intentionally stateless. It CALLS the existing RiskManager
 # helpers (check_daily_loss_limit / check_cooldown / _get_current_drawdown_pct)
-# and the MAX_SLIPPAGE_PCT table rather than reimplementing them, so the
-# source of truth for risk policy stays in RiskManager.
+# and resolves max slippage via :func:`resolve_max_slippage_pct` (defaults in
+# ``MAX_SLIPPAGE_PCT``, optional YAML ``risk``/``trading`` ``max_slippage_pct`` maps) so that
+# the source of truth for risk policy stays in RiskManager plus config overrides.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1274,11 +1315,12 @@ class PreTradeGate:
             }
         )
 
-        # ── 6. Minimum order size (Binance.th min ≈ $10) ───────────
+        # ── 6. Minimum quote notional (internal trading.min_order_amount; spot ~$10) ─
+        # Name states the *pass* condition so a failure means "not enough quote" (incl. 0 from failed sizing).
         min_order = float(config.get("trading", {}).get("min_order_amount", 10.0))
         checks.append(
             {
-                "name": "Above minimum order size",
+                "name": "Order quote >= min_order_amount",
                 "passed": proposed_amount_usdt >= min_order,
                 "reason": f"order={proposed_amount_usdt:.2f} min={min_order:.2f}",
             }
@@ -1320,7 +1362,7 @@ class PreTradeGate:
             cur_p = 0.0
         if sig_p > 0:
             slippage_pct = abs(cur_p - sig_p) / sig_p * 100.0
-            max_slip = float(MAX_SLIPPAGE_PCT.get(mode_key, 0.20))
+            max_slip = resolve_max_slippage_pct(mode_key, config)
             checks.append(
                 {
                     "name": "Slippage within limit",

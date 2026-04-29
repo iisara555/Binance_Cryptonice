@@ -112,7 +112,7 @@ def test_blocked_log_includes_failed_checks_csv(caplog: pytest.LogCaptureFixture
     bot._pre_trade_gate.check_all.return_value = GateCheckResult(
         passed=False,
         checks=[],
-        failed_checks=["Portfolio above minimum", "Above minimum order size"],
+        failed_checks=["Portfolio above minimum", "Order quote >= min_order_amount"],
     )
     bot._state_machine_enabled = False
     bot.executor.get_open_orders.return_value = []
@@ -141,4 +141,4 @@ def test_blocked_log_includes_failed_checks_csv(caplog: pytest.LogCaptureFixture
         assert check_pre_trade_gate(bot, decision, {}) is False
 
     assert "failed_checks=" in caplog.text
-    assert "Portfolio above minimum,Above minimum order size" in caplog.text
+    assert "Portfolio above minimum,Order quote >= min_order_amount" in caplog.text

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 from helpers import parse_ticker_last
 
@@ -12,19 +12,20 @@ from trading.orchestrator import TradeDecision
 logger = logging.getLogger(__name__)
 
 
-def _estimate_buy_quote_for_gate(bot: Any, plan: Any, portfolio: Dict[str, Any]) -> float:
-    """Quote (USDT) size for BUY checks — aligned with TradeExecutor sizing.
+def _buy_quote_and_risk_sizing(
+    bot: Any, plan: Any, portfolio: Dict[str, Any]
+) -> Tuple[float, Optional[Any]]:
+    """Return (quote_usdt, RiskCheckResult|None) for BUY — same path as ``execute_entry`` sizing.
 
     ``ExecutionPlan.amount`` for new BUY entries is intentionally 0; actual size is
     computed inside ``TradeExecutor.execute_entry`` via ``RiskManager.calculate_position_size``.
-    Pre-trade checks (min order, max % portfolio) must use the same prospective quote.
     """
     preset = float(getattr(plan, "amount", 0.0) or 0.0)
     if preset > 0:
-        return preset
+        return preset, None
     rm = getattr(bot, "risk_manager", None)
     if rm is None:
-        return 0.0
+        return 0.0, None
     pv = float(bot._get_risk_portfolio_value(portfolio))
     entry = float(getattr(plan, "entry_price", 0.0) or 0.0)
     sl = getattr(plan, "stop_loss", None)
@@ -38,8 +39,14 @@ def _estimate_buy_quote_for_gate(bot: Any, plan: Any, portfolio: Dict[str, Any])
         confidence=conf,
     )
     if sizing.allowed:
-        return float(getattr(sizing, "suggested_size", None) or 0.0)
-    return 0.0
+        return float(getattr(sizing, "suggested_size", None) or 0.0), sizing
+    return 0.0, sizing
+
+
+def _estimate_buy_quote_for_gate(bot: Any, plan: Any, portfolio: Dict[str, Any]) -> float:
+    """Quote-only sizing probe — used by tests; internal code uses :func:`_buy_quote_and_risk_sizing`."""
+    q, _ = _buy_quote_and_risk_sizing(bot, plan, portfolio)
+    return q
 
 
 def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str, Any]) -> bool:
@@ -68,12 +75,35 @@ def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str,
         )
 
     if side_value == "BUY":
-        proposed_quote = _estimate_buy_quote_for_gate(bot, plan, portfolio)
-        logger.debug(
-            "[PreTradeGate] BUY size preview symbol=%s quote_est=%.2f (aligned with RiskManager.calculate_position_size)",
-            plan.symbol,
-            proposed_quote,
-        )
+        proposed_quote, sizing_res = _buy_quote_and_risk_sizing(bot, plan, portfolio)
+        cfg_root = getattr(bot, "config", None) or {}
+        min_order = float((cfg_root.get("trading") or {}).get("min_order_amount", 10.0))
+        sl_raw = getattr(plan, "stop_loss", None)
+        tp_raw = getattr(plan, "take_profit", None)
+        pv_gate = float(bot._get_risk_portfolio_value(portfolio))
+        if sizing_res is not None:
+            logger.info(
+                "[PreTradeGate] BUY sizing_preview symbol=%s quote_est=%.4f sizing_allowed=%s "
+                "risk_reason=%s pv=%.2f entry=%.8f sl=%s tp=%s conf=%.4f min_order=%.2f",
+                getattr(plan, "symbol", "?"),
+                proposed_quote,
+                sizing_res.allowed,
+                (sizing_res.reason or "")[:280].replace("\n", " "),
+                pv_gate,
+                float(getattr(plan, "entry_price", 0.0) or 0.0),
+                repr(sl_raw),
+                repr(tp_raw),
+                float(getattr(plan, "confidence", 0.0) or 0.0),
+                min_order,
+            )
+        else:
+            logger.info(
+                "[PreTradeGate] BUY sizing_preview symbol=%s quote_est=%.4f preset_amount (no RiskCheckResult) pv=%.2f min_order=%.2f",
+                getattr(plan, "symbol", "?"),
+                proposed_quote,
+                pv_gate,
+                min_order,
+            )
     else:
         proposed_quote = float(getattr(plan, "amount", 0.0) or 0.0)
         if side_value == "SELL":
@@ -102,8 +132,14 @@ def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str,
     if result.passed:
         return True
 
-    # grep: `failed_checks=` exposes PreTradeGate failure names without parsing emoji summary text
     failed_csv = ",".join(result.failed_checks) if getattr(result, "failed_checks", None) else ""
+    fail_audit = "; ".join(
+        f'{c.get("name", "?")}={c.get("reason", "")}' for c in getattr(result, "checks", []) or [] if not c.get("passed", True)
+    )
+    if fail_audit:
+        logger.info("[PreTradeGate] gate_fail_audit symbol=%s %s", getattr(plan, "symbol", "?"), fail_audit[:2400])
+
+    # grep: `failed_checks=` exposes PreTradeGate failure names without parsing emoji summary text
     logger.warning(
         "[PreTradeGate] %s blocked: %s | failed_checks=%s",
         plan.symbol,
