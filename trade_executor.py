@@ -394,6 +394,43 @@ class TradeExecutor:
             return None, self._invalid_api_response(context, missing_payload_detail)
         return data, None
 
+    def _snap_limit_order_to_exchange_grid(
+        self,
+        symbol: str,
+        side: OrderSide,
+        price: float,
+        amount: float,
+        order_type: str,
+    ) -> Tuple[float, float]:
+        """Snap limit price and quantity to Binance PRICE_FILTER / LOT_SIZE using cached exchangeInfo."""
+        ot = (order_type or "limit").lower()
+        if ot != "limit" or price <= 0:
+            return price, amount
+        try:
+            from api_client import BinanceThClient, round_step
+        except ImportError:
+            return price, amount
+        if not isinstance(self.api_client, BinanceThClient):
+            return price, amount
+        filt = self.api_client.get_symbol_filter_strings(symbol)
+        if filt.get("_fallback"):
+            return price, amount
+        tick = str(filt.get("tick_size") or "").strip()
+        step = str(filt.get("step_size") or "").strip()
+        if not tick or not step:
+            return price, amount
+        rp = round_step(price, tick)
+        if rp <= 0 and price > 0:
+            return price, amount
+        if side == OrderSide.BUY:
+            quote = float(amount)
+            base = quote / rp if rp > 0 else 0.0
+            base = round_step(base, step)
+            quote_adj = base * rp
+            return rp, quote_adj
+        qty = round_step(float(amount), step)
+        return rp, qty
+
     def __init__(
         self,
         api_client,
@@ -1165,6 +1202,11 @@ class TradeExecutor:
                     )
                     quote_amount = max_quote
                 quote_amount = quantize_decimal(quote_amount, quote_decimals)
+                snap_p, snap_amt = self._snap_limit_order_to_exchange_grid(
+                    symbol, OrderSide.BUY, float(price_dec), float(quote_amount), order.order_type
+                )
+                price_dec = to_decimal(snap_p)
+                quote_amount = to_decimal(snap_amt)
 
                 response = self.api_client.place_bid(
                     symbol=symbol,
@@ -1247,6 +1289,12 @@ class TradeExecutor:
                     )
 
                 sell_amount = quantize_decimal(order_amount_dec, self.ASSET_DECIMALS.get(base_asset_upper, 8))
+                snap_p, snap_amt = self._snap_limit_order_to_exchange_grid(
+                    symbol, OrderSide.SELL, float(price_dec), float(sell_amount), order.order_type
+                )
+                price_dec = to_decimal(snap_p)
+                sell_amount = to_decimal(snap_amt)
+
                 response = self.api_client.place_ask(
                     symbol=symbol,
                     amount=float(sell_amount),

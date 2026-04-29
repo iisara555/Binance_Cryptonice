@@ -310,15 +310,25 @@ class BinanceAuthException(BinanceAPIError):
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def round_step(value: float, step: Any) -> float:
+    """Round ``value`` DOWN to Binance LOT_SIZE / PRICE_FILTER grid.
 
-def _round_step(value: float, step: float) -> float:
-    """Round ``value`` DOWN to the nearest multiple of ``step``."""
-    if step is None or step <= 0 or value <= 0:
+    ``step`` should be the API string (e.g. ``\"0.01\"``, ``\"1e-8\"``) to avoid float drift.
+    Float ``step`` is accepted for backward compatibility.
+    """
+    if step is None:
         return float(value)
-    d_val = Decimal(str(value))
-    d_step = Decimal(str(step))
-    rounded = (d_val / d_step).quantize(Decimal("1"), rounding=ROUND_DOWN) * d_step
-    return float(rounded)
+    try:
+        s = Decimal(str(step))
+    except Exception:
+        return float(value)
+    if s <= 0:
+        return float(value)
+    try:
+        d = Decimal(str(value))
+    except Exception:
+        return float(value)
+    return float(d.quantize(s, rounding=ROUND_DOWN))
 
 
 def _format_decimal(value: float, precision: int = 8) -> str:
@@ -340,6 +350,97 @@ def _decimal_places_from_step(step: float) -> int:
     if exp >= 0:
         return 0
     return min(16, -exp)
+
+
+def _normalize_exchange_symbol_key(symbol: str) -> str:
+    """Normalize Binance spot symbol for cache/API consistency (``DOGE_USDT`` → ``DOGEUSDT``)."""
+    return str(symbol or "").strip().upper().replace("_", "")
+
+
+def _fallback_symbol_filters() -> Dict[str, Any]:
+    return {
+        "stepSize": 0.000001,
+        "tickSize": 0.000001,
+        "stepSizeStr": "0.000001",
+        "tickSizeStr": "0.000001",
+        "minQty": 0.0,
+        "minNotional": 0.0,
+        "baseAssetPrecision": 8,
+        "quoteAssetPrecision": 8,
+        "_fallback": True,
+    }
+
+
+def _safe_positive_float(val: Any) -> Optional[float]:
+    """Parse exchange numeric filter; return None if missing or non-positive."""
+    if val is None:
+        return None
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        return None
+    if x <= 0:
+        return None
+    return x
+
+
+def _parse_exchange_symbol_entry(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build LOT_SIZE / PRICE_FILTER dict from one exchangeInfo ``symbols[]`` item."""
+    filters = _fallback_symbol_filters()
+    if not isinstance(entry, dict):
+        return filters
+    try:
+        filters["baseAssetPrecision"] = int(entry.get("baseAssetPrecision") or 8)
+    except (TypeError, ValueError):
+        filters["baseAssetPrecision"] = 8
+    try:
+        qp = entry.get("quoteAssetPrecision")
+        if qp is None:
+            qp = entry.get("quotePrecision")
+        filters["quoteAssetPrecision"] = int(qp or 8)
+    except (TypeError, ValueError):
+        filters["quoteAssetPrecision"] = 8
+    flist = entry.get("filters")
+    if not isinstance(flist, list):
+        return filters
+    for f in flist:
+        if not isinstance(f, dict):
+            continue
+        ftype = str(f.get("filterType") or "").upper()
+        if ftype == "LOT_SIZE":
+            raw_step = f.get("stepSize")
+            sv = _safe_positive_float(raw_step)
+            if sv is not None:
+                filters["stepSizeStr"] = str(raw_step).strip()
+                filters["stepSize"] = sv
+            try:
+                filters["minQty"] = float(f.get("minQty") or 0.0)
+            except (TypeError, ValueError):
+                filters["minQty"] = 0.0
+        elif ftype == "PRICE_FILTER":
+            raw_tick = f.get("tickSize")
+            tv = _safe_positive_float(raw_tick)
+            if tv is not None:
+                filters["tickSizeStr"] = str(raw_tick).strip()
+                filters["tickSize"] = tv
+        elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
+            try:
+                mn = float(f.get("minNotional") or f.get("notional") or 0.0)
+            except (TypeError, ValueError):
+                mn = 0.0
+            filters["minNotional"] = mn
+    filters["_fallback"] = False
+    return filters
+
+
+def _filters_have_valid_tick_step(filters: Dict[str, Any]) -> bool:
+    """True when LOT_SIZE / PRICE_FILTER grids are usable for rounding."""
+    try:
+        tick = float(filters.get("tickSizeStr") or filters.get("tickSize") or 0)
+        step = float(filters.get("stepSizeStr") or filters.get("stepSize") or 0)
+    except (TypeError, ValueError):
+        return False
+    return tick > 0 and step > 0
 
 
 def _quantize_down(value: float, decimals: int) -> float:
@@ -446,6 +547,9 @@ class BinanceThClient:
         # --- NEW: SPEC_01 --- exchangeInfo cache (per Binance symbol).
         self._exchange_info_cache: Dict[str, Dict[str, Any]] = {}
         self._exchange_info_lock = threading.Lock()
+        # Full GET /api/v1/exchangeInfo (all symbols) — refreshed every 24h.
+        self._exchange_info_bulk_loaded_at: float = 0.0
+        self._exchange_info_bulk_ttl_sec: float = 86400.0
 
         # --- NEW: SPEC_01 --- Stub-history WARN tracking (one-shot per kind).
         self._history_stub_warned: Dict[str, bool] = {}
@@ -537,102 +641,243 @@ class BinanceThClient:
 
     # ── Filter cache (LOT_SIZE / PRICE_FILTER) ─────────────────────────────
 
-    def _get_symbol_filters(self, binance_symbol: str) -> Dict[str, Any]:
-        """# --- NEW: SPEC_01 --- Cached lookup of LOT_SIZE / PRICE_FILTER /
-        MIN_NOTIONAL filters per symbol.  Falls back to 6-decimal precision
-        if exchangeInfo is unavailable."""
+    def _maybe_refresh_exchange_info_bulk(self) -> None:
+        """Reload full exchangeInfo if TTL elapsed (default 24h)."""
+        now = time.time()
+        if self._exchange_info_bulk_loaded_at > 0 and (now - self._exchange_info_bulk_loaded_at) < float(
+            self._exchange_info_bulk_ttl_sec
+        ):
+            return
+        self._load_exchange_info_bulk()
+
+    def _load_exchange_info_bulk(self) -> None:
+        """GET /api/v1/exchangeInfo (no symbol) — cache PRICE_FILTER / LOT_SIZE for all symbols."""
+        attempt_ts = time.time()
+        try:
+            r = requests.get(f"{self.base_url}/api/v1/exchangeInfo", timeout=self.TIMEOUT)
+            data = r.json() if r.status_code == 200 else {}
+            symbols = data.get("symbols") if isinstance(data, dict) else None
+            if not isinstance(symbols, list):
+                raise ValueError("exchangeInfo: missing symbols[]")
+            new_cache: Dict[str, Dict[str, Any]] = {}
+            for sym in symbols:
+                if not isinstance(sym, dict):
+                    continue
+                name = sym.get("symbol")
+                if not name:
+                    continue
+                key = _normalize_exchange_symbol_key(str(name))
+                new_cache[key] = _parse_exchange_symbol_entry(sym)
+            with self._exchange_info_lock:
+                self._exchange_info_cache.update(new_cache)
+                cache_keys = sorted(self._exchange_info_cache.keys())
+            logger.info(
+                "exchangeInfo: bulk cache loaded (%d symbols, TTL=%ss)",
+                len(new_cache),
+                self._exchange_info_bulk_ttl_sec,
+            )
+            logger.info(
+                "Exchange filter cache loaded: %d keys total (bulk merged); sample: %s%s",
+                len(cache_keys),
+                cache_keys[:80],
+                " ..." if len(cache_keys) > 80 else "",
+            )
+        except Exception as exc:
+            logger.warning("exchangeInfo bulk load failed: %s — per-symbol fetch still available", exc)
+        finally:
+            self._exchange_info_bulk_loaded_at = attempt_ts
+
+    def preload_exchange_filters(self, extra_symbols: Optional[List[str]] = None) -> None:
+        """Fetch full exchangeInfo once at startup (all symbols). Safe to call multiple times."""
+        self._load_exchange_info_bulk()
+        self._log_exchange_filter_probe(extra_symbols=extra_symbols)
+
+    def _log_exchange_filter_probe(self, extra_symbols: Optional[List[str]] = None) -> None:
+        """Log whether filters exist for configured pairs plus common USDT bases (cache sanity check)."""
+        defaults = [
+            "BTCUSDT",
+            "ETHUSDT",
+            "DOGEUSDT",
+            "SOLUSDT",
+            "LINKUSDT",
+            "BNBUSDT",
+            "XRPUSDT",
+            "ADAUSDT",
+        ]
+        ordered: List[str] = []
+        seen: set[str] = set()
+        for raw in list(extra_symbols or []) + defaults:
+            s = str(raw or "").strip()
+            if not s or s.upper() in seen:
+                continue
+            seen.add(s.upper())
+            ordered.append(s)
+            if len(ordered) >= 20:
+                break
+        parts: List[str] = []
         with self._exchange_info_lock:
-            cached = self._exchange_info_cache.get(binance_symbol)
-            if cached is not None:
+            for raw in ordered:
+                bs = _normalize_exchange_symbol_key(str(self._to_binance_symbol(raw) or ""))
+                row = self._exchange_info_cache.get(bs)
+                if row is None:
+                    parts.append(f"{bs}=absent")
+                elif row.get("_fallback"):
+                    parts.append(f"{bs}=fallback")
+                elif not _filters_have_valid_tick_step(row):
+                    parts.append(f"{bs}=bad_tick_step")
+                else:
+                    parts.append(f"{bs}=ok")
+        logger.info("Exchange filter pair probe (%d checked): %s", len(parts), " ".join(parts))
+
+    def get_symbol_filter_strings(self, symbol: str) -> Dict[str, Any]:
+        """LOT_SIZE / PRICE_FILTER steps as API strings for ``round_step`` / UI."""
+        bs = _normalize_exchange_symbol_key(str(self._to_binance_symbol(symbol) or ""))
+        f = self._get_symbol_filters(bs)
+        return {
+            "tick_size": str(f.get("tickSizeStr") or f.get("tickSize") or ""),
+            "step_size": str(f.get("stepSizeStr") or f.get("stepSize") or ""),
+            "_fallback": bool(f.get("_fallback")),
+        }
+
+    def _get_symbol_filters(self, binance_symbol: str) -> Dict[str, Any]:
+        """Cached LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL; bulk-loaded then on-demand fallback."""
+        bs = _normalize_exchange_symbol_key(binance_symbol)
+        self._maybe_refresh_exchange_info_bulk()
+
+        with self._exchange_info_lock:
+            cached = self._exchange_info_cache.get(bs)
+            # Never serve stale fallback rows; skip rows with unusable tick/step grids.
+            if (
+                cached is not None
+                and not cached.get("_fallback")
+                and _filters_have_valid_tick_step(cached)
+            ):
                 return cached
 
-        filters: Dict[str, Any] = {
-            "stepSize": 0.000001,
-            "tickSize": 0.000001,
-            "minQty": 0.0,
-            "minNotional": 0.0,
-            "baseAssetPrecision": 8,
-            "quoteAssetPrecision": 8,
-            "_fallback": True,
-        }
+        filters = _fallback_symbol_filters()
         try:
             r = requests.get(
                 f"{self.base_url}/api/v1/exchangeInfo",
-                params={"symbol": binance_symbol},
+                params={"symbol": bs},
                 timeout=self.TIMEOUT,
             )
             data = r.json() if r.status_code == 200 else {}
             symbols = data.get("symbols") if isinstance(data, dict) else None
             entry = symbols[0] if symbols else None
-            if entry:
-                try:
-                    filters["baseAssetPrecision"] = int(entry.get("baseAssetPrecision") or 8)
-                except (TypeError, ValueError):
-                    filters["baseAssetPrecision"] = 8
-                try:
-                    qp = entry.get("quoteAssetPrecision")
-                    if qp is None:
-                        qp = entry.get("quotePrecision")
-                    filters["quoteAssetPrecision"] = int(qp or 8)
-                except (TypeError, ValueError):
-                    filters["quoteAssetPrecision"] = 8
-            if entry and isinstance(entry.get("filters"), list):
-                for f in entry["filters"]:
-                    ftype = f.get("filterType")
-                    if ftype == "LOT_SIZE":
-                        filters["stepSize"] = float(f.get("stepSize") or filters["stepSize"])
-                        filters["minQty"] = float(f.get("minQty") or 0.0)
-                    elif ftype == "PRICE_FILTER":
-                        filters["tickSize"] = float(f.get("tickSize") or filters["tickSize"])
-                    elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
-                        filters["minNotional"] = float(f.get("minNotional") or f.get("notional") or 0.0)
-                filters["_fallback"] = False
+            filters = _parse_exchange_symbol_entry(entry if isinstance(entry, dict) else None)
         except Exception as exc:
             logger.warning(
                 "exchangeInfo lookup failed for %s: %s — using fallback precision",
-                binance_symbol,
+                bs,
                 exc,
             )
 
         with self._exchange_info_lock:
-            self._exchange_info_cache[binance_symbol] = filters
+            self._exchange_info_cache[bs] = filters
         return filters
 
     def _round_quantity(self, binance_symbol: str, qty: float) -> float:
-        f = self._get_symbol_filters(binance_symbol)
+        bs = _normalize_exchange_symbol_key(binance_symbol)
+        f = self._get_symbol_filters(bs)
+        if f.get("_fallback"):
+            logger.warning(
+                "LOT_SIZE: cache miss or fallback for %s — forcing on-demand exchangeInfo",
+                bs,
+            )
+            with self._exchange_info_lock:
+                self._exchange_info_cache.pop(bs, None)
+            f = self._get_symbol_filters(bs)
         if f.get("_fallback"):
             raise BinanceAPIError(
-                -1013, f"Exchange filters unavailable for {binance_symbol}; refusing to submit quantity"
+                -1013, f"Exchange filters unavailable for {bs}; refusing to submit quantity"
             )
-        step = float(f.get("stepSize") or 0.0)
-        if step <= 0:
-            raise BinanceAPIError(-1013, f"Missing LOT_SIZE stepSize for {binance_symbol}")
-        rounded = _round_step(qty, step)
+        step = f.get("stepSizeStr") or f.get("stepSize")
+        try:
+            step_f = float(step) if step is not None else 0.0
+        except (TypeError, ValueError):
+            step_f = 0.0
+        if step_f <= 0:
+            logger.warning(
+                "Invalid LOT_SIZE stepSize for %s (step=%r); invalidating cache entry and refetching exchangeInfo",
+                bs,
+                step,
+            )
+            with self._exchange_info_lock:
+                self._exchange_info_cache.pop(bs, None)
+            f = self._get_symbol_filters(bs)
+            if f.get("_fallback"):
+                raise BinanceAPIError(
+                    -1013, f"Exchange filters unavailable for {bs}; refusing to submit quantity"
+                )
+            step = f.get("stepSizeStr") or f.get("stepSize")
+            try:
+                step_f = float(step) if step is not None else 0.0
+            except (TypeError, ValueError):
+                step_f = 0.0
+        if step_f <= 0:
+            raise BinanceAPIError(-1013, f"Missing LOT_SIZE stepSize for {bs}")
+        rounded = round_step(qty, step)
         if rounded <= 0 and qty > 0:
             raise BinanceAPIError(
                 -1013,
-                f"Quantity {qty} rounds to 0 under LOT_SIZE stepSize {step} for {binance_symbol}",
+                f"Quantity {qty} rounds to 0 under LOT_SIZE stepSize {step} for {bs}",
             )
         min_qty = float(f.get("minQty") or 0.0)
         if min_qty > 0 and 0 < rounded < min_qty:
             raise BinanceAPIError(
                 -1013,
-                f"Quantity {rounded} below minQty {min_qty} for {binance_symbol}",
+                f"Quantity {rounded} below minQty {min_qty} for {bs}",
             )
         return rounded
 
     def _round_price(self, binance_symbol: str, price: float) -> float:
-        f = self._get_symbol_filters(binance_symbol)
+        bs = _normalize_exchange_symbol_key(binance_symbol)
+        with self._exchange_info_lock:
+            cache_miss = bs not in self._exchange_info_cache
+        if cache_miss:
+            logger.warning(
+                "Exchange filter cache miss for %s — fetching symbol filters on-demand before price round",
+                bs,
+            )
+        f = self._get_symbol_filters(bs)
         if f.get("_fallback"):
-            raise BinanceAPIError(-1013, f"Exchange filters unavailable for {binance_symbol}; refusing to submit price")
-        tick = float(f.get("tickSize") or 0.0)
-        if tick <= 0:
-            raise BinanceAPIError(-1013, f"Missing PRICE_FILTER tickSize for {binance_symbol}")
-        rounded = _round_step(price, tick)
+            logger.warning(
+                "PRICE_FILTER: cache miss or fallback for %s — forcing on-demand exchangeInfo",
+                bs,
+            )
+            with self._exchange_info_lock:
+                self._exchange_info_cache.pop(bs, None)
+            f = self._get_symbol_filters(bs)
+        if f.get("_fallback"):
+            raise BinanceAPIError(-1013, f"Exchange filters unavailable for {bs}; refusing to submit price")
+        tick = f.get("tickSizeStr") or f.get("tickSize")
+        try:
+            tick_f = float(tick) if tick is not None else 0.0
+        except (TypeError, ValueError):
+            tick_f = 0.0
+        if tick_f <= 0:
+            logger.warning(
+                "Invalid PRICE_FILTER tickSize for %s (tick=%r); invalidating cache entry and refetching exchangeInfo",
+                bs,
+                tick,
+            )
+            with self._exchange_info_lock:
+                self._exchange_info_cache.pop(bs, None)
+            f = self._get_symbol_filters(bs)
+            if f.get("_fallback"):
+                raise BinanceAPIError(-1013, f"Exchange filters unavailable for {bs}; refusing to submit price")
+            tick = f.get("tickSizeStr") or f.get("tickSize")
+            try:
+                tick_f = float(tick) if tick is not None else 0.0
+            except (TypeError, ValueError):
+                tick_f = 0.0
+        if tick_f <= 0:
+            raise BinanceAPIError(-1013, f"Missing PRICE_FILTER tickSize for {bs}")
+        rounded = round_step(price, tick)
         if rounded <= 0 and price > 0:
             raise BinanceAPIError(
                 -1013,
-                f"Price {price} rounds to 0 under PRICE_FILTER tickSize {tick} for {binance_symbol}",
+                f"Price {price} rounds to 0 under PRICE_FILTER tickSize {tick} for {bs}",
             )
         return rounded
 
@@ -675,7 +920,7 @@ class BinanceThClient:
             raw = str(sym or "").strip()
             if not raw:
                 continue
-            bs = self._to_binance_symbol(raw)
+            bs = _normalize_exchange_symbol_key(str(self._to_binance_symbol(raw)))
             if not bs or bs in seen:
                 continue
             seen.add(bs)
@@ -932,7 +1177,7 @@ class BinanceThClient:
 
         results: Dict[str, Dict[str, Any]] = {}
         for sym in symbols:
-            binance_symbol = self._to_binance_symbol(sym)
+            binance_symbol = _normalize_exchange_symbol_key(self._to_binance_symbol(sym))
             entry = index.get(binance_symbol)
             if entry is not None:
                 results[sym] = _normalize_ticker(entry, requested_symbol=sym)
@@ -1173,6 +1418,7 @@ class BinanceThClient:
         is_buy: bool,
     ) -> Dict[str, Any]:
         """Translate legacy (amount, rate) inputs into Binance order parameters."""
+        binance_symbol = _normalize_exchange_symbol_key(binance_symbol)
         side = side.upper()
         ot = (order_type or "limit").lower()
 
