@@ -25,12 +25,11 @@ from api_client import BinanceAPIError, BinanceThClient
 from cli_ui import CLICommandCenter
 from dynamic_coin_config import JsonCoinWhitelistRepository
 from helpers import calc_net_pnl, format_bitkub_time
-from main import (
-    TradingBotApp,
-    _apply_strategy_mode_profile,
+from main import TradingBotApp
+from trading.bootstrap_config import _apply_strategy_mode_profile, resolve_runtime_trading_pairs
+from trading.runtime_process import (
     _clear_startup_auth_shutdown_state,
     _enable_startup_auth_degraded_mode,
-    resolve_runtime_trading_pairs,
 )
 from risk_management import RiskConfig, RiskManager
 from signal_generator import AggregatedSignal, SignalGenerator
