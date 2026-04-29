@@ -85,8 +85,8 @@ strategy_mode:
     min_time_between_trades_minutes: 15   # AUDIT FIX: was 2 — give signals room to settle, prevent thrashing
     monitor_check_interval_seconds: 5
     max_position_per_trade_pct: 25.0      # FIX: raised from 10% — hard_cap was 4.23 USDT < min_order 10 USDT on 42 USDT portfolio
-    max_risk_per_trade_pct: 0.5           # AUDIT FIX: was 1.0 — half-Kelly until live track record stabilises
-    position_risk_per_trade_pct: 0.5
+    max_risk_per_trade_pct: 2.5           # FIX: 0.5% bound risk-based notional ~4 USDT vs min_order 10 — raise for ~42 USDT NAV
+    position_risk_per_trade_pct: 2.5
     position_size_cap_pct: 25.0          # FIX: sync with max_position_per_trade_pct
 
 # ── Mode-Specific Indicator Profiles ─────────────────────────────────────
@@ -227,7 +227,7 @@ multi_timeframe:
 #      volatility = table by pair class (DEFAULT_SL_TP); risk_config = use risk.stop_loss_pct / take_profit_pct below.
 #    main.py sets sl_tp_percent_source_when_dynamic=risk_config automatically for strategy_mode scalping / trend_only.
 risk:
-  max_risk_per_trade_pct: 0.5        # AUDIT FIX: was 1.0 — half-Kelly until live edge is proven
+  max_risk_per_trade_pct: 2.5        # FIX: aligned with strategy_mode.scalping — unlock min notional with risk-based sizing
   max_daily_loss_pct: 3.0            # AUDIT FIX: was 5.0 — circuit breaker triggers earlier
   max_position_per_trade_pct: 25.0   # FIX: raised from 10% — hard_cap 4.23 < min_order 10 USDT on 42 USDT balance
   max_open_positions: 4              # AUDIT FIX: was 6 — fewer concurrent risks while tuning
