@@ -1659,6 +1659,17 @@ class TradingBotApp:
                 logger.warning("Config ไม่มีคู่เหรียญที่ใช้งานอยู่ — bot จะเริ่มแบบไม่มีคู่เหรียญ active")
 
         pairs_for_runtime = list(data_config.get("pairs") or [])
+        try:
+            self.api_client.preload_exchange_filters(extra_symbols=pairs_for_runtime)
+            logger.info(
+                "Exchange filters preloaded during initialize (%d pair(s)) — cache warm before components",
+                len(pairs_for_runtime),
+            )
+        except Exception as exc:
+            logger.warning(
+                "exchangeInfo preload skipped during initialize: %s — will retry before trading loop",
+                exc,
+            )
         for warn in self.api_client.validate_symbol_exchange_info(pairs_for_runtime):
             logger.warning("Exchange symbol validation: %s", warn)
 
@@ -1857,6 +1868,20 @@ class TradingBotApp:
                     handler.addFilter(SuppressRepeatStateFilter(ttl_seconds=300.0))
 
         reporter.banner("CRYPTO TRADING BOT  —  Binance.th", version="2026.04.27")
+
+        # Synchronous gate: bulk exchangeInfo must complete before collector / trading threads run.
+        pairs_gate = list(self.config.get("data", {}).get("pairs") or [])
+        try:
+            self.api_client.preload_exchange_filters(extra_symbols=pairs_gate)
+            logger.info(
+                "Exchange filters ready — starting collector and trading loop (%d pair(s))",
+                len(pairs_gate),
+            )
+        except Exception as exc:
+            logger.error(
+                "Exchange filter preload failed before runtime: %s — continuing; filters fetch on-demand per order",
+                exc,
+            )
 
         with reporter.phase("Initialization"):
             mode = str(self.config.get("trading", {}).get("mode", "semi_auto")).lower()
