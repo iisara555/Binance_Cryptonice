@@ -27,6 +27,24 @@ logger = logging.getLogger(__name__)
 BALANCE_RECONCILE_GRACE_SECONDS: float = 180.0  # 3 minutes
 
 
+def _normalize_balances_from_api(raw: Any) -> Dict[str, Dict[str, float]]:
+    """Match ``TradingBotOrchestrator.get_balance_state`` normalization for reconcile."""
+    normalized: Dict[str, Dict[str, float]] = {}
+    for sym, payload in (raw or {}).items():
+        if isinstance(payload, dict):
+            available = float(payload.get("available", 0.0) or 0.0)
+            reserved = float(payload.get("reserved", 0.0) or 0.0)
+        else:
+            available = float(payload or 0.0)
+            reserved = 0.0
+        normalized[str(sym).upper()] = {
+            "available": available,
+            "reserved": reserved,
+            "total": available + reserved,
+        }
+    return normalized
+
+
 def bootstrap_quantity_tolerance(quantity: float) -> float:
     return max(abs(float(quantity or 0.0)) * 0.05, 1e-8)
 
@@ -38,6 +56,48 @@ class PositionBootstrapHelper:
 
     def __init__(self, bot: Any) -> None:
         self._bot = bot
+
+    def _merge_reconcile_balance_snapshot(self, balance_state: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Return a snapshot dict with non-empty ``balances`` when possible.
+
+        If ``get_balance_state()`` / monitor returns ``balances: {}`` (startup, poll glitch),
+        fall back to ``api_client.get_balances()`` so manual sells still clear tracked positions.
+        """
+        b = self._bot
+        snap_source = balance_state if balance_state is not None else b.get_balance_state()
+        snapshot: Dict[str, Any] = dict(snap_source or {})
+        balances = snapshot.get("balances")
+        if not isinstance(balances, dict):
+            balances = {}
+        if balances:
+            snapshot["balances"] = balances
+            return snapshot
+
+        if getattr(b, "_auth_degraded", False):
+            logger.debug("[Balance Reconcile] skipped: empty balances while auth degraded")
+            return None
+
+        api = getattr(b, "api_client", None)
+        if api is None or not callable(getattr(api, "get_balances", None)):
+            logger.debug("[Balance Reconcile] skipped: empty balances and no working API client")
+            return None
+
+        try:
+            raw = api.get_balances()
+        except Exception as exc:
+            logger.warning("[Balance Reconcile] get_balances() fallback failed: %s", exc)
+            return None
+
+        normalized = _normalize_balances_from_api(raw)
+        if not normalized:
+            logger.debug("[Balance Reconcile] API returned empty balance map")
+            return None
+
+        snapshot["balances"] = normalized
+        if not snapshot.get("updated_at"):
+            snapshot["updated_at"] = datetime.now().isoformat()
+        logger.info("[Balance Reconcile] using REST balances fallback (%d asset row(s))", len(normalized))
+        return snapshot
 
     def reconcile_tracked_positions_with_balance_state(
         self,
@@ -51,8 +111,10 @@ class PositionBootstrapHelper:
         if not b.executor:
             return []
 
-        snapshot = balance_state or b.get_balance_state()
-        balances = (snapshot or {}).get("balances") or {}
+        snapshot = self._merge_reconcile_balance_snapshot(balance_state)
+        if snapshot is None:
+            return []
+        balances = snapshot.get("balances") or {}
         if not balances:
             return []
 

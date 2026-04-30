@@ -594,6 +594,35 @@ def test_reconcile_tracked_positions_drops_usdt_pair_when_balance_is_zero():
     bot.db.record_held_coin.assert_called_once_with("BTCUSDT", 0.0)
 
 
+def test_reconcile_tracked_positions_api_fallback_when_balance_snapshot_empty():
+    """Empty monitor snapshot must not skip reconcile; REST balances should still drop sold coins."""
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [
+        {
+            "order_id": "api_fb_1",
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "amount": 0.001,
+            "remaining_amount": 0.0,
+            "filled": True,
+            "filled_amount": 0.001,
+        }
+    ]
+    bot.db = Mock()
+    bot._state_machine_enabled = False
+    bot._auth_degraded = False
+    bot.api_client = Mock()
+    bot.api_client.get_balances.return_value = {"BTC": {"available": 0.0, "reserved": 0.0}}
+
+    removed = bot._reconcile_tracked_positions_with_balance_state({"balances": {}, "updated_at": None})
+
+    assert removed == ["BTCUSDT"]
+    bot.api_client.get_balances.assert_called()
+    bot.executor.remove_tracked_position.assert_called_once_with("api_fb_1")
+    bot.db.record_held_coin.assert_called_once_with("BTCUSDT", 0.0)
+
+
 def test_reconcile_tracked_positions_keeps_usdt_pair_when_balance_remains():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.executor = Mock()
