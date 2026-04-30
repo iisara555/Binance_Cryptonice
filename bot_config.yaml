@@ -33,6 +33,8 @@ simulate_only: false                 # true = paper only (no real orders from YA
 read_only: false                     # true = executor skips orders (also BOT_READ_ONLY=true in .env)
 trading:
   trading_pair: ""                  # Runtime may set from holdings / whitelist (Binance TH)
+  startup_order_reconcile: true      # Reconcile pending local exchange orders against Binance at startup
+  runtime_order_reconcile: true      # Reconcile pending local exchange orders periodically during runtime
   # Multi-pair support: bot will iterate through all pairs in data.pairs
   # trading_pairs list can be added for specific pairs to trade
   interval_seconds: 60               # Main loop interval in seconds
@@ -190,8 +192,10 @@ multi_timeframe:
   timeframes: ["1m", "5m", "15m", "1h", "4h", "1d"]
   # Optional: subset for startup backfill only (defaults to all ``timeframes`` above).
   # startup_backfill_timeframes: ["5m", "15m", "1h"]
-  # Backfill depth: pages older klines until at least this many rows exist (>= required_candles_for_readiness).
-  # backfill_target_bars: 120
+  # Backfill depth: pages older klines until at least this many rows exist per pair×timeframe.
+  # Must cover the largest strategy lookback on the trading timeframe (Sniper EMA200 path needs 210 bars on 15m;
+  # DB reads cap at 250). Default was 35 — too low for Sniper while MTF "ready" still showed true.
+  backfill_target_bars: 250
   # Klines per REST request when backfilling (50–1000; Binance max 1000).
   # backfill_kline_limit_per_request: 1000
   # Walk history with repeated /klines calls before ``max_backfill_days`` (safety cap).
@@ -234,10 +238,10 @@ risk:
   max_risk_per_trade_pct: 2.5        # FIX: aligned with strategy_mode.scalping — unlock min notional with risk-based sizing
   max_daily_loss_pct: 3.0            # AUDIT FIX: was 5.0 — circuit breaker triggers earlier
   max_position_per_trade_pct: 28.0   # FIX: 25% cap 10.57 < min_viable 11 (10*1.1) — sizing rejected / PreTradeGate 0 quote
-  max_open_positions: 4              # AUDIT FIX: was 6 — fewer concurrent risks while tuning
-  max_daily_trades: 15               # AUDIT FIX: was 50 — keep trade frequency disciplined
+  max_open_positions: 6              # เพิ่มจาก 4 → 6
+  max_daily_trades: 8               # AUDIT FIX: was 50 — keep trade frequency disciplined
   # Optional explicit % SL/TP for path (3); also overwritten by strategy_mode when scalping/trend_only is active.
-  stop_loss_pct: -4.5               # Used when use_dynamic_sl_tp false, or when sl_tp_percent_source_when_dynamic is risk_config
+  stop_loss_pct: 4.5               # Used when use_dynamic_sl_tp false, or when sl_tp_percent_source_when_dynamic is risk_config
   take_profit_pct: 10.0
   cool_down_minutes: 15              # AUDIT FIX: was 5 — give markets a beat between entries
   # Optional — max % drift (signal vs ticker) before PreTradeGate blocks an entry.
@@ -358,9 +362,9 @@ auto_trader:
   # Auto position sizing
   position_sizing:
     mode: "risk_based"               # "risk_based", "fixed", "kelly"
-    fixed_amount: 100.0               # Fixed amount in quote currency, e.g. USDT (if mode=fixed)
-    risk_per_trade_pct: 1.5          # % of portfolio to risk per trade
-    max_position_pct: 10.0           # Maximum position as % of portfolio
+    fixed_amount: 12               # Fixed amount in quote currency, e.g. USDT (if mode=fixed)
+    risk_per_trade_pct: 2.5          # % of portfolio to risk per trade
+    max_position_pct: 28.0           # Maximum position as % of portfolio
   # Auto stop loss / take profit
   stop_loss:
     mode: "atr"                      # "atr", "fixed_pct", "trailing"
@@ -477,7 +481,7 @@ candle_retention:
 
 # Portfolio
 portfolio:
-  initial_balance: 500.0            # Initial balance (for simulation)
+  initial_balance: 42.0            # Initial balance (for simulation)
   min_balance_threshold: 40.0       # PreTradeGate / RiskGate floor; must be below NAV (e.g. ~42 USDT live)
   read_only: false                  # Mirror top-level read_only; executor reads top-level + BOT_READ_ONLY env
   persist_path: "portfolio_state.json"  # Persist rebalancer state (cooldown survives restart)

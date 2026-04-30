@@ -568,6 +568,58 @@ def test_reconcile_tracked_positions_drops_manual_sold_coin_when_balance_is_zero
     bot.db.record_held_coin.assert_called_once_with("THB_BTC", 0.0)
 
 
+def test_reconcile_tracked_positions_drops_usdt_pair_when_balance_is_zero():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [
+        {
+            "order_id": "bn_abc_1",
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "amount": 0.001,
+            "remaining_amount": 0.0,
+            "filled": True,
+            "filled_amount": 0.001,
+        }
+    ]
+    bot.db = Mock()
+    bot._state_machine_enabled = False
+
+    removed = bot._reconcile_tracked_positions_with_balance_state(
+        {"balances": {"BTC": {"available": 0.0, "reserved": 0.0, "total": 0.0}}}
+    )
+
+    assert removed == ["BTCUSDT"]
+    bot.executor.remove_tracked_position.assert_called_once_with("bn_abc_1")
+    bot.db.record_held_coin.assert_called_once_with("BTCUSDT", 0.0)
+
+
+def test_reconcile_tracked_positions_keeps_usdt_pair_when_balance_remains():
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [
+        {
+            "order_id": "bn_abc_1",
+            "symbol": "BTCUSDT",
+            "side": "buy",
+            "amount": 0.001,
+            "remaining_amount": 0.0,
+            "filled": True,
+            "filled_amount": 0.001,
+        }
+    ]
+    bot.db = Mock()
+    bot._state_machine_enabled = False
+
+    removed = bot._reconcile_tracked_positions_with_balance_state(
+        {"balances": {"BTC": {"available": 0.0009, "reserved": 0.0, "total": 0.0009}}}
+    )
+
+    assert removed == []
+    bot.executor.remove_tracked_position.assert_not_called()
+    bot.db.record_held_coin.assert_not_called()
+
+
 def test_reconcile_tracked_positions_keeps_position_when_coin_balance_remains():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.executor = Mock()

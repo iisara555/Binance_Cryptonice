@@ -36,6 +36,14 @@ def build_open_position_rows_for_cli(
             ).strip()
             or "-"
         )
+        if strategy_source == "-":
+            trig = str(position.get("trigger") or "").strip().lower()
+            if trig == "manual_import":
+                strategy_source = "manual"
+            else:
+                boot = str(position.get("bootstrap_source") or "").strip()
+                if boot:
+                    strategy_source = "bootstrap"
         current_price = app._get_cli_price(symbol, False) if symbol else None
         if (not current_price or current_price <= 0) and symbol:
             cached = app._cli_price_cache.get(symbol)

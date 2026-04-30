@@ -106,7 +106,11 @@ class Position(Base):
     total_entry_cost = Column(Float, default=0.0)
     is_partial_fill = Column(Boolean, default=False)
     remaining_amount = Column(Float, default=0.0)
+    filled = Column(Boolean, default=False)
+    filled_amount = Column(Float, default=0.0)
+    filled_price = Column(Float, default=0.0)
     trailing_peak = Column(Float)
+    strategy_source = Column(String(64))
     opened_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

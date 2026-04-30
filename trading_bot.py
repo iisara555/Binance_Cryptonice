@@ -218,6 +218,8 @@ class TradingBotOrchestrator:
         self._db_maintenance_interval_seconds = 24 * 3600  # once per day
         raw_min_trade_thb = config.get("min_trade_value")
         if raw_min_trade_thb is None:
+            raw_min_trade_thb = (config.get("rebalance") or {}).get("min_trade_value")
+        if raw_min_trade_thb is None:
             raw_min_trade_thb = 15.0
         try:
             self.min_trade_value_thb = float(raw_min_trade_thb)
@@ -769,6 +771,8 @@ class TradingBotOrchestrator:
 
         # Sync OMS state from DB after reconciliation or directly in degraded mode.
         self.executor.sync_open_orders_from_db()
+        if bool((self.config.get("trading") or {}).get("startup_order_reconcile", True)) and not self._auth_degraded:
+            self._reconcile_open_orders_with_exchange(source="startup")
         if not self._auth_degraded:
             self._bootstrap_held_coin_history()
             self._bootstrap_held_positions()
@@ -921,6 +925,9 @@ class TradingBotOrchestrator:
 
     def _reconcile_pending_trade_states(self, remote_order_ids: set[str]) -> set[str]:
         return self._get_startup_runtime_helper().reconcile_pending_trade_states(remote_order_ids)
+
+    def _reconcile_open_orders_with_exchange(self, source: str = "runtime") -> int:
+        return self._get_startup_runtime_helper().reconcile_open_orders_with_exchange(source=source)
 
     def _get_startup_runtime_helper(self) -> StartupRuntimeHelper:
         helper = getattr(self, "_startup_runtime_helper", None)

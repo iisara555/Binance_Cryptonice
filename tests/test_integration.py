@@ -1014,6 +1014,58 @@ class TestFullIntegrationFlow:
         bot._filter_pairs_by_candle_readiness.assert_called_once_with(["THB_BTC", "THB_SOL"], allow_refresh=True)
         bot._process_pair_iteration.assert_called_once_with("THB_BTC")
 
+    def test_run_iteration_refreshes_signal_flow_diagnostics_while_paused(self):
+        import pandas as pd
+
+        bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+        bot._auth_degraded = False
+        bot.api_client = Mock()
+        bot.api_client._clock = None
+        bot.api_client.is_circuit_open.return_value = False
+        bot.api_client.check_clock_sync.return_value = True
+        bot._reconcile_tracked_positions_with_balance_state = Mock()
+        bot._is_paused = Mock(return_value=(True, "reconcile mismatch"))
+        bot._check_positions_for_sl_tp = Mock()
+        bot._get_trading_pairs = Mock(return_value=["THB_BTC", "THB_SOL"])
+        bot._held_coins_only = False
+        bot._last_portfolio_guard_skipped = ()
+        bot._filter_pairs_by_candle_readiness = Mock(return_value=["THB_BTC"])
+        bot._process_pair_iteration = Mock()
+        bot._active_strategy_mode = "scalping"
+        bot._state_machine_enabled = False
+        bot.executor = Mock()
+        bot.executor.get_open_orders.return_value = [{"order_id": "open-1"}]
+        bot.risk_manager = Mock()
+        bot.risk_manager.trade_count_today = 2
+        bot._executed_today = []
+
+        data = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-04-01", periods=50, freq="15min"),
+                "open": [100.0] * 50,
+                "high": [101.0] * 50,
+                "low": [99.0] * 50,
+                "close": [100.0] * 50,
+                "volume": [10.0] * 50,
+            }
+        )
+        bot._get_market_data_for_symbol = Mock(return_value=data)
+
+        bot.signal_generator = Mock()
+        bot.signal_generator.get_active_strategies_for_mode.return_value = ["machete_v8b_lite"]
+        bot.signal_generator.generate_signals.return_value = []
+
+        TradingBotOrchestrator._run_iteration(bot)
+
+        bot._process_pair_iteration.assert_not_called()
+        bot._filter_pairs_by_candle_readiness.assert_called_once_with(["THB_BTC", "THB_SOL"], allow_refresh=False)
+        bot.signal_generator.sync_state.assert_called_once_with(open_positions_count=1, daily_trades_count=2)
+        bot.signal_generator.generate_signals.assert_called_once_with(
+            data=data,
+            symbol="THB_BTC",
+            use_strategies=["machete_v8b_lite"],
+        )
+
     def test_telegram_status_shows_auth_degraded_banner_without_balance_call(self, tmp_path):
         """Telegram /status should report degraded mode and avoid private balance calls."""
         handler = TelegramBotHandler.__new__(TelegramBotHandler)

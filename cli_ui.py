@@ -125,6 +125,11 @@ class CLICommandCenter:
         except Exception:
             return
 
+    def _terminal_compact_mode(self) -> bool:
+        """True when terminal is narrow/short — stacked mobile-friendly layout."""
+        term_width, term_height = self._layout_term_dimensions(self.console)
+        return term_width < 140 or term_height < 30
+
     @staticmethod
     def _layout_term_dimensions(console: Any) -> tuple[int, int]:
         """Width/height for layout decisions.
@@ -296,22 +301,28 @@ class CLICommandCenter:
 
         # Adaptive footer size: compact chat area while preserving input visibility.
         term_width, term_height = self._layout_term_dimensions(self.console)
-        compact_mode = term_width < 140 or term_height < 30
+        compact_mode = self._terminal_compact_mode()
         footer_size = self._resolve_footer_size(term_width, term_height, footer_mode)
 
         layout = Layout(name="root")
-        layout.split_column(
-            Layout(self._build_header(snapshot), size=2, name="header"),
-            Layout(name="body"),
-            Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
-        )
+        if compact_mode:
+            layout.split_column(
+                Layout(self._build_compact_status_bar(snapshot), size=3, name="header"),
+                Layout(name="body"),
+                Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
+            )
+        else:
+            layout.split_column(
+                Layout(self._build_header(snapshot), size=2, name="header"),
+                Layout(name="body"),
+                Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
+            )
         if compact_mode:
             layout["body"].split_column(
-                Layout(self._build_runtime_overview_panel(snapshot), ratio=2, name="overview"),
-                Layout(self._build_positions_table(snapshot, compact=True), ratio=4, name="positions"),
-                Layout(self._build_signal_flow_panel(snapshot), ratio=6, name="signal_flow"),
-                Layout(self._build_risk_rails_panel(snapshot), ratio=3, name="risk"),
-                Layout(self._build_log_stream_panel(snapshot), ratio=2, name="logs"),
+                Layout(self._build_mobile_position_book(snapshot), ratio=4, name="positions"),
+                Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=2, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, max_lines=3), ratio=2, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -634,10 +645,12 @@ class CLICommandCenter:
         }
         return order.get(str(value or "").upper(), 20)
 
-    def _build_log_stream_panel(self, snapshot: Dict[str, Any]) -> Panel:
+    def _build_log_stream_panel(self, snapshot: Dict[str, Any], *, max_lines: Optional[int] = None) -> Panel:
         ui_cfg = dict(snapshot.get("ui") or {})
         min_level = str(ui_cfg.get("log_level_filter") or "INFO").upper()
         rows = self._get_filtered_log_rows(min_level)
+        if max_lines is not None and max_lines > 0:
+            rows = rows[-max_lines:]
 
         if not rows:
             return self._panel(
@@ -658,7 +671,10 @@ class CLICommandCenter:
                 )
             )
 
-        return self._panel(Group(*lines), title=f"☰ Logs [{min_level}+]", theme="logs")
+        title = f"☰ Logs [{min_level}+]"
+        if max_lines is not None:
+            title = f"☰ Logs (last {max_lines}) [{min_level}+]"
+        return self._panel(Group(*lines), title=title, theme="logs")
 
     def _build_header(self, snapshot: Dict[str, Any]) -> Panel:
         mode = snapshot.get("mode", "UNKNOWN")
@@ -707,6 +723,251 @@ class CLICommandCenter:
             (uptime_str, f"bold {self._GREEN}"),
         )
         return self._panel(Align.left(header), title="Dashboard", theme="header")
+
+    def _build_compact_status_bar(self, snapshot: Dict[str, Any]) -> Panel:
+        """One-line status strip for narrow terminals."""
+        system = dict(snapshot.get("system") or {})
+        positions = list(snapshot.get("positions") or [])
+        open_n = len(positions)
+        max_pos = max(1, int(float(self._extract_numeric(system.get("max_open_positions"), 6))))
+        mode = str(snapshot.get("mode", "-"))
+        mode_style = self._mode_style(mode)
+        t = str(snapshot.get("updated_at") or "-")
+        avail_raw = str(system.get("available_balance") or "").strip()
+        total_raw = str(system.get("total_balance") or "").strip()
+        cash_compact = self._strip_balance_label_for_status(avail_raw, total_raw)
+        daily = str(system.get("daily_loss") or "-").replace("  ", " ")
+        parts: List[Any] = [
+            (str(snapshot.get("bot_name", self.bot_name) or "Bot"), f"bold {self._WHITE}"),
+            (" | ", self._DIM),
+            (mode, mode_style),
+            (" | ", self._DIM),
+            (t, self._DIM),
+            (" | Cash ", self._DIM),
+            (cash_compact, f"bold {self._EMBER}"),
+            (" | Slots ", self._DIM),
+            (f"{open_n}/{max_pos}", f"bold {self._CYAN}"),
+            (" | Loss ", self._DIM),
+            (daily, self._WHITE),
+        ]
+        line = Text.assemble(*parts)
+        term_w, _ = self._layout_term_dimensions(self.console)
+        plain = line.plain
+        if len(plain) > max(48, term_w - 3):
+            collapsed = self._truncate_inline(plain, max(40, term_w - 6))
+            line = Text(collapsed, style=self._WHITE)
+        return self._panel(Align.left(line), title="Status", theme="header")
+
+    @staticmethod
+    def _strip_balance_label_for_status(avail: str, total: str) -> str:
+        """Shrink '1,234.56 USDT' style strings for the status bar."""
+        a = avail.split("(")[0].strip() if avail else ""
+        b = total.split("(")[0].strip() if total else ""
+        if a and b:
+            return f"{a}/{b}".replace(" ", "")
+        return (a or b or "-").replace(" ", "")
+
+    def _build_mobile_position_book(self, snapshot: Dict[str, Any]) -> Panel:
+        """Compact position table: full symbol, SL/TP distance columns; max 5 rows."""
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table.add_column("Symbol", style=self._WHITE, no_wrap=True, min_width=10)
+        table.add_column("Side", justify="center", no_wrap=True, width=5)
+        table.add_column("Entry", justify="right", style=self._DIM, no_wrap=True)
+        table.add_column("Curr", justify="right", no_wrap=True)
+        table.add_column("PnL%", justify="right", no_wrap=True)
+        table.add_column("SLΔ%", justify="right", style=self._DIM, no_wrap=True)
+        table.add_column("TPΔ%", justify="right", style=self._DIM, no_wrap=True)
+
+        all_pos_full = list(snapshot.get("positions") or [])
+        positions: List[Dict[str, Any]] = all_pos_full[:5]
+        system = dict(snapshot.get("system") or {})
+        quote_asset = "USDT"
+        try:
+            quote_asset = str(self.app._get_quote_asset()).upper()
+        except Exception:
+            pass
+
+        pv = self._extract_numeric(system.get("risk_portfolio_value_quote"), 0.0)
+        if pv <= 0:
+            pv = self._extract_numeric(str(system.get("total_balance", "0")).replace(",", ""), 0.0)
+        dloss_amt, dloss_cap = self._extract_fraction(system.get("daily_loss"))
+        dloss_pct_s = str(system.get("daily_loss_pct") or "-")
+        pnl_vals = [self._safe_float(p.get("pnl_pct")) for p in all_pos_full]
+        valid_pv = [v for v in pnl_vals if v is not None]
+        win_n = sum(1 for v in valid_pv if v > 0)
+        lose_n = sum(1 for v in valid_pv if v < 0)
+        avg_pnl = (sum(valid_pv) / len(valid_pv)) if valid_pv else 0.0
+        sign = "-" if dloss_amt > 0 else "+"
+        today_part = f"{sign}{abs(dloss_amt):.2f} {quote_asset} ({dloss_pct_s})" if dloss_cap or dloss_amt else "-"
+
+        summary = Text.assemble(
+            ("Portfolio: ", self._DIM),
+            (f"{pv:.2f} {quote_asset}", f"bold {self._WHITE}"),
+            (" | Today: ", self._DIM),
+            (today_part, self._RED if dloss_amt > 0 else self._GREEN),
+            (" | W/L: ", self._DIM),
+            (f"{win_n}/{lose_n}", f"bold {self._CYAN}"),
+        )
+
+        if not positions:
+            theme = self._resolve_positions_theme(avg_pnl)
+            return self._panel(
+                Group(summary, Text("No open positions", style=self._DIM)),
+                title="\u25c6 Position Book",
+                theme=theme,
+            )
+
+        for position in positions:
+            sym = str(position.get("symbol", "-"))
+            sl_d = self._fmt_distance_pct(position.get("sl_distance_pct"))
+            tp_d = self._fmt_distance_pct(position.get("tp_distance_pct"))
+            table.add_row(
+                sym,
+                self._side_text(str(position.get("side", "-"))).plain,
+                self._fmt_price(position.get("entry_price")),
+                self._fmt_price(position.get("current_price")),
+                self._pnl_text(position.get("pnl_pct")).plain,
+                sl_d.plain if hasattr(sl_d, "plain") else str(sl_d),
+                tp_d.plain if hasattr(tp_d, "plain") else str(tp_d),
+            )
+
+        theme = self._resolve_positions_theme(avg_pnl)
+        return self._panel(Group(summary, table), title="\u25c6 Position Book", theme=theme)
+
+    def _build_mobile_risk_rails_line(self, snapshot: Dict[str, Any]) -> Panel:
+        """Single-line risk strip with green/yellow/red emphasis."""
+        system = dict(snapshot.get("system") or {})
+        positions = list(snapshot.get("positions") or [])
+        open_positions = len(positions)
+        max_positions = max(1.0, self._extract_numeric(system.get("max_open_positions"), 1.0))
+        trade_count = self._extract_numeric(system.get("trade_count"), 0.0)
+        max_daily_trades = max(1.0, self._extract_numeric(system.get("max_daily_trades"), 1.0))
+        fresh = str(system.get("freshness") or "fresh").lower()
+        cooling = str(system.get("cooling_down") or "No")
+        risk_pt = str(system.get("risk_per_trade") or "-")
+        daily_loss_str = str(system.get("daily_loss") or "-").replace("  ", " ")
+        line_plain = (
+            f"Risk {risk_pt} | Cool {cooling} | Active {int(trade_count)}/{int(max_daily_trades)} | "
+            f"Expose {open_positions}/{int(max_positions)} | Loss {daily_loss_str}"
+        )
+
+        mode = str(snapshot.get("mode", "")).upper()
+        warn = fresh == "warning" or cooling == "Yes"
+        bad = fresh == "critical" or mode in {"READ ONLY", "DEGRADED"} or "BLOCK" in str(snapshot.get("risk_level", "")).upper()
+        try:
+            dlv, dlc = self._extract_fraction(system.get("daily_loss"))
+            if dlc > 0 and dlv / dlc >= 0.85:
+                warn = True
+            if dlc > 0 and dlv / dlc >= 0.98:
+                bad = True
+        except Exception:
+            pass
+        if open_positions >= max_positions * 0.9:
+            warn = True
+        if trade_count >= max_daily_trades * 0.9:
+            warn = True
+
+        if bad:
+            style = f"bold {self._RED}"
+        elif warn:
+            style = f"bold {self._EMBER}"
+        else:
+            style = f"bold {self._GREEN}"
+
+        return self._panel(Text(line_plain, style=style), title="\u26a0 Risk Rails", theme="risk")
+
+    @staticmethod
+    def _sigflow_short_why(reason: str, result: str, *, max_len: int = 28) -> str:
+        """Prefer tail token for reject (e.g. SR_GUARD_BLOCKED); truncate long strings."""
+        s = str(reason or "").strip()
+        upper = str(result or "").upper()
+        if "reject:" in s.lower():
+            tail = s.split(":")[-1].strip()
+            s = tail or s
+        elif "_" in s and len(s) > max_len:
+            parts = [p for p in s.replace(" ", "_").split("_") if p]
+            if parts:
+                s = parts[-1]
+        if len(s) <= max_len:
+            return s
+        return s[: max_len - 1] + "\u2026"
+
+    def _build_signal_flow_collapsed(self, snapshot: Dict[str, Any]) -> Panel:
+        """Summary + PASS pairs only; per-strategy counts over full snapshot."""
+        try:
+            flow_snapshot = get_latest_signal_flow_snapshot()
+        except Exception as exc:
+            self._safe_stderr_write(f"[cli_ui] signal flow snapshot error: {exc}\n")
+            flow_snapshot = {}
+        ui_cfg = dict(snapshot.get("ui") or {})
+        full_hint = " [s|sigflow: full]" if not ui_cfg.get("sigflow_full") else ""
+
+        if not isinstance(flow_snapshot, dict) or not flow_snapshot:
+            return self._panel(Text("no SigFlow data", style=self._DIM), title=f"\u25ec SigFlow{full_hint}", theme="signal_flow")
+
+        strategy_headers = (
+            ("machete_v8b_lite", "Machete"),
+            ("simple_scalp_plus", "ScalpPlus"),
+        )
+        stats: Dict[str, Dict[str, int]] = {
+            key: {"pass": 0, "reject": 0, "buy": 0, "sell": 0} for key, _ in strategy_headers
+        }
+        pass_by_strategy: Dict[str, List[str]] = {key: [] for key, _ in strategy_headers}
+
+        for pair, flow in sorted(flow_snapshot.items(), key=lambda kv: str(kv[0] or "")):
+            if not isinstance(flow, dict):
+                continue
+            steps_dict = flow.get("steps") or {}
+            if not isinstance(steps_dict, dict):
+                steps_dict = {}
+            sym = str(pair or "").strip().upper()
+            for strategy_key, _label in strategy_headers:
+                step_key = f"Strategy:{strategy_key}"
+                step_data = steps_dict.get(step_key)
+                if not isinstance(step_data, dict):
+                    continue
+                result_raw = str(step_data.get("result") or "").upper()
+                reason_raw = str(step_data.get("reason") or "")
+                if result_raw == "PASS":
+                    stats[strategy_key]["pass"] += 1
+                    if sym and sym not in pass_by_strategy[strategy_key]:
+                        pass_by_strategy[strategy_key].append(sym)
+                    ru = reason_raw.upper()
+                    if "TYPE=BUY" in ru:
+                        stats[strategy_key]["buy"] += 1
+                    elif "TYPE=SELL" in ru:
+                        stats[strategy_key]["sell"] += 1
+                elif result_raw == "REJECT":
+                    stats[strategy_key]["reject"] += 1
+
+        summary_bits: List[str] = []
+        for strategy_key, label in strategy_headers:
+            st = stats[strategy_key]
+            summary_bits.append(
+                f"{label}: {st['pass']} pass, {st['reject']} block | SELL {st['sell']}, BUY {st['buy']}"
+            )
+        summary_line = " | ".join(summary_bits)
+
+        pass_lines: List[Text] = []
+        term_w, _ = self._layout_term_dimensions(self.console)
+        budget = max(24, term_w - 6)
+        for strategy_key, label in strategy_headers:
+            pairs = pass_by_strategy[strategy_key]
+            if not pairs:
+                continue
+            chunk = ", ".join(pairs)
+            if len(chunk) > budget:
+                chunk = chunk[: budget - 3] + "..."
+            pass_lines.append(
+                Text.assemble(
+                    (f"\u2713 {label}: ", f"bold {self._GREEN}"),
+                    (chunk, self._WHITE),
+                )
+            )
+
+        blocks: List[Any] = [Text(summary_line, style=self._DIM)]
+        blocks.extend(pass_lines if pass_lines else [Text("\u2713 no PASS rows", style=self._DIM)])
+        return self._panel(Group(*blocks), title=f"\u25ec SigFlow (compact){full_hint}", theme="signal_flow")
 
     @staticmethod
     def _mode_style(mode: str) -> str:
@@ -1126,6 +1387,11 @@ class CLICommandCenter:
 
     def _build_signal_flow_panel(self, snapshot: Dict[str, Any]) -> Panel:
         """Render Signal Flow by strategy: Machete and SimpleScalpPlus."""
+        ui_cfg = dict(snapshot.get("ui") or {})
+        compact_term = self._terminal_compact_mode()
+        if compact_term and not ui_cfg.get("sigflow_full"):
+            return self._build_signal_flow_collapsed(snapshot)
+
         try:
             flow_snapshot = get_latest_signal_flow_snapshot()
         except Exception as exc:
@@ -1133,16 +1399,27 @@ class CLICommandCenter:
             flow_snapshot = {}
 
         _term_w, term_h = self._layout_term_dimensions(self.console)
-        max_rows = max(8, min(24, term_h - 16))
+        narrow = compact_term
+        max_rows = max(6, min(22 if narrow else 24, term_h - (12 if narrow else 16)))
 
         if not isinstance(flow_snapshot, dict) or not flow_snapshot:
             empty = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
-            empty.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
-            empty.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
-            empty.add_column("\u2713", justify="center", no_wrap=True, width=2)
-            empty.add_column("Why", style=self._DIM, ratio=2, overflow="ellipsis", min_width=40, max_width=68)
+            if narrow:
+                why_w = max(12, _term_w - 20)
+                empty.add_column("Pair", style=self._WHITE, no_wrap=True, min_width=10)
+                empty.add_column("Stp", style=self._DIM, no_wrap=True, width=4)
+                empty.add_column("\u2713", justify="center", no_wrap=True, width=2)
+                empty.add_column("Why", style=self._DIM, overflow="ellipsis", max_width=why_w)
+            else:
+                empty.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
+                empty.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
+                empty.add_column("\u2713", justify="center", no_wrap=True, width=2)
+                empty.add_column("Why", style=self._DIM, ratio=2, overflow="ellipsis", min_width=40, max_width=68)
             empty.add_row("-", "—", "·", "no data")
-            return self._panel(empty, title="◬ SigFlow", theme="signal_flow")
+            title_empty = "\u25ec SigFlow"
+            if narrow and ui_cfg.get("sigflow_full"):
+                title_empty += " [s: summary]"
+            return self._panel(empty, title=title_empty, theme="signal_flow")
 
         sorted_pairs = sorted(flow_snapshot.items(), key=lambda kv: str(kv[0] or ""))
         total_pairs = len(sorted_pairs)
@@ -1158,6 +1435,7 @@ class CLICommandCenter:
             ("machete_v8b_lite", "MacheteV8bLite"),
             ("simple_scalp_plus", "SimpleScalpPlus"),
         )
+        why_max_narrow = max(14, _term_w - 22)
 
         def _new_strategy_table() -> Table:
             strategy_table = Table(
@@ -1167,17 +1445,28 @@ class CLICommandCenter:
                 padding=(0, 0),
                 pad_edge=False,
             )
-            strategy_table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
-            strategy_table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
-            strategy_table.add_column("\u2713", justify="center", no_wrap=True, width=2)
-            strategy_table.add_column(
-                "Why",
-                style=self._DIM,
-                ratio=2,
-                overflow="ellipsis",
-                min_width=48,
-                max_width=96,
-            )
+            if narrow:
+                strategy_table.add_column("Pair", style=self._WHITE, no_wrap=True, min_width=10)
+                strategy_table.add_column("Stp", style=self._DIM, no_wrap=True, width=4)
+                strategy_table.add_column("\u2713", justify="center", no_wrap=True, width=2)
+                strategy_table.add_column(
+                    "Why",
+                    style=self._DIM,
+                    overflow="ellipsis",
+                    max_width=why_max_narrow,
+                )
+            else:
+                strategy_table.add_column("Pair", style=self._WHITE, max_width=8, no_wrap=True)
+                strategy_table.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
+                strategy_table.add_column("\u2713", justify="center", no_wrap=True, width=2)
+                strategy_table.add_column(
+                    "Why",
+                    style=self._DIM,
+                    ratio=2,
+                    overflow="ellipsis",
+                    min_width=48,
+                    max_width=96,
+                )
             return strategy_table
 
         tables: Dict[str, Table] = {key: _new_strategy_table() for key, _ in strategy_headers}
@@ -1194,21 +1483,30 @@ class CLICommandCenter:
             if not isinstance(steps_dict, dict):
                 steps_dict = {}
 
-            symbol_label = self._short_symbol_label(pair or "-")
-            pair_cell = Text.assemble((symbol_label, self._WHITE), (" " + time_only, self._DIM))
+            sym_full = str(pair or "-").strip().upper()
+            if narrow:
+                pair_cell = Text(sym_full, style=self._WHITE)
+            else:
+                symbol_label = self._short_symbol_label(pair or "-")
+                pair_cell = Text.assemble((symbol_label, self._WHITE), (" " + time_only, self._DIM))
+
+            st_cell = "St" if narrow else "Strat"
 
             for strategy_key, _title in strategy_headers:
                 step_key = f"Strategy:{strategy_key}"
                 step_data = steps_dict.get(step_key)
                 if not isinstance(step_data, dict):
-                    tables[strategy_key].add_row(pair_cell, "Strat", Text("\u00b7", style=self._DIM), "warmup")
+                    tables[strategy_key].add_row(pair_cell, st_cell, Text("\u00b7", style=self._DIM), "warmup")
                     continue
 
                 result_raw = str(step_data.get("result") or "").upper()
                 reason_raw = str(step_data.get("reason") or "")
-                why = self._humanize_signal_flow_reason(
-                    step_key, result_raw, reason_raw, max_len=CLICommandCenter._SIGFLOW_WHY_MAX_LEN
-                )
+                if narrow:
+                    why = self._sigflow_short_why(reason_raw, result_raw, max_len=why_max_narrow)
+                else:
+                    why = self._humanize_signal_flow_reason(
+                        step_key, result_raw, reason_raw, max_len=CLICommandCenter._SIGFLOW_WHY_MAX_LEN
+                    )
 
                 if result_raw == "PASS":
                     result_cell = Text("\u2713", style=f"bold {self._GREEN}")
@@ -1226,7 +1524,7 @@ class CLICommandCenter:
                 else:
                     result_cell = Text("\u00b7", style=self._DIM)
 
-                tables[strategy_key].add_row(pair_cell, "Strat", result_cell, why)
+                tables[strategy_key].add_row(pair_cell, st_cell, result_cell, why)
 
         blocks: List[Any] = []
         top_summary = Text.assemble(
@@ -1247,17 +1545,20 @@ class CLICommandCenter:
                 (str(strategy_stats["pass"]), f"bold {self._GREEN}"),
                 (" \u2717", f"bold {self._RED}"),
                 (str(strategy_stats["reject"]), f"bold {self._RED}"),
-                (" \u2502 BUY ", self._DIM),
-                (str(strategy_stats["buy"]), f"bold {self._GREEN}"),
-                ("  SELL ", self._DIM),
+                (" \u2502 SELL ", self._DIM),
                 (str(strategy_stats["sell"]), f"bold {self._RED}"),
+                ("  BUY ", self._DIM),
+                (str(strategy_stats["buy"]), f"bold {self._GREEN}"),
             )
             blocks.append(strategy_summary)
             blocks.append(tables[strategy_key])
             if idx < len(strategy_headers) - 1:
                 blocks.append(Text("", style=self._DIM))
 
-        return self._panel(Group(*blocks), title="\u25ec SigFlow", theme="signal_flow")
+        flow_title = "\u25ec SigFlow"
+        if narrow and ui_cfg.get("sigflow_full"):
+            flow_title += " [s: summary]"
+        return self._panel(Group(*blocks), title=flow_title, theme="signal_flow")
 
     def _build_recent_events_panel(self, snapshot: Dict[str, Any]) -> Panel:
         rows = list(snapshot.get("recent_events") or [])

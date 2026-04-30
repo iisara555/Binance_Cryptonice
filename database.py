@@ -217,6 +217,12 @@ class Database:
         ALTER TABLE so the ORM insert logic doesn't crash.
         """
         migrations = {
+            "positions": [
+                ("strategy_source", "VARCHAR(64)"),
+                ("filled", "BOOLEAN DEFAULT 0"),
+                ("filled_amount", "FLOAT DEFAULT 0"),
+                ("filled_price", "FLOAT DEFAULT 0"),
+            ],
             "prices": [
                 ("timeframe", "TEXT DEFAULT '1h'"),
             ],
@@ -254,6 +260,8 @@ class Database:
 
                 if table_name == "trades":
                     self._migrate_legacy_trade_pnl(cursor, existing)
+                elif table_name == "positions":
+                    self._backfill_position_strategy_source(cursor)
 
             self._migrate_prices_schema(cursor)
             conn.commit()
@@ -261,6 +269,42 @@ class Database:
             _logger.error("[Migration] Schema migration error: %s", e, exc_info=True)
         finally:
             conn.close()
+
+    def _backfill_position_strategy_source(self, cursor: sqlite3.Cursor) -> None:
+        """Label legacy synthetic/manual positions so the CLI Source column survives restarts."""
+        try:
+            cursor.execute("PRAGMA table_info(positions)")
+            existing = {row[1] for row in cursor.fetchall()}
+            if "strategy_source" not in existing:
+                return
+            cursor.execute(
+                """
+                UPDATE positions
+                SET strategy_source = 'bootstrap'
+                WHERE (strategy_source IS NULL OR strategy_source = '')
+                  AND order_id LIKE 'bootstrap_%'
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE positions
+                SET strategy_source = 'manual'
+                WHERE (strategy_source IS NULL OR strategy_source = '')
+                  AND order_id LIKE 'manual_%'
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE positions
+                SET filled = 1,
+                    filled_amount = CASE WHEN COALESCE(filled_amount, 0) > 0 THEN filled_amount ELSE amount END,
+                    filled_price = CASE WHEN COALESCE(filled_price, 0) > 0 THEN filled_price ELSE entry_price END
+                WHERE order_id LIKE 'bootstrap_%'
+                   OR order_id LIKE 'manual_%'
+                """
+            )
+        except Exception as exc:
+            _logger.debug("[Migration] Failed to backfill positions.strategy_source: %s", exc)
 
     def _migrate_legacy_trade_pnl(self, cursor: sqlite3.Cursor, existing_columns: set[str]) -> None:
         """Backfill realized_pnl from legacy pnl column when upgrading older trade tables."""
@@ -999,7 +1043,12 @@ class Database:
                     row.total_entry_cost = pos_data.get("total_entry_cost", 0)
                     row.is_partial_fill = pos_data.get("is_partial_fill", False)
                     row.remaining_amount = pos_data.get("remaining_amount", 0)
+                    row.filled = bool(pos_data.get("filled", False))
+                    row.filled_amount = pos_data.get("filled_amount", 0)
+                    row.filled_price = pos_data.get("filled_price", 0)
                     row.trailing_peak = pos_data.get("trailing_peak")
+                    if "strategy_source" in pos_data:
+                        row.strategy_source = pos_data.get("strategy_source")
                     if opened_at is not None:
                         row.opened_at = opened_at
                     session.commit()
@@ -1028,7 +1077,11 @@ class Database:
                     total_entry_cost=pos_data.get("total_entry_cost", 0),
                     is_partial_fill=pos_data.get("is_partial_fill", False),
                     remaining_amount=pos_data.get("remaining_amount", 0),
+                    filled=bool(pos_data.get("filled", False)),
+                    filled_amount=pos_data.get("filled_amount", 0),
+                    filled_price=pos_data.get("filled_price", 0),
                     trailing_peak=pos_data.get("trailing_peak"),
+                    strategy_source=pos_data.get("strategy_source"),
                     opened_at=opened_at,
                 )
                 session.add(position)
@@ -1134,6 +1187,23 @@ class Database:
             positions = session.query(Position).all()
             result = []
             for p in positions:
+                strategy_source = getattr(p, "strategy_source", None)
+                if not strategy_source:
+                    order_key = str(p.order_id or "")
+                    if order_key.startswith("bootstrap_"):
+                        strategy_source = "bootstrap"
+                    elif order_key.startswith("manual_"):
+                        strategy_source = "manual"
+                filled = bool(getattr(p, "filled", False))
+                order_key = str(p.order_id or "")
+                if not filled and (order_key.startswith("bootstrap_") or order_key.startswith("manual_")):
+                    filled = True
+                filled_amount = getattr(p, "filled_amount", 0.0) or 0.0
+                filled_price = getattr(p, "filled_price", 0.0) or 0.0
+                if filled and filled_amount <= 0:
+                    filled_amount = p.amount or 0.0
+                if filled and filled_price <= 0:
+                    filled_price = p.entry_price or 0.0
                 result.append(
                     {
                         "order_id": p.order_id,
@@ -1146,9 +1216,12 @@ class Database:
                         "total_entry_cost": p.total_entry_cost or 0,
                         "is_partial_fill": p.is_partial_fill or False,
                         "remaining_amount": p.remaining_amount or 0,
+                        "filled": filled,
+                        "filled_amount": filled_amount,
+                        "filled_price": filled_price,
                         "trailing_peak": p.trailing_peak,
+                        "strategy_source": strategy_source,
                         "timestamp": p.opened_at or p.updated_at,
-                        "filled": False,
                     }
                 )
             return result

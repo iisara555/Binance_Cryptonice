@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from dynamic_coin_config import _build_pair, _extract_supported_pairs
 from helpers import extract_base_asset, normalize_side_value
 from state_management import TradeLifecycleState
 from trade_executor import OrderSide
@@ -13,10 +14,193 @@ from trading.coercion import coerce_trade_float as _coerce_trade_float
 
 logger = logging.getLogger(__name__)
 
+_QUOTE_ASSETS_FOR_WALLET_BOOTSTRAP = frozenset({"USDT", "THB", "BUSD", "FDUSD", "EUR"})
+_SYNTHETIC_ORDER_PREFIXES = ("bootstrap_", "manual_")
+
+
+def _remote_order_id(row: Any) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("orderId") or row.get("id") or row.get("order_id") or "").strip()
+
+
+def _local_order_id(row: Dict[str, Any]) -> str:
+    return str((row or {}).get("order_id") or (row or {}).get("id") or "").strip()
+
+
+def _is_exchange_open_candidate(row: Dict[str, Any]) -> bool:
+    """True for pending exchange orders, false for filled wallet positions."""
+    order_id = _local_order_id(row)
+    if not order_id or order_id.startswith(_SYNTHETIC_ORDER_PREFIXES):
+        return False
+
+    side = normalize_side_value((row or {}).get("side"))
+    filled = bool((row or {}).get("filled"))
+    partial = bool((row or {}).get("is_partial_fill"))
+
+    if side == "sell":
+        return True
+    if partial:
+        return True
+    return not filled
+
+
+def _fetch_exchange_open_order_ids(bot: Any, symbols: List[str]) -> set[str]:
+    api_client = getattr(bot, "api_client", None)
+    if api_client is None or not hasattr(api_client, "get_open_orders"):
+        return set()
+
+    try:
+        rows = api_client.get_open_orders()
+        return {_remote_order_id(row) for row in list(rows or []) if _remote_order_id(row)}
+    except TypeError:
+        pass
+    except Exception as exc:
+        logger.debug("[OrderReconcile] Fetch-all open orders unavailable, falling back per symbol: %s", exc)
+
+    remote_ids: set[str] = set()
+    for symbol in sorted({str(sym or "").upper() for sym in symbols if str(sym or "").strip()}):
+        try:
+            rows = api_client.get_open_orders(symbol)
+        except Exception as exc:
+            logger.warning("[OrderReconcile] Failed to fetch open orders for %s: %s", symbol, exc)
+            continue
+        remote_ids.update({_remote_order_id(row) for row in list(rows or []) if _remote_order_id(row)})
+    return remote_ids
+
+
+def reconcile_open_orders_with_exchange(bot: Any, *, source: str = "runtime") -> int:
+    """
+    Remove pending local exchange orders that no longer exist in Binance open orders.
+
+    Filled wallet positions remain in the Position Book; only pending BUY/SELL exchange orders
+    are compared against Binance's open-order endpoint.
+    """
+    if bool((getattr(bot, "config", {}) or {}).get("auth_degraded", False)):
+        logger.info("[OrderReconcile] skipped in auth degraded mode")
+        return 0
+
+    executor = getattr(bot, "executor", None)
+    db = getattr(bot, "db", None)
+    if executor is None:
+        return 0
+
+    local_rows = list(executor.get_open_orders() or [])
+    pending_rows = [row for row in local_rows if isinstance(row, dict) and _is_exchange_open_candidate(row)]
+    if not pending_rows:
+        logger.debug("[OrderReconcile] %s: no pending exchange orders to reconcile", source)
+        return 0
+
+    remote_ids = _fetch_exchange_open_order_ids(
+        bot,
+        [str(row.get("symbol") or "") for row in pending_rows],
+    )
+    removed = 0
+    for row in pending_rows:
+        order_id = _local_order_id(row)
+        if not order_id or order_id in remote_ids:
+            continue
+
+        logger.warning(
+            "[OrderReconcile] Ghost order detected during %s: %s %s id=%s -> marking cancelled",
+            source,
+            row.get("symbol"),
+            normalize_side_value(row.get("side")),
+            order_id,
+        )
+
+        if db is not None:
+            row_db_id = row.get("id")
+            if row_db_id:
+                try:
+                    db.update_order_status(int(row_db_id), "cancelled")
+                except Exception as exc:
+                    logger.warning("[OrderReconcile] Failed to mark order row %s cancelled: %s", row_db_id, exc)
+            try:
+                db.delete_position(order_id)
+            except Exception as exc:
+                logger.warning("[OrderReconcile] Failed to delete ghost position %s: %s", order_id, exc)
+
+        state_manager = getattr(bot, "_state_manager", None)
+        symbol = str(row.get("symbol") or "").upper()
+        if state_manager is not None and symbol:
+            try:
+                snapshot = state_manager.get_state(symbol)
+                if str(getattr(snapshot, "entry_order_id", "") or "") == order_id:
+                    state_manager.cancel_pending_buy(symbol, "ghost order missing on exchange")
+                elif str(getattr(snapshot, "exit_order_id", "") or "") == order_id:
+                    state_manager.restore_in_position(symbol, "ghost sell order missing on exchange")
+            except Exception as exc:
+                logger.debug("[OrderReconcile] State cleanup skipped for %s: %s", order_id, exc)
+
+        with executor._orders_lock:
+            executor._open_orders.pop(order_id, None)
+        removed += 1
+
+    if removed:
+        executor.sync_open_orders_from_db()
+    logger.info("[OrderReconcile] %s complete | removed=%d pending=%d remote=%d", source, removed, len(pending_rows), len(remote_ids))
+    return removed
+
 
 class StartupRuntimeHelper:
     def __init__(self, bot: Any) -> None:
         self.bot = bot
+
+    @staticmethod
+    def _infer_quote_asset_from_pairs(pairs: List[str]) -> str:
+        for raw in pairs or []:
+            p = str(raw or "").upper()
+            if p.endswith("USDT") and "_" not in p:
+                return "USDT"
+            if p.startswith("THB_"):
+                return "THB"
+        return "USDT"
+
+    def _wallet_extra_bootstrap_pairs(self, balances: Dict[str, Any], base_pairs: List[str]) -> List[str]:
+        """Pairs with spot balance but missing from the dynamic pair list (e.g. whitelist drift)."""
+        if not isinstance(balances, dict):
+            return []
+        quote = self._infer_quote_asset_from_pairs(base_pairs)
+        supported: set[str] = set()
+        try:
+            supported = _extract_supported_pairs(self.bot.api_client.get_symbols() or [], quote)
+        except Exception as exc:
+            logger.warning("[Bootstrap Positions] Wallet pair expansion skipped (exchange symbols): %s", exc)
+            return []
+        if not supported:
+            return []
+
+        seen = {str(p).upper() for p in base_pairs if str(p).strip()}
+        extras: List[str] = []
+        for asset_raw, payload in balances.items():
+            asset = str(asset_raw or "").upper().strip()
+            if not asset or asset in _QUOTE_ASSETS_FOR_WALLET_BOOTSTRAP:
+                continue
+            if isinstance(payload, dict):
+                total = float(payload.get("available", 0) or 0) + float(payload.get("reserved", 0) or 0)
+            else:
+                try:
+                    total = float(payload or 0)
+                except (TypeError, ValueError):
+                    total = 0.0
+            if total <= 0:
+                continue
+            candidate = _build_pair(asset, quote)
+            if not candidate or candidate in seen:
+                continue
+            if candidate not in supported:
+                continue
+            extras.append(candidate)
+            seen.add(candidate)
+
+        if extras:
+            logger.info(
+                "[Bootstrap Positions] Wallet holdings add %d pair(s) not in runtime list: %s",
+                len(extras),
+                extras,
+            )
+        return extras
 
     def bootstrap_held_coin_history(self) -> None:
         tracked_pairs = [pair.upper() for pair in self.bot._get_trading_pairs()]
@@ -57,16 +241,18 @@ class StartupRuntimeHelper:
         balances: Optional[Dict[str, Any]] = None,
         target_pairs: Optional[List[str]] = None,
     ) -> List[str]:
-        tracked_pairs = [pair.upper() for pair in (target_pairs or self.bot._get_trading_pairs())]
-        if not tracked_pairs:
-            return []
-
         if balances is None:
             try:
                 balances = self.bot.api_client.get_balances()
             except Exception as exc:
                 logger.warning("[Bootstrap Positions] Cannot fetch balances: %s", exc)
                 return []
+
+        base_pairs = [pair.upper() for pair in (target_pairs or self.bot._get_trading_pairs())]
+        wallet_extras = self._wallet_extra_bootstrap_pairs(balances, base_pairs)
+        tracked_pairs = list(dict.fromkeys([*base_pairs, *wallet_extras]))
+        if not tracked_pairs:
+            return []
 
         tracked_symbols = {
             str(order.get("symbol", "")).upper() for order in self.bot.executor.get_open_orders() if order.get("symbol")
@@ -143,6 +329,7 @@ class StartupRuntimeHelper:
                 "filled_amount": total_qty,
                 "filled_price": entry_price,
                 "bootstrap_source": bootstrap_source,
+                "strategy_source": "bootstrap",
             }
 
             self.bot.executor.register_tracked_position(synthetic_id, pos_data)
@@ -264,6 +451,9 @@ class StartupRuntimeHelper:
                 handled_order_ids.add(tracked_order_id)
 
         return handled_order_ids
+
+    def reconcile_open_orders_with_exchange(self, source: str = "startup") -> int:
+        return reconcile_open_orders_with_exchange(self.bot, source=source)
 
     def reconcile_on_startup(self) -> None:
         logger.info("╔══════════════════════════════════════════════════════╗")

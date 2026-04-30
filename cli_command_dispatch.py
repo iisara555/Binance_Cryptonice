@@ -30,6 +30,7 @@ class CliCommandDispatcher:
             "  ui\n"
             "  ui log <debug|info|warning|error|critical>\n"
             "  ui footer <compact|verbose>\n"
+            "  sigflow | sf | s   (toggle full SigFlow table vs compact summary; Windows: key s)\n"
             "  buy <PAIR> <QUOTE_AMOUNT>\n"
             "  track <PAIR> <COIN_AMOUNT> <ENTRY_PRICE>\n"
             "  sell <PAIR> <COIN_AMOUNT>\n"
@@ -124,6 +125,19 @@ class CliCommandDispatcher:
                 result = app.set_runtime_risk_pct(float(args[1]))
                 return f"Runtime risk updated to {result['risk_pct']:.2f}% per trade ({result['risk_level']})"
             return "Usage: risk show | risk set <percent>"
+
+        if command in {"sigflow", "sf", "s"}:
+            if args and args[0].lower() in {"full", "on", "1", "true", "yes"}:
+                app._cli_sigflow_full = True
+            elif args and args[0].lower() in {"compact", "off", "0", "false", "no"}:
+                app._cli_sigflow_full = False
+            else:
+                app._cli_sigflow_full = not bool(getattr(app, "_cli_sigflow_full", False))
+            return (
+                "SigFlow: full pair table (all strategies)"
+                if app._cli_sigflow_full
+                else "SigFlow: compact summary (PASS lines + counts; type sigflow again or s to expand)"
+            )
 
         if command == "ui":
             if not args:

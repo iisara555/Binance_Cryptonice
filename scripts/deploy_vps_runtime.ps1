@@ -39,6 +39,8 @@ $runtimeFiles = @(
     'trade_executor.py',
     'balance_monitor.py',
     'database.py',
+    'models.py',
+    'monitoring.py',
     'multi_timeframe.py',
     'risk_management.py',
     'signal_generator.py',

@@ -171,6 +171,7 @@ class TradingBotApp:
         self._cli_suggestion_limit = 5
         self._cli_log_level_filter = "INFO"
         self._cli_footer_mode = "compact"
+        self._cli_sigflow_full = False  # Narrow dashboard: compact SigFlow; True = full pair table (toggle: s / sigflow)
         self._restart_requested = False
         self._restart_reason = ""
         self._restart_lock = threading.Lock()
@@ -846,6 +847,12 @@ class TradingBotApp:
                         continue
                     if key == "\t":
                         self._accept_cli_suggestion()
+                        continue
+                    if key in {"s", "S"}:
+                        self._cli_sigflow_full = not bool(getattr(self, "_cli_sigflow_full", False))
+                        self._set_cli_chat_status(
+                            "SigFlow: full table" if self._cli_sigflow_full else "SigFlow: compact summary"
+                        )
                         continue
                     if key == "\x1b":
                         with self._cli_chat_lock:

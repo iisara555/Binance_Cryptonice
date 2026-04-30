@@ -253,8 +253,30 @@ class ReconciliationState:
     def _extract_order_id(order: Any) -> str:
         if not isinstance(order, dict):
             return ""
-        value = order.get("order_id") or order.get("id")
+        value = order.get("order_id") or order.get("id") or order.get("orderId")
         return str(value or "").strip()
+
+    @staticmethod
+    def _side_value(order: Any) -> str:
+        if not isinstance(order, dict):
+            return ""
+        raw = order.get("side")
+        if hasattr(raw, "value"):
+            raw = raw.value
+        return str(raw or "").strip().lower()
+
+    def _requires_exchange_open_order(self, order: Any) -> bool:
+        """Filled wallet positions are not expected to appear in Binance openOrders."""
+        if not isinstance(order, dict):
+            return False
+        order_id = self._extract_order_id(order)
+        if not order_id or order_id.startswith(("bootstrap_", "manual_")):
+            return False
+        if self._side_value(order) == "sell":
+            return True
+        if bool(order.get("is_partial_fill")):
+            return True
+        return not bool(order.get("filled"))
 
     def _fetch_exchange_orders(self, bot_positions: List[Any], api_client: Any) -> List[Any]:
         symbols = sorted(
@@ -295,13 +317,18 @@ class ReconciliationState:
         try:
             # Get bot's view of positions
             bot_positions = list(executor.get_open_orders() or [])
+            pending_exchange_orders = [
+                order for order in bot_positions if self._requires_exchange_open_order(order)
+            ]
             issues: List[str] = []
 
             if len(bot_positions) > 10:
                 issues.append(f"Unusually high position count: {len(bot_positions)}")
 
-            remote_orders = self._fetch_exchange_orders(bot_positions, api_client)
-            bot_order_ids = {self._extract_order_id(order) for order in bot_positions if self._extract_order_id(order)}
+            remote_orders = self._fetch_exchange_orders(pending_exchange_orders, api_client)
+            bot_order_ids = {
+                self._extract_order_id(order) for order in pending_exchange_orders if self._extract_order_id(order)
+            }
             remote_order_ids = {
                 self._extract_order_id(order) for order in remote_orders if self._extract_order_id(order)
             }
@@ -312,8 +339,10 @@ class ReconciliationState:
                     issues.append(f"Bot orders missing on exchange: {', '.join(missing_on_exchange[:3])}")
                 if unexpected_on_exchange:
                     issues.append(f"Exchange-only open orders detected: {', '.join(unexpected_on_exchange[:3])}")
-            elif len(bot_positions) != len(remote_orders):
-                issues.append(f"Open-order count mismatch: bot={len(bot_positions)} exchange={len(remote_orders)}")
+            elif len(pending_exchange_orders) != len(remote_orders):
+                issues.append(
+                    f"Open-order count mismatch: bot={len(pending_exchange_orders)} exchange={len(remote_orders)}"
+                )
 
             self._replace_issues(issues)
             if issues:

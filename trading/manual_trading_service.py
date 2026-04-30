@@ -141,8 +141,16 @@ class ManualTradingService:
             raise ValueError("Tracked amount must be greater than 0")
         if avg_cost <= 0:
             raise ValueError("Tracked entry price must be greater than 0")
-        if (quantity * avg_cost) < 15.0:
-            raise ValueError("Tracked position value must be at least 15 quote")
+        min_quote = 15.0
+        bot = getattr(app, "bot", None)
+        if bot is not None:
+            try:
+                min_quote = float(getattr(bot, "min_trade_value_thb", min_quote) or min_quote)
+            except (TypeError, ValueError):
+                min_quote = 15.0
+        notion = quantity * avg_cost
+        if notion < min_quote:
+            raise ValueError(f"Tracked position value {notion:.2f} quote is below min_trade_value ({min_quote:.2f})")
 
         active_orders = app.list_active_orders()
         existing = next((order for order in active_orders if order.get("symbol") == symbol), None)
@@ -167,6 +175,7 @@ class ManualTradingService:
             "filled_price": avg_cost,
             "trigger": "manual_import",
             "notes": "cli_manual_track",
+            "strategy_source": "manual",
         }
         app.executor.register_tracked_position(position_id, tracked_payload)
         if app.api_client:

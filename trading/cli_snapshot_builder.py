@@ -587,6 +587,7 @@ def get_cli_snapshot(app, bot_name: Optional[str] = None) -> Dict[str, Any]:
         "ui": {
             "log_level_filter": str(app._cli_log_level_filter or "INFO"),
             "footer_mode": str(app._cli_footer_mode or "compact"),
+            "sigflow_full": bool(getattr(app, "_cli_sigflow_full", False)),
         },
         "updated_at": now_exchange_time().strftime("%H:%M:%S"),
         "signal_alignment": signal_alignment,

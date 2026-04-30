@@ -63,6 +63,11 @@ class ManagedLifecycleHelper:
         filled_amount: float,
         filled_price: float,
     ) -> None:
+        raw_sig = str(snapshot.signal_source or "").strip()
+        if not raw_sig or raw_sig.lower() == "strategy":
+            strat_label = "-"
+        else:
+            strat_label = raw_sig
         pos_data = {
             "symbol": snapshot.symbol,
             "side": OrderSide.BUY,
@@ -78,6 +83,7 @@ class ManagedLifecycleHelper:
             "filled_amount": filled_amount,
             "filled_price": filled_price,
             "state_managed": True,
+            "strategy_source": strat_label,
         }
         self.bot.executor.register_tracked_position(snapshot.entry_order_id, pos_data)
         self.bot._register_sl_hold_entry(snapshot.entry_order_id)
@@ -219,11 +225,16 @@ class ManagedLifecycleHelper:
 
         self.bot._remember_consumed_signal_trigger(decision.signal)
 
+        entry_strategy = self.bot.executor._resolve_strategy_source(decision.plan.strategy_votes)
+        state_signal_source = (
+            entry_strategy if entry_strategy != "-" else str(self.bot.signal_source.value)
+        )
+
         snapshot = self.bot._state_manager.start_pending_buy(
             decision.plan.symbol,
             decision.plan,
             result,
-            signal_source=self.bot.signal_source.value,
+            signal_source=state_signal_source,
         )
         if result.status == OrderStatus.FILLED and result.filled_amount > 0:
             filled_price = float(result.filled_price or decision.plan.entry_price or 0.0)

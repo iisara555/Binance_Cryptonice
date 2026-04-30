@@ -43,7 +43,10 @@ class PositionBootstrapHelper:
         self,
         balance_state: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
-        """Drop filled tracked positions whose base-asset balance is gone on the exchange."""
+        """Drop filled tracked positions whose base-asset balance is gone on the exchange.
+
+        Works for any pair format understood by ``extract_base_asset`` (e.g. ``BTCUSDT``, ``THB_BTC``).
+        """
         b = self._bot
         if not b.executor:
             return []
@@ -58,7 +61,7 @@ class PositionBootstrapHelper:
         for position in b.executor.get_open_orders() or []:
             symbol = str(position.get("symbol") or "").upper()
             order_id = str(position.get("order_id") or "")
-            if not symbol or not order_id or "_" not in symbol:
+            if not symbol or not order_id:
                 continue
 
             side = normalize_side_value(position.get("side"))
@@ -95,6 +98,9 @@ class PositionBootstrapHelper:
                         continue
 
             base_asset = extract_base_asset(symbol)
+            if not base_asset:
+                continue
+
             balance_total = b._extract_total_balance(snapshot, base_asset)
             tracked_amount = max(filled_amount, amount, remaining_amount, 0.0)
             dust_threshold = min(max(tracked_amount * 0.01, 1e-8), 1e-6)
