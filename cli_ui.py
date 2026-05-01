@@ -130,6 +130,11 @@ class CLICommandCenter:
         term_width, term_height = self._layout_term_dimensions(self.console)
         return term_width < 140 or term_height < 30
 
+    def _terminal_tablet_mode(self) -> bool:
+        """True for tablet range (100–139 wide, ≥30 tall) — 2-column layout with wide logs."""
+        term_width, term_height = self._layout_term_dimensions(self.console)
+        return 100 <= term_width < 140 and term_height >= 30
+
     @staticmethod
     def _layout_term_dimensions(console: Any) -> tuple[int, int]:
         """Width/height for layout decisions.
@@ -302,6 +307,7 @@ class CLICommandCenter:
         # Adaptive footer size: compact chat area while preserving input visibility.
         term_width, term_height = self._layout_term_dimensions(self.console)
         compact_mode = self._terminal_compact_mode()
+        tablet_mode = self._terminal_tablet_mode()
         footer_size = self._resolve_footer_size(term_width, term_height, footer_mode)
 
         layout = Layout(name="root")
@@ -317,12 +323,27 @@ class CLICommandCenter:
                 Layout(name="body"),
                 Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
             )
-        if compact_mode:
-            layout["body"].split_column(
+        if tablet_mode:
+            # Tablet: 2-column — left: positions+risk+sigflow, right: logs (full height = wider)
+            layout["body"].split_row(
+                Layout(name="left", ratio=3),
+                Layout(name="right", ratio=2),
+            )
+            layout["left"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), ratio=4, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_panel(snapshot), ratio=2, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, max_lines=3), ratio=2, name="logs"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=3, name="signal_flow"),
+            )
+            layout["right"].split_column(
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=30), name="logs"),
+            )
+        elif compact_mode:
+            # Mobile: stacked single-column — equal 3:3:3 ratios fill portrait height evenly
+            layout["body"].split_column(
+                Layout(self._build_mobile_position_book(snapshot), ratio=3, name="positions"),
+                Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=3, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=15), ratio=3, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -399,18 +420,19 @@ class CLICommandCenter:
             padding=(0, 0),
         )
 
-    def _get_filtered_log_rows(self, min_level: str) -> List[Dict[str, str]]:
+    def _get_filtered_log_rows(self, min_level: str, n: int = 8) -> List[Dict[str, str]]:
         min_level_no = self._level_no(min_level)
 
         rows = list(self._last_log_rows_snapshot)
         if self._log_lock.acquire(blocking=False):
             try:
-                rows = list(self._log_lines)[-8:]
-                self._last_log_rows_snapshot = rows
+                rows = list(self._log_lines)[-max(n, 8):]
+                self._last_log_rows_snapshot = list(self._log_lines)[-8:]
             finally:
                 self._log_lock.release()
 
-        return [row for row in rows if self._level_no(row.get("level", "INFO")) >= min_level_no]
+        filtered = [row for row in rows if self._level_no(row.get("level", "INFO")) >= min_level_no]
+        return filtered[-n:]
 
     @staticmethod
     def _normalize_snapshot_for_signature(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -645,10 +667,10 @@ class CLICommandCenter:
         }
         return order.get(str(value or "").upper(), 20)
 
-    def _build_log_stream_panel(self, snapshot: Dict[str, Any], *, max_lines: Optional[int] = None) -> Panel:
+    def _build_log_stream_panel(self, snapshot: Dict[str, Any], *, max_lines: Optional[int] = None, n_buffer: int = 8) -> Panel:
         ui_cfg = dict(snapshot.get("ui") or {})
         min_level = str(ui_cfg.get("log_level_filter") or "INFO").upper()
-        rows = self._get_filtered_log_rows(min_level)
+        rows = self._get_filtered_log_rows(min_level, n=n_buffer)
         if max_lines is not None and max_lines > 0:
             rows = rows[-max_lines:]
 
