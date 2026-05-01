@@ -128,7 +128,8 @@ class SignalRuntimeHelper:
                     logger.info("[State] %s gated by execution state: %s", symbol, snapshot.state.value)
                     deps.last_state_gate_logged[symbol] = snapshot.state.value
                 lifecycle_gated = True
-            deps.last_state_gate_logged.pop(symbol, None)
+            else:
+                deps.last_state_gate_logged.pop(symbol, None)
 
         data = deps.get_market_data_for_symbol(symbol)
         if data is None or data.empty:
@@ -541,7 +542,7 @@ class SignalRuntimeHelper:
                 f"[SignalRuntime] %s %s signal rejected: ATR data unavailable (ATR=%s). "
                 f"Trade will be retried on next signal tick.",
                 symbol,
-                signal_type.upper(),
+                signal_type_value.upper(),
                 atr_value,
             )
             return None
