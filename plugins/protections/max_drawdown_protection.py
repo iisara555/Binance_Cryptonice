@@ -19,9 +19,29 @@ class MaxDrawdown(IProtection):
         super().__init__(config, protection_config)
 
         self._trade_limit = protection_config.get("trade_limit", 1)
-        self._max_allowed_drawdown = protection_config.get("max_allowed_drawdown", 0.0)
+        raw_drawdown = protection_config.get("max_allowed_drawdown", 0.0)
         self._calculation_mode = protection_config.get("calculation_mode", "ratios")
-        # TODO: Implement checks to limit max_drawdown to sensible values
+        
+        # Validate max_drawdown to sensible values (0.0 to 1.0 for ratios mode, 0.0 to inf for equity)
+        if self._calculation_mode == "ratios":
+            if not isinstance(raw_drawdown, (int, float)) or raw_drawdown < 0.0 or raw_drawdown > 1.0:
+                logger.warning(
+                    "Invalid max_allowed_drawdown %s for ratios mode (expected 0.0-1.0). Using 0.5.",
+                    raw_drawdown,
+                )
+                self._max_allowed_drawdown = 0.5
+            else:
+                self._max_allowed_drawdown = float(raw_drawdown)
+        else:
+            # Equity mode - negative drawdown doesn't make sense, cap at 0
+            if not isinstance(raw_drawdown, (int, float)) or raw_drawdown < 0.0:
+                logger.warning(
+                    "Invalid max_allowed_drawdown %s (expected >= 0). Using 0.0.",
+                    raw_drawdown,
+                )
+                self._max_allowed_drawdown = 0.0
+            else:
+                self._max_allowed_drawdown = float(raw_drawdown)
 
     def short_desc(self) -> str:
         """

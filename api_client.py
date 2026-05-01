@@ -328,7 +328,13 @@ def round_step(value: float, step: Any) -> float:
         d = Decimal(str(value))
     except Exception:
         return float(value)
-    return float(d.quantize(s, rounding=ROUND_DOWN))
+    # Use floor division instead of quantize to avoid trailing-zero precision
+    # issues: Binance TH returns stepSize strings like "0.000010" (6 decimal
+    # places) instead of "0.00001" (5).  quantize treats the trailing zero as
+    # significant and rounds to the wrong precision, producing e.g. 0.000149
+    # from 0.00014985 which then formats back up to "0.00015" — exceeding the
+    # actual available balance and causing -2018 errors.
+    return float((d // s) * s)
 
 
 def _format_decimal(value: float, precision: int = 8) -> str:
@@ -423,6 +429,12 @@ def _parse_exchange_symbol_entry(entry: Optional[Dict[str, Any]]) -> Dict[str, A
             if tv is not None:
                 filters["tickSizeStr"] = str(raw_tick).strip()
                 filters["tickSize"] = tv
+            try:
+                mp = float(f.get("maxPrice") or 0.0)
+                if mp > 0:
+                    filters["maxPrice"] = mp
+            except (TypeError, ValueError):
+                pass
         elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
             try:
                 mn = float(f.get("minNotional") or f.get("notional") or 0.0)
@@ -736,6 +748,7 @@ class BinanceThClient:
         return {
             "tick_size": str(f.get("tickSizeStr") or f.get("tickSize") or ""),
             "step_size": str(f.get("stepSizeStr") or f.get("stepSize") or ""),
+            "max_price": float(f.get("maxPrice") or 0.0),
             "_fallback": bool(f.get("_fallback")),
         }
 
@@ -962,7 +975,7 @@ class BinanceThClient:
             now = time.time()
             elapsed = now - self._last_request_time
             sleep_for = max(0.0, self._min_request_interval - elapsed)
-            self._last_request_time = now + sleep_for
+            self._last_request_time = now
         if sleep_for:
             time.sleep(sleep_for)
 
@@ -1596,7 +1609,7 @@ class BinanceThClient:
 
     def _stub_history(self, kind: str, *, as_dict: bool = False) -> Any:
         if not self._history_stub_warned.get(kind):
-            logger.warning(
+            logger.debug(
                 "[history] %s history unavailable on Binance.th — returning empty result "
                 "(SPEC_01 stub; revisit in a dedicated history SPEC).",
                 kind,

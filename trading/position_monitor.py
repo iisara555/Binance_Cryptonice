@@ -245,7 +245,7 @@ class PositionMonitorHelper:
                 exit_trigger=triggered,
             )
             if result.success:
-                from trade_executor import BITKUB_FEE_PCT
+                from execution import BINANCE_TH_FEE_PCT
 
                 now = datetime.now()
                 entry_cost = _resolve_sane_entry_cost(
@@ -254,9 +254,9 @@ class PositionMonitorHelper:
                     entry_price=entry_price,
                     reported_entry_cost=total_entry_cost,
                 )
-                entry_fee = entry_cost * BITKUB_FEE_PCT
+                entry_fee = entry_cost * BINANCE_TH_FEE_PCT
                 gross_exit = current_price * amount
-                exit_fee = gross_exit * BITKUB_FEE_PCT
+                exit_fee = gross_exit * BINANCE_TH_FEE_PCT
                 net_exit = gross_exit - exit_fee
                 total_fees = entry_fee + exit_fee
                 net_pnl = net_exit - entry_cost - entry_fee
@@ -456,7 +456,7 @@ class PositionMonitorHelper:
             )
 
             if result.success:
-                from trade_executor import BITKUB_FEE_PCT
+                from execution import BINANCE_TH_FEE_PCT
 
                 now = datetime.now()
                 entry_cost = _resolve_sane_entry_cost(
@@ -465,9 +465,9 @@ class PositionMonitorHelper:
                     entry_price=entry_price,
                     reported_entry_cost=_coerce_trade_float(pos.get("total_entry_cost"), 0.0),
                 )
-                entry_fee = entry_cost * BITKUB_FEE_PCT
+                entry_fee = entry_cost * BINANCE_TH_FEE_PCT
                 gross_exit = exit_price * amount
-                exit_fee = gross_exit * BITKUB_FEE_PCT
+                exit_fee = gross_exit * BINANCE_TH_FEE_PCT
                 net_exit = gross_exit - exit_fee
                 total_fees = entry_fee + exit_fee
                 net_pnl = net_exit - entry_cost - entry_fee

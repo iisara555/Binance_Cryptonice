@@ -64,7 +64,15 @@ from signal_generator import (
     ensure_signal_flow_record,
     get_latest_signal_flow_snapshot,
 )
-from strategies.adaptive_router import AdaptiveStrategyRouter, ModeDecision
+try:
+    from strategies.adaptive_router import AdaptiveStrategyRouter, ModeDecision
+except Exception as _strategy_import_err:
+    logging.getLogger(__name__).error(
+        "Failed to import AdaptiveStrategyRouter: %s — adaptive mode switching disabled",
+        _strategy_import_err,
+    )
+    AdaptiveStrategyRouter = None  # type: ignore[assignment,misc]
+    ModeDecision = None  # type: ignore[assignment,misc]
 from symbol_registry import set_whitelist_json_path
 from telegram_bot import TelegramBotHandler
 from trading.bootstrap_config import (

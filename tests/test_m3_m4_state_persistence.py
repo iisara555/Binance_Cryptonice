@@ -16,7 +16,7 @@ M4 — "Risk state file has no file locking":
 import json
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 
@@ -319,7 +319,7 @@ class TestM4RiskStateLocking:
     def test_record_trade_activity_refreshes_cooldown_without_incrementing_count(self, tmp_path):
         rm = _make_rm(tmp_path)
         rm._trade_count_today = 7
-        rm._daily_loss_date = datetime.now().date()
+        rm._daily_loss_date = datetime.now(timezone.utc).date()
         before = datetime.now()
 
         rm.record_trade_activity()
@@ -349,7 +349,11 @@ class TestM4RiskStateLocking:
         assert result.suggested_size == pytest.approx(66457.14, rel=0.01)
 
     def test_load_state_recovers_from_corrupt_file(self, tmp_path):
-        """load_state() must reset to safe defaults if the JSON is corrupt."""
+        """load_state() must reset to safe defaults if the JSON is corrupt.
+
+        _cooling_down is intentionally set to True (fail-closed) on corrupt state
+        so the bot does not exceed daily loss limits when the state file is unreadable.
+        """
         state_file = tmp_path / "risk_state.json"
         state_file.write_text("{INVALID JSON}")  # corrupt
 
@@ -362,7 +366,7 @@ class TestM4RiskStateLocking:
 
         assert result is False
         assert rm._trade_count_today == 0, "Corrupted state file must reset trade_count_today to safe default"
-        assert rm._cooling_down is False
+        assert rm._cooling_down is True, "Fail-closed: corrupt state must hold cooldown to avoid exceeding loss limits"
 
     def test_concurrent_save_and_load_no_deadlock(self, tmp_path):
         """A reader and multiple writers running concurrently must not deadlock."""

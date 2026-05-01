@@ -419,6 +419,7 @@ class TradingBotOrchestrator:
         }
         self._portfolio_cache = {"data": None, "timestamp": 0.0}
         self._portfolio_cache_lock = threading.Lock()
+        self._lightweight_mtm_cache: Optional[Dict[str, Any]] = None
         self._market_data_cache = {"data": None, "timestamp": 0.0}
         self._atr_cache = {"value": None, "timestamp": 0.0}
         self._multi_timeframe_status_cache = {"data": None, "timestamp": 0.0}

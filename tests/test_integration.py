@@ -668,6 +668,7 @@ class TestFullIntegrationFlow:
         """The bot should not reconcile or bootstrap live balances in degraded auth mode."""
         bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
         bot.running = False
+        bot.config = {}  # Required for startup code path at line 774
         bot._auth_degraded = True
         bot._auth_degraded_reason = "auth error 5"
         bot._candle_retention_enabled = False

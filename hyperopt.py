@@ -60,7 +60,8 @@ PROJECT_ROOT: Path = Path(__file__).parent
 DEFAULT_CONFIG_PATH: Path = PROJECT_ROOT / "bot_config.yaml"
 DEFAULT_RESULTS_DIR: Path = PROJECT_ROOT / "hyperopt_results"
 
-BINANCE_TH_ROUND_TRIP_FEE: float = 0.002  # 0.1% × 2 sides
+from execution import BINANCE_TH_ROUND_TRIP_FEE
+
 DEFAULT_INITIAL_CAPITAL: float = 10_000.0
 DEFAULT_TIMEFRAME: str = "15m"
 DEFAULT_ATR_PERIOD: int = 14

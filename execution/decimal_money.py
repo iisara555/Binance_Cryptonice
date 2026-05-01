@@ -10,7 +10,7 @@ from typing import Any
 BINANCE_TH_ROUND_TRIP_FEE = 0.002
 BINANCE_TH_FEE_PCT = BINANCE_TH_ROUND_TRIP_FEE / 2
 
-# Backward-compatible name used across runtime PnL paths.
+# Deprecated alias — this is a Binance Thailand bot; use BINANCE_TH_FEE_PCT in all new code.
 BITKUB_FEE_PCT = BINANCE_TH_FEE_PCT
 
 

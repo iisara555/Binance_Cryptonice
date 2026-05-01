@@ -201,11 +201,12 @@ class SignalRuntimeHelper:
             except Exception as exc:
                 logger.error(f"Failed to log signal to database: {exc}")
 
+        # FIX: Fetch portfolio once outside signal loop to reduce API calls
+        portfolio_for_signals = deps.get_portfolio_state()
+
         for signal in signals:
             if not isinstance(signal, AggregatedSignal):
                 continue
-
-            portfolio = deps.get_portfolio_state()
 
             signal_type = (
                 signal.signal_type.value.lower()
@@ -535,7 +536,14 @@ class SignalRuntimeHelper:
         entry_price = signal.avg_price
         atr_value = deps.get_latest_atr(symbol)
         if not atr_value or atr_value <= 0:
-            logger.debug(f"Trade rejected for {symbol}: ATR unavailable")
+            # Changed from debug to warning - trader should know why trade was skipped
+            logger.warning(
+                f"[SignalRuntime] %s %s signal rejected: ATR data unavailable (ATR=%s). "
+                f"Trade will be retried on next signal tick.",
+                symbol,
+                signal_type.upper(),
+                atr_value,
+            )
             return None
 
         if signal.avg_stop_loss and signal.avg_take_profit and signal.avg_stop_loss > 0 and signal.avg_take_profit > 0:

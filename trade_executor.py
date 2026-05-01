@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from execution import (
     BINANCE_TH_FEE_PCT,
     BINANCE_TH_ROUND_TRIP_FEE,
-    BITKUB_FEE_PCT,
     quantize_decimal,
     to_decimal,
 )
@@ -38,23 +37,26 @@ def _coerce_utc(dt: datetime) -> datetime:
 
 # Late-bound WS import (avoids circular dep at module load)
 _ws_mod = None
+_ws_mod_lock = threading.Lock()
 
 
 def _ws_ticker(symbol: str):
     """Get latest WS ticker, lazy-loading the module on first call."""
     global _ws_mod
     if _ws_mod is None:
-        try:
-            import binance_websocket as _bws
+        with _ws_mod_lock:
+            if _ws_mod is None:  # double-checked locking
+                try:
+                    import binance_websocket as _bws
 
-            _ws_mod = _bws
-        except ImportError:
-            try:
-                import bitkub_websocket as _bws
+                    _ws_mod = _bws
+                except ImportError:
+                    try:
+                        import bitkub_websocket as _bws
 
-                _ws_mod = _bws
-            except ImportError:
-                return None
+                        _ws_mod = _bws
+                    except ImportError:
+                        return None
     return _ws_mod.get_latest_ticker(symbol)
 
 

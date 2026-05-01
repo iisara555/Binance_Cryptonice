@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 BALANCE_RECONCILE_GRACE_SECONDS: float = 180.0  # 3 minutes
 
+_DUST_THRESHOLD_PCT: float = 0.01   # 1% of tracked amount
+_DUST_THRESHOLD_FLOOR: float = 1e-8  # absolute minimum threshold
+_DUST_THRESHOLD_CAP: float = 1e-6   # absolute maximum threshold
+
 
 def _normalize_balances_from_api(raw: Any) -> Dict[str, Dict[str, float]]:
     """Match ``TradingBotOrchestrator.get_balance_state`` normalization for reconcile."""
@@ -165,7 +169,7 @@ class PositionBootstrapHelper:
 
             balance_total = b._extract_total_balance(snapshot, base_asset)
             tracked_amount = max(filled_amount, amount, remaining_amount, 0.0)
-            dust_threshold = min(max(tracked_amount * 0.01, 1e-8), 1e-6)
+            dust_threshold = min(max(tracked_amount * _DUST_THRESHOLD_PCT, _DUST_THRESHOLD_FLOOR), _DUST_THRESHOLD_CAP)
             if balance_total > dust_threshold:
                 continue
 

@@ -85,7 +85,7 @@ def should_allow_voluntary_exit(
     if entry_cost <= 0:
         return True
 
-    from trade_executor import BITKUB_FEE_PCT
+    from execution import BINANCE_TH_FEE_PCT
 
     side_value = str(getattr(side, "value", side) or "buy").lower()
 
@@ -94,7 +94,7 @@ def should_allow_voluntary_exit(
         exit_price=exit_value,
         quantity=amount_value,
         side=side_value,
-        fee_pct=BITKUB_FEE_PCT,
+        fee_pct=BINANCE_TH_FEE_PCT,
     )
     net_pnl_pct = float(pnl.get("net_pnl_pct", 0.0) or 0.0)
     min_net_profit_pct = float(getattr(bot, "_min_voluntary_exit_net_profit_pct", 0.0) or 0.0)

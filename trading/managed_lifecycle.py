@@ -101,7 +101,7 @@ class ManagedLifecycleHelper:
         exit_price: float,
         price_source: str,
     ) -> None:
-        from trade_executor import BITKUB_FEE_PCT
+        from execution import BINANCE_TH_FEE_PCT
 
         amount = float(snapshot.filled_amount or 0.0)
         if amount <= 0:
@@ -114,9 +114,9 @@ class ManagedLifecycleHelper:
             entry_price=float(snapshot.entry_price or 0.0),
             reported_entry_cost=float(snapshot.total_entry_cost or 0.0),
         )
-        entry_fee = entry_cost * BITKUB_FEE_PCT
+        entry_fee = entry_cost * BINANCE_TH_FEE_PCT
         gross_exit = exit_price * amount
-        exit_fee = gross_exit * BITKUB_FEE_PCT
+        exit_fee = gross_exit * BINANCE_TH_FEE_PCT
         net_exit = gross_exit - exit_fee
         total_fees = entry_fee + exit_fee
         net_pnl = net_exit - entry_cost - entry_fee
@@ -622,6 +622,21 @@ class ManagedLifecycleHelper:
         if not position:
             logger.warning("[State] SELL signal for %s ignored: no open position found for managed exit", symbol)
             return False
+
+        # Guard: SELL signal must come from the same strategy that entered the position.
+        # Bootstrap positions (no entry_strategy_key) allow any SELL for backward compat.
+        entry_strategy_key = str(position.get("entry_strategy_key") or "").strip()
+        if entry_strategy_key and entry_strategy_key != "-":
+            sell_votes = decision.plan.strategy_votes if isinstance(decision.plan.strategy_votes, dict) else {}
+            sell_keys = set(sell_votes.keys())
+            if sell_keys and entry_strategy_key not in sell_keys:
+                logger.info(
+                    "[StrategyGate] SELL for %s blocked: position entered by '%s' but SELL from %s — cross-strategy exit prevented",
+                    symbol,
+                    entry_strategy_key,
+                    sell_keys,
+                )
+                return False
 
         position_id = str(position.get("order_id") or snapshot.entry_order_id or "")
         amount = float(position.get("remaining_amount") or position.get("amount") or snapshot.filled_amount or 0.0)

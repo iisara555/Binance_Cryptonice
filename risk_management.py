@@ -381,13 +381,14 @@ class RiskManager:
             logger.info(f"Risk state loaded from {load_path}")
             return True
         except Exception as e:
-            # On ANY error, reset to safe defaults to prevent stuck state
+            # On ANY error, reset to conservative defaults — fail-closed on cooldown to avoid
+            # exceeding daily loss limits when the state file is unreadable.
             logger.warning(f"Failed to load risk state ({e}) - resetting to safe defaults")
             self._daily_loss_start = None
             self._daily_loss_date = None
             self._trade_count_today = 0
             self._last_trade_time = None
-            self._cooling_down = False  # SAFE DEFAULT
+            self._cooling_down = True  # fail-closed: hold cooldown until state can be verified
             self._peak_portfolio_value = None
             return False
 
@@ -564,7 +565,7 @@ class RiskManager:
                 "\u0e44\u0e21\u0e48\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e01\u0e32\u0e23\u0e40\u0e17\u0e23\u0e14 (\u0e44\u0e21\u0e48\u0e1e\u0e1a\u0e02\u0e49\u0e2d\u0e21\u0e39\u0e25 ATR/Stop Loss)",
             )
 
-        if suggested < self.config.min_order_amount:
+        if suggested < self.config.min_order_amount - 1e-9:
             min_viable = self.config.min_order_amount * MIN_ORDER_BUFFER
             # Align with hard_cap / max_position_per_trade_pct (not a fixed 20%)
             if min_viable > hard_cap:

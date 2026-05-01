@@ -108,7 +108,7 @@ class ExecutionRuntimeHelper:
                         timeframe=deps.timeframe,
                     )
                     if not corr_gate.allowed:
-                        logger.warning(
+                        logger.info(
                             "🔗 [CorrelationGate] Trade blocked for %s: %s", decision.plan.symbol, corr_gate.reason
                         )
                         return

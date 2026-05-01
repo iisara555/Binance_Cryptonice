@@ -362,6 +362,26 @@ def resolve_runtime_trading_pairs(
     return filtered_pairs
 
 
+_REQUIRED_DICT_KEYS = ("trading", "risk", "strategies", "execution", "state_management")
+
+
+def _validate_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Warn if required dict-type config keys are missing or have wrong type after merge."""
+    for key in _REQUIRED_DICT_KEYS:
+        val = cfg.get(key)
+        if val is None:
+            logger.warning("Config missing required section '%s' — using empty dict; defaults may apply", key)
+            cfg[key] = {}
+        elif not isinstance(val, dict):
+            logger.error(
+                "Config section '%s' has unexpected type %s (expected dict) — resetting to empty dict",
+                key,
+                type(val).__name__,
+            )
+            cfg[key] = {}
+    return cfg
+
+
 def load_bot_config(config_path: str | PathLike[str] | None = None) -> Dict[str, Any]:
     """Load bot configuration from YAML or JSON file."""
     resolved_config_path = Path(config_path) if config_path is not None else PROJECT_ROOT / "bot_config.yaml"
@@ -374,14 +394,14 @@ def load_bot_config(config_path: str | PathLike[str] | None = None) -> Dict[str,
         import yaml
 
         with open(resolved_config_path, "r", encoding="utf-8") as f:
-            return apply_strategy_mode_profile(yaml.safe_load(f))
+            return _validate_config(apply_strategy_mode_profile(yaml.safe_load(f)))
     except ImportError:
         logger.warning("PyYAML not installed, trying JSON")
 
     json_path = resolved_config_path.with_suffix(".json")
     if json_path.exists():
         with open(json_path, "r", encoding="utf-8") as f:
-            return apply_strategy_mode_profile(json.load(f))
+            return _validate_config(apply_strategy_mode_profile(json.load(f)))
 
     logger.error(f"No valid config file found at {resolved_config_path}")
     return get_default_config()

@@ -42,7 +42,7 @@ from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-BINANCE_TH_ROUND_TRIP_FEE: float = 0.002
+from execution import BINANCE_TH_ROUND_TRIP_FEE
 
 
 class MinimalROI:

@@ -103,6 +103,10 @@ def run_trading_iteration(bot: Any) -> None:
             bot._auth_degraded_logged = True
         return
 
+    # Auth recovered — allow the warning to fire again on next degradation.
+    if getattr(bot, "_auth_degraded_logged", False):
+        bot._auth_degraded_logged = False
+
     if bot.api_client.is_circuit_open():
         logger.warning(
             "Circuit breaker is OPEN — skipping iteration. State: %s",

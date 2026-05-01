@@ -293,7 +293,7 @@ strategies:
     atr_multiplier: 1.8
     risk_reward: 2.0
     min_buy_confidence: 0.65
-    min_confirmations_buy: 1
+    min_confirmations_buy: 3
     min_confirmations_sell: 2
     vol_threshold: 0.8
     ssl_period: 10
@@ -313,10 +313,10 @@ strategies:
     custom_stoploss: "dynamic_bb_trailing_profit_divider"
     trailing_stop: true
     minimal_roi:
-      "0": 0.279
-      "92": 0.109
-      "245": 0.059
-      "561": 0.0
+      "0":   0.08
+      "60":  0.04
+      "120": 0.02
+      "240": 0.0
   simple_scalp_plus:
     enabled: true
     hull_period: 16
@@ -350,11 +350,10 @@ strategies:
     trailing_stop_positive_offset: 0.015
     trailing_only_offset_is_reached: true
     minimal_roi:
-      "60": 0.02
-      "30": 0.015
-      "20": 0.01
-      "0": 0.007
-      "10": -0.02
+      "0":  0.02
+      "20": 0.015
+      "30": 0.01
+      "60": 0.007
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:

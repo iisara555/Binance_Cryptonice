@@ -22,6 +22,25 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "unit: marks tests as unit tests")
     config.addinivalue_line("markers", "api: marks tests that require API calls")
 
+    # Suppress known deprecation warnings from third-party libs
+    config.addinivalue_line(
+        "filterwarnings",
+        "ignore::DeprecationWarning:sqlalchemy.sql.schema",
+    )
+    config.addinivalue_line(
+        "filterwarnings",
+        "ignore::DeprecationWarning:sqlite3",
+    )
+    config.addinivalue_line(
+        "filterwarnings",
+        "ignore::RuntimeWarning:numpy._core",
+    )
+    # Suppress datetime.utcnow() deprecation warnings from compiled exec strings
+    config.addinivalue_line(
+        "filterwarnings",
+        "ignore::DeprecationWarning:",
+    )
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_logging():
