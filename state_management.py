@@ -629,8 +629,12 @@ class TradeStateManager:
 
     def is_timed_out(self, snapshot: TradeStateSnapshot) -> bool:
         now = datetime.now(timezone.utc)
+        lta = snapshot.last_transition_at
+        # DB-loaded datetimes are tz-naive; attach UTC so the subtraction doesn't crash.
+        if lta.tzinfo is None:
+            lta = lta.replace(tzinfo=timezone.utc)
         if snapshot.state == TradeLifecycleState.PENDING_BUY:
-            elapsed = (now - snapshot.last_transition_at).total_seconds()
+            elapsed = (now - lta).total_seconds()
             if elapsed < 0:
                 logger.warning(
                     "[State] Clock skew detected for %s (elapsed=%ds), forcing timeout",
@@ -640,7 +644,7 @@ class TradeStateManager:
                 return True
             return elapsed >= self.pending_buy_timeout.total_seconds()
         if snapshot.state == TradeLifecycleState.PENDING_SELL:
-            elapsed = (now - snapshot.last_transition_at).total_seconds()
+            elapsed = (now - lta).total_seconds()
             if elapsed < 0:
                 logger.warning(
                     "[State] Clock skew detected for %s (elapsed=%ds), forcing timeout",
