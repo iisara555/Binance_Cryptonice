@@ -605,7 +605,7 @@ class TradeStateManager:
         snapshot = self.get_state(symbol)
         completed = TradeStateSnapshot(
             symbol=snapshot.symbol,
-            state=TradeLifecycleState.PENDING_SELL,
+            state=TradeLifecycleState.IDLE,
             side=snapshot.side,
             entry_order_id=snapshot.entry_order_id,
             exit_order_id=snapshot.exit_order_id,

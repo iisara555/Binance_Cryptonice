@@ -349,7 +349,7 @@ class AlertSystem:
             if level not in self.TELEGRAM_LEVELS:
                 return True
 
-            if not self.rate_limiter.can_send(level):
+            if level != AlertLevel.CRITICAL and not self.rate_limiter.can_send(level):
                 logger.debug("Rate limited: %s - %s...", level, message[:50])
                 return False
 
@@ -466,16 +466,20 @@ class AlertSystem:
         filled_price: float,
         planned_price: float,
         quantity: float,
-        amount_usdt: float,
+        amount_quote: float,
         stop_loss: float,
         take_profit: float,
         mode: str,
         order_id: str,
+        quote_asset: str = "USDT",
     ) -> bool:
         """Notify when a BUY (or entry) order has filled on the exchange.
 
         Reports actual slippage vs the planned signal price so traders can
         track execution quality across market regimes.
+        
+        Args:
+            quote_asset: Quote currency (default "USDT", can be "THB" for Binance TH)
         """
         slippage = self._safe_pct(filled_price - planned_price, planned_price)
         sl_pct = self._safe_pct(abs(filled_price - stop_loss), filled_price)
@@ -485,7 +489,7 @@ class AlertSystem:
             f"✅ *ORDER FILLED* — {symbol}\n"
             f"Side: `{str(side or 'BUY').upper()}` | Mode: `{mode}`\n"
             f"Filled: `${filled_price:,.4f}` × `{quantity:.6f}`\n"
-            f"Amount: `${amount_usdt:,.2f} USDT`\n"
+            f"Amount: `${amount_quote:,.2f} {quote_asset}`\n"
             f"Slippage: `{slippage:+.3f}%`\n"
             f"SL: `${stop_loss:,.4f}` (-{sl_pct:.2f}%)\n"
             f"TP: `${take_profit:,.4f}` (+{tp_pct:.2f}%)\n"
@@ -500,17 +504,21 @@ class AlertSystem:
         filled_price: float,
         entry_price: float,
         quantity: float,
-        pnl_usdt: float,
+        pnl_quote: float,
         pnl_pct: float,
         hold_minutes: float,
         order_id: str,
+        quote_asset: str = "USDT",
     ) -> bool:
         """Notify when a SELL (or exit) order has filled on the exchange.
 
         Maps ``exit_reason`` to a glyph (TP / SL / TRAILING_SL / MINIMAL_ROI /
         SIGNAL / MANUAL) and computes a human-readable hold duration.
+        
+        Args:
+            quote_asset: Quote currency (default "USDT", can be "THB" for Binance TH)
         """
-        emoji = "🟢" if (pnl_usdt or 0) >= 0 else "🔴"
+        emoji = "🟢" if (pnl_quote or 0) >= 0 else "🔴"
         reason_emoji = {
             "TP": "🎯",
             "SL": "🛑",
@@ -531,7 +539,7 @@ class AlertSystem:
             f"{emoji} *TRADE CLOSED* — {symbol}\n"
             f"Reason: {reason_emoji} `{exit_reason}`\n"
             f"Entry: `${entry_price:,.4f}` → Exit: `${filled_price:,.4f}`\n"
-            f"PnL: `{pnl_pct:+.2f}%` (`{pnl_usdt:+.2f} USDT`)\n"
+            f"PnL: `{pnl_pct:+.2f}%` (`{pnl_quote:+.2f} {quote_asset}`)\n"
             f"Hold: `{hold_str}` | Qty: `{quantity:.6f}`\n"
             f"Order: `{self._short_order_id(order_id)}`"
         )
@@ -645,14 +653,20 @@ def format_trade_alert(
     side: str,
     price: float,
     amount: float,
-    value_thb: float,
+    value_quote: float,
     pnl_amt: Optional[float] = None,
     pnl_pct: Optional[float] = None,
     status: str = "filled",
     extra: Optional[str] = None,
+    quote_asset: str = "THB",
 ) -> str:
+    """Format a trade alert message.
+    
+    Args:
+        quote_asset: Quote currency (default "THB" for Binance TH, can be "USDT" for other exchanges)
+    """
     pair = _safe_text(symbol)
-    coin = _safe_text(str(symbol or "").replace("THB_", ""))
+    coin = _safe_text(str(symbol or "").replace("THB_", "").replace("USDT_", ""))
     side_val = _safe_text(str(side or "").upper() or "N/A")
     status_val = _safe_text(str(status or "filled").upper())
 
@@ -668,14 +682,14 @@ def format_trade_alert(
         f"{'-' * 22}",
         f"Pair: <code>{pair}</code>",
         f"Side: <b>{side_val}</b>  |  Status: <code>{status_val}</code>",
-        f"Entry/Fill: <code>{price:,.2f}</code> THB",
+        f"Entry/Fill: <code>{price:,.2f}</code> {quote_asset}",
         f"Amount: <code>{amount:.6f}</code> {coin}",
-        f"Notional: <code>{value_thb:,.2f}</code> THB",
+        f"Notional: <code>{value_quote:,.2f}</code> {quote_asset}",
     ]
 
     if pnl_amt is not None and pnl_pct is not None:
         pnl_sign = "+" if pnl_amt >= 0 else ""
-        lines.append(f"PnL: <code>{pnl_sign}{pnl_amt:,.2f}</code> THB (<code>{pnl_sign}{pnl_pct:.2f}%</code>)")
+        lines.append(f"PnL: <code>{pnl_sign}{pnl_amt:,.2f}</code> {quote_asset} (<code>{pnl_sign}{pnl_pct:.2f}%</code>)")
 
     if extra:
         lines.append(f"Note: {_safe_text(extra)}")
@@ -699,13 +713,19 @@ def format_error_alert(title: str, details: str, status: str = "error") -> str:
 
 
 def format_status_alert(
-    balance_thb: float,
+    balance_quote: float,
     portfolio_value: float,
     pnl_amt: float,
     pnl_pct: float,
     uptime: Optional[str] = None,
     pairs_status: Optional[List[str]] = None,
+    quote_asset: str = "THB",
 ) -> str:
+    """Format a status alert message.
+    
+    Args:
+        quote_asset: Quote currency (default "THB" for Binance TH, can be "USDT" for other exchanges)
+    """
     uptime_val = _safe_text(uptime) if uptime else "-"
     pnl_emoji = "✅" if pnl_amt >= 0 else "🔻"
     pnl_sign = "+" if pnl_amt >= 0 else ""
@@ -713,9 +733,9 @@ def format_status_alert(
     lines = [
         "📊 <b>Portfolio Summary</b>",
         f"{'-' * 22}",
-        f"Total Value: <code>{portfolio_value:,.2f}</code> THB",
-        f"{pnl_emoji} PnL: <code>{pnl_sign}{pnl_amt:,.2f}</code> THB (<code>{pnl_sign}{pnl_pct:.2f}%</code>)",
-        f"Cash: <code>{balance_thb:,.2f}</code> THB",
+        f"Total Value: <code>{portfolio_value:,.2f}</code> {quote_asset}",
+        f"{pnl_emoji} PnL: <code>{pnl_sign}{pnl_amt:,.2f}</code> {quote_asset} (<code>{pnl_sign}{pnl_pct:.2f}%</code>)",
+        f"Cash: <code>{balance_quote:,.2f}</code> {quote_asset}",
         f"Uptime: <code>{uptime_val}</code>",
     ]
 
@@ -751,9 +771,10 @@ def send_status_token(
 # Two-way Telegram command handler. Polls ``getUpdates`` on a short interval
 # and dispatches authorized commands to the trading bot. Inspired by
 # Freqtrade's command set, trimmed to the surface a crypto sniper needs.
-COMMANDS: Dict[str, str] = {
+# Static command definitions (help text with placeholder for dynamic currency)
+_COMMAND_HELP: Dict[str, str] = {
     "/status": "แสดง open positions ทั้งหมด",
-    "/balance": "แสดง USDT balance",
+    "/balance": "ดู {quote} balance",
     "/profit": "แสดง P&L วันนี้ + สัปดาห์นี้",
     "/stop": "หยุด bot ฉุกเฉิน (close ทุก position)",
     "/pause": "หยุดเปิด position ใหม่ (manage เก่าต่อ)",
@@ -763,6 +784,15 @@ COMMANDS: Dict[str, str] = {
     "/logs": "แสดง log 10 บรรทัดล่าสุด",
     "/help": "แสดง commands ทั้งหมด",
 }
+
+
+def get_commands(quote_asset: str = "USDT") -> Dict[str, str]:
+    """Return commands dict with dynamic currency placeholder filled."""
+    return {cmd: desc.format(quote=quote_asset) for cmd, desc in _COMMAND_HELP.items()}
+
+
+# Backward compatible: default to USDT for existing callers
+COMMANDS: Dict[str, str] = get_commands("USDT")
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -1179,7 +1209,17 @@ class TelegramCommandHandler:
         await self._reply(f"📋 *Last 10 Logs*\n{log_text}")
 
     async def _cmd_help(self, _text: str) -> None:
+        # Try to get quote_asset from bot config, default to USDT
+        quote_asset = "USDT"
+        try:
+            config = getattr(self.bot, "config", {}) or {}
+            data_cfg = config.get("data", {}) or {}
+            hybrid_cfg = data_cfg.get("hybrid_dynamic_coin_config", {}) or {}
+            quote_asset = str(hybrid_cfg.get("quote_asset") or "USDT").upper()
+        except Exception:
+            pass
+        
         lines = ["🤖 *Available Commands*\n"]
-        for cmd, desc in COMMANDS.items():
+        for cmd, desc in get_commands(quote_asset).items():
             lines.append(f"`{cmd}` — {desc}")
         await self._reply("\n".join(lines))

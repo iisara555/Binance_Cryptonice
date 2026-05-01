@@ -9,7 +9,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -470,11 +470,14 @@ class RiskManager:
                     take_profit_price,
                 )
                 if kelly_pct <= 0.0:
+                    # When use_fractional_kelly=True: reject non-positive edge (conservative)
+                    # When use_fractional_kelly=False: allow with fixed risk sizing (flexible)
                     if self.config.use_fractional_kelly:
                         reason = f"Non-positive Kelly edge: kelly={kelly_pct:.4f} " f"(p={p:.2f}, b={b:.2f})"
                         _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", reason)
                         logger.info("[Kelly Sizing] Trade rejected due to non-positive edge: %s", reason)
                         return RiskCheckResult(False, reason)
+                    # use_fractional_kelly=False: allow trade with fixed risk sizing
                     logger.warning(
                         "[Kelly] %s edge non-positive (kelly=%.4f); use_fractional_kelly=false — "
                         "using fixed risk %% fallback (max_risk_per_trade_pct=%.2f%%)",
@@ -704,7 +707,7 @@ class RiskManager:
 
     def check_daily_loss_limit(self, current_portfolio_value: float) -> RiskCheckResult:
         """Block new trades if daily loss exceeds max_daily_loss_pct."""
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
 
         if self._daily_loss_date != today:
             # Reset for new day
@@ -729,7 +732,7 @@ class RiskManager:
 
     def record_trade(self):
         """Call after a completed trade to update counters."""
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
         if self._daily_loss_date != today:
             self._daily_loss_date = today
             self._daily_loss_start = None
@@ -741,7 +744,7 @@ class RiskManager:
 
     def record_trade_activity(self):
         """Refresh cooldown timestamp without incrementing the daily trade counter."""
-        today = date.today()
+        today = datetime.now(timezone.utc).date()
         if self._daily_loss_date != today:
             self._daily_loss_date = today
             self._daily_loss_start = None
@@ -754,9 +757,11 @@ class RiskManager:
 
     def check_cooldown(self) -> bool:
         """Return True if bot should wait before next trade."""
-        if self._last_trade_time is None:
+        with self._state_lock:
+            last = self._last_trade_time
+        if last is None:
             return False
-        elapsed = (datetime.now() - self._last_trade_time).total_seconds() / 60
+        elapsed = (datetime.now() - last).total_seconds() / 60
         return elapsed < self.config.cool_down_minutes
 
     # ── Global Risk Checks ──────────────────────────────────────────────

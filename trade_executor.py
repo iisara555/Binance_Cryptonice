@@ -243,8 +243,8 @@ class ExecutionPlan:
 class TradeExecutor:
     """Manages order execution with retry logic and timeout handling."""
 
-    # Decimal places per asset on Bitkub
-    # Import from portfolio_manager for consistency
+    # Decimal places per asset — shared from portfolio_manager for consistency.
+    # For dynamic decimals from exchange filters, use get_asset_decimals_with_fallback()
     ASSET_DECIMALS: Dict[str, int] = {
         "BTC": 8,
         "ETH": 8,
@@ -258,6 +258,39 @@ class TradeExecutor:
         "SHIB": 0,
         "USDT": 2,
     }
+
+    def get_asset_decimals_with_fallback(self, symbol: str) -> int:
+        """Get asset decimal places with dynamic fallback to exchange filters.
+
+        Priority:
+        1. Exchange filter LOT_SIZE stepSize (most accurate)
+        2. API client cached filters (if available)
+        3. Hardcoded ASSET_DECIMALS (fallback)
+
+        Args:
+            symbol: Asset symbol (e.g., 'BTC', 'USDT')
+
+        Returns:
+            Number of decimal places for the asset
+        """
+        upper_sym = symbol.upper()
+
+        # Try API client cached filters first
+        if hasattr(self, "api_client") and self.api_client:
+            try:
+                filters = self.api_client._get_symbol_filters(upper_sym)
+                step = filters.get("stepSize")
+                if step and float(step) > 0:
+                    # Derive decimals from stepSize
+                    step_str = str(step)
+                    if "." in step_str:
+                        decimals = len(step_str.split(".")[1].rstrip("0"))
+                        return max(0, min(decimals, 16))
+            except Exception:
+                pass
+
+        # Fall back to hardcoded values
+        return self.ASSET_DECIMALS.get(upper_sym, 8)
 
     def _format_balance_for_display(self, symbol: str, amount: Any) -> str:
         """Format balance with 8 decimal places for crypto, 2 for THB.
@@ -340,6 +373,16 @@ class TradeExecutor:
         )[0]
         return self._display_strategy_name(winner)
 
+    def _resolve_strategy_key(self, strategy_votes: Any) -> str:
+        """Return raw strategy key (e.g. 'machete_v8b_lite') for the winning vote."""
+        votes = strategy_votes if isinstance(strategy_votes, dict) else {}
+        if not votes:
+            return "-"
+        return max(
+            ((str(name), int(votes.get(name, 0) or 0)) for name in votes.keys()),
+            key=lambda item: (item[1], item[0]),
+        )[0]
+
     def _split_symbol(self, symbol: Optional[str]) -> Tuple[str, str]:
         """Return (base_asset, quote_asset) for THB_BTC, BTC_THB, or BTCUSDT."""
         sym = str(symbol or "").strip().upper()
@@ -419,6 +462,17 @@ class TradeExecutor:
         tick = str(filt.get("tick_size") or "").strip()
         step = str(filt.get("step_size") or "").strip()
         if not tick or not step:
+            return price, amount
+        # Sanity-check maxPrice: Binance TH sometimes returns stale/wrong maxPrice
+        # (e.g. BTCUSDT maxPrice=1000 while BTC trades at ~77,000). If the
+        # live price is more than 2× the maxPrice, treat maxPrice as bad data
+        # and skip snapping so the order is not silently zeroed out.
+        max_price = float(filt.get("max_price") or 0.0)
+        if max_price > 0 and price > max_price * 2:
+            logger.warning(
+                "[PriceFilter] %s maxPrice=%.2f looks stale (order price=%.2f) — skipping grid snap",
+                symbol, max_price, price,
+            )
             return price, amount
         rp = round_step(price, tick)
         if rp <= 0 and price > 0:
@@ -1008,6 +1062,12 @@ class TradeExecutor:
             return
 
         new_sl = current_price * (1 - self._trailing_stop_pct / 100)
+
+        # Guard: trailing SL must not cross the TP price (would create a conflicting double-exit)
+        take_profit = order_info.get("take_profit")
+        if take_profit and take_profit > 0 and new_sl >= take_profit:
+            new_sl = take_profit * 0.9995
+
         if current_sl and new_sl <= current_sl:
             return
 
@@ -1620,6 +1680,7 @@ class TradeExecutor:
                     "total_entry_cost": _entry_cost,
                     "filled": False,
                     "strategy_source": self._resolve_strategy_source(plan.strategy_votes),
+                    "entry_strategy_key": self._resolve_strategy_key(plan.strategy_votes),
                 }
                 with self._orders_lock:
                     self._open_orders[result.order_id] = pos_data
@@ -1676,6 +1737,7 @@ class TradeExecutor:
                         "filled_amount": actual_filled if is_filled_now else 0.0,
                         "filled_price": actual_price if is_filled_now else 0.0,
                         "strategy_source": self._resolve_strategy_source(plan.strategy_votes),
+                        "entry_strategy_key": self._resolve_strategy_key(plan.strategy_votes),
                     }
                     self._open_orders[result.order_id] = pos_data
                 self._persist_position(result.order_id, pos_data)
