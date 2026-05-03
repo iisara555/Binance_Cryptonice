@@ -337,25 +337,31 @@ class CLICommandCenter:
             )
         if tablet_mode:
             # Tablet: 2-column — left: positions+risk+sigflow, right: logs (full height = wider)
+            n_pos_tablet = len(list(snapshot.get("positions") or []))
+            # summary(1) + pbar(0-1) + header_row(1) + data_rows + border(2) — min 5, max 12
+            pos_size_tablet = max(5, min(12, n_pos_tablet + 4))
             layout["body"].split_row(
                 Layout(name="left", ratio=3),
                 Layout(name="right", ratio=2),
             )
             layout["left"].split_column(
-                Layout(self._build_mobile_position_book(snapshot), ratio=4, name="positions"),
+                Layout(self._build_mobile_position_book(snapshot), size=pos_size_tablet, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_panel(snapshot), ratio=3, name="signal_flow"),
+                Layout(self._build_signal_flow_panel(snapshot), ratio=1, name="signal_flow"),
             )
             layout["right"].split_column(
                 Layout(self._build_log_stream_panel(snapshot, n_buffer=30), name="logs"),
             )
         elif compact_mode:
-            # Mobile: stacked single-column — Bloomberg layout with larger sigflow
+            # Mobile: stacked single-column — dynamic position height, sigflow+logs fill the rest
+            n_pos = len(list(snapshot.get("positions") or []))
+            # summary(1) + pbar(0-1) + header_row(1) + data_rows + border(2) — min 5, max 10
+            pos_size = max(5, min(10, n_pos + 4))
             layout["body"].split_column(
-                Layout(self._build_mobile_position_book(snapshot), ratio=4, name="positions"),
+                Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_compact_new(snapshot), ratio=4, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=20), size=4, name="logs"),
+                Layout(self._build_signal_flow_compact_new(snapshot), ratio=3, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=20), ratio=1, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -889,7 +895,7 @@ class CLICommandCenter:
             blocks.append(Text("No open positions", style=self._DIM))
             return self._panel(Group(*blocks), title="\u25c6 Position Book", theme=theme)
 
-        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table = Table(expand=False, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
         table.add_column("", no_wrap=True, width=2)  # emoji indicator
         table.add_column("Symbol", style=self._WHITE, no_wrap=True, min_width=9)
         table.add_column("Side", justify="center", no_wrap=True, width=4)
