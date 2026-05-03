@@ -360,8 +360,8 @@ class CLICommandCenter:
             layout["body"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_compact_new(snapshot), ratio=1, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=10), size=12, name="logs"),
+                Layout(self._build_signal_flow_compact_new(snapshot), ratio=2, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=10), ratio=1, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -895,7 +895,7 @@ class CLICommandCenter:
             blocks.append(Text("No open positions", style=self._DIM))
             return self._panel(Group(*blocks), title="\u25c6 Position Book", theme=theme)
 
-        table = Table(expand=False, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
         table.add_column("", no_wrap=True, width=2)  # emoji indicator
         table.add_column("Symbol", style=self._WHITE, no_wrap=True, min_width=9)
         table.add_column("Side", justify="center", no_wrap=True, width=4)
