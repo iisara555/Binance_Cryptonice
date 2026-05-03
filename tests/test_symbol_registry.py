@@ -10,7 +10,7 @@ def _cfg(entries, **kwargs):
     return HybridDynamicCoinConfig(
         version=1,
         quote_asset="USDT",
-        min_quote_balance_thb=100.0,
+        min_quote_balance_usdt=100.0,
         min_quote_balance_for_pairs=None,
         require_supported_market=True,
         include_assets_with_balance=True,

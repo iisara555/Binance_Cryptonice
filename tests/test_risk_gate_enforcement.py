@@ -206,7 +206,9 @@ def _build_bot(config_overrides=None, **kwargs):
         mock_db.list_trade_states.return_value = []
 
     with patch("trading_bot.get_database", return_value=mock_db):
-        return TradingBotOrchestrator(config=config, **kwargs)
+        bot = TradingBotOrchestrator(config=config, **kwargs)
+    bot._balance_monitor = None  # bypass free-USDT pre-check (state file unavailable in tests)
+    return bot
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────

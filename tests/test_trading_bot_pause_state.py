@@ -88,6 +88,7 @@ def test_handle_balance_event_crypto_deposit_alerts_for_tracked_position():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot._portfolio_cache = {"data": object(), "timestamp": 1.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = [
         {
             "order_id": "bootstrap_THB_BTC_1",
@@ -124,6 +125,7 @@ def test_handle_balance_event_crypto_deposit_alerts_when_untracked():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot._portfolio_cache = {"data": object(), "timestamp": 1.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.alert_system = Mock()
     bot.send_alerts = True
@@ -154,6 +156,7 @@ def test_handle_balance_event_crypto_deposit_bootstraps_active_runtime_pair_into
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot._portfolio_cache = {"data": object(), "timestamp": 1.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.alert_system = Mock()
     bot.send_alerts = True
     bot._reconcile_tracked_positions_with_balance_state = Mock(return_value=[])
@@ -200,6 +203,7 @@ def test_bootstrap_held_positions_assigns_sl_tp_to_synthetic_positions():
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.001, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 1_500_000.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot._get_trading_pairs = Mock(return_value=["THB_BTC"])
@@ -222,6 +226,7 @@ def test_bootstrap_held_positions_prefers_persisted_position_entry_price_over_cu
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.001, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 1_500_000.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot.db.load_all_positions.return_value = [
@@ -260,6 +265,7 @@ def test_bootstrap_held_positions_prefers_trade_state_entry_price_over_current_p
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.001, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 1_500_000.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot.db.load_all_positions.return_value = []
@@ -292,6 +298,7 @@ def test_bootstrap_held_positions_ignores_newer_bootstrap_row_when_real_position
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.0000605, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 2_390_512.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot.db.load_all_positions.return_value = [
@@ -344,6 +351,7 @@ def test_bootstrap_held_positions_uses_trade_history_when_only_bootstrap_context
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.0000605, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 2_390_512.0}
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot.db.load_all_positions.return_value = [
@@ -404,6 +412,7 @@ def test_bootstrap_held_positions_uses_exchange_order_history_when_local_state_i
         }
     ]
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot.db.load_all_positions.return_value = [
@@ -683,6 +692,7 @@ def test_reconcile_tracked_positions_bootstraps_missing_held_coin_from_balance_s
     bot.api_client.get_ticker.return_value = {"last": 42.7}
     bot.api_client.get_order_history.return_value = []
     bot.executor = Mock()
+    bot.executor.is_entry_in_flight.return_value = False
     bot.executor.get_open_orders.return_value = []
     bot.db = Mock()
     bot.db.load_all_positions.return_value = []

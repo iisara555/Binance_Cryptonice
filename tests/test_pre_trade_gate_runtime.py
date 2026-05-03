@@ -81,6 +81,7 @@ def test_check_pre_trade_gate_passes_sized_quote_to_check_all() -> None:
     bot.config = {"portfolio": {"min_balance_threshold": 10}, "risk": {}, "trading": {}}
     bot._active_strategy_mode = "scalping"
     bot._pair_loss_guard = None
+    bot._balance_monitor = None  # bypass free-USDT pre-check (not under test here)
 
     plan = ExecutionPlan(
         symbol="ADAUSDT",
@@ -128,6 +129,7 @@ def test_blocked_log_includes_failed_checks_csv(caplog: pytest.LogCaptureFixture
     bot.config = {"portfolio": {}, "risk": {}, "trading": {}}
     bot._active_strategy_mode = "standard"
     bot._pair_loss_guard = None
+    bot._balance_monitor = None  # bypass free-USDT pre-check (not under test here)
 
     plan = ExecutionPlan(
         symbol="BTCUSDT",

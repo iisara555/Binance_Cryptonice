@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
 from config import BINANCE, TRADING
 from symbol_registry import get_symbol_map
@@ -63,6 +64,22 @@ def get_public_ip(timeout: float = 5) -> Optional[str]:
             logger.debug("Public IP lookup failed via %s: %s", url, exc)
             continue
     return None
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential_jitter(initial=0.5, max=5.0),
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout)),
+    before_sleep=lambda s: logger.warning(
+        "HTTP network error (attempt %d/3) — retrying: %s",
+        s.attempt_number,
+        s.outcome.exception(),
+    ),
+    reraise=True,
+)
+def _http_request(method: str, url: str, **kwargs: Any) -> requests.Response:
+    """HTTP request with automatic retry on transient connection/timeout errors."""
+    return requests.request(method, url, **kwargs)
 
 
 # --- NEW: SPEC_01 --- Binance error code map. These are the error codes the
@@ -1001,7 +1018,7 @@ class BinanceThClient:
                 elif self.api_key and method.upper() != "GET":
                     headers["X-MBX-APIKEY"] = self.api_key
 
-                r = requests.request(
+                r = _http_request(
                     method.upper(),
                     url,
                     params=request_params,

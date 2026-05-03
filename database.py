@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, TypeVar
 import pandas as pd
 from sqlalchemy import create_engine, event, func, or_  # pylint: disable=unused-import
 from sqlalchemy.exc import IntegrityError, OperationalError
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 from sqlalchemy.orm import Session, sessionmaker
 
 # ── Logger ────────────────────────────────────────────────────────────────────
@@ -173,38 +174,26 @@ class Database:
     # ── Retry helper ───────────────────────────────────────────────────────────
 
     def _with_retry(self, operation: Callable[[], T]) -> T:
-        """
-        Execute a callable up to _WRITE_RETRIES times, backing off on lock errors.
+        """Execute a callable up to _WRITE_RETRIES times with exponential backoff on lock/busy errors."""
+        def _is_db_contention(exc: BaseException) -> bool:
+            return isinstance(exc, OperationalError) and any(
+                kw in str(exc).lower() for kw in ("locked", "busy")
+            )
 
-        Raises the last OperationalError if all retries are exhausted.
-        """
-        last_error: Exception = None
-        for attempt in range(1, self._WRITE_RETRIES + 1):
-            try:
+        for attempt in Retrying(
+            stop=stop_after_attempt(self._WRITE_RETRIES),
+            wait=wait_exponential(multiplier=self._RETRY_BASE_DELAY, max=self._RETRY_MAX_DELAY),
+            retry=retry_if_exception(_is_db_contention),
+            before_sleep=lambda s: _logger.warning(
+                "Database contention (attempt %d/%d) — retrying. Error: %s",
+                s.attempt_number,
+                self._WRITE_RETRIES,
+                s.outcome.exception(),
+            ),
+            reraise=True,
+        ):
+            with attempt:
                 return operation()
-            except OperationalError as exc:
-                last_error = exc
-                err_str = str(exc).lower()
-                if "locked" in err_str or "busy" in err_str:
-                    delay = min(
-                        self._RETRY_BASE_DELAY * (2 ** (attempt - 1)),
-                        self._RETRY_MAX_DELAY,
-                    )
-                    state = "locked" if "locked" in err_str else "busy"
-                    _logger.warning(
-                        "Database %s (attempt %d/%d) — retrying in %.2fs. Error: %s",
-                        state,
-                        attempt,
-                        self._WRITE_RETRIES,
-                        delay,
-                        exc,
-                    )
-                    time.sleep(delay)
-                else:
-                    raise
-        # All retries exhausted
-        _logger.error("Database write failed after %d attempts: %s", self._WRITE_RETRIES, last_error)
-        raise last_error
 
     # ── Auto-migration ─────────────────────────────────────────────────────────
 
