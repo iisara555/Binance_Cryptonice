@@ -9,3 +9,5 @@ flask>=3.0.0
 websocket-client>=1.6.0
 rich>=13.7.1
 tenacity>=8.2.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
