@@ -261,8 +261,11 @@ class StartupRuntimeHelper:
         from helpers import parse_ticker_last
 
         registered: list[str] = []
+        _executor = getattr(self.bot, "executor", None)
         for pair in tracked_pairs:
             if pair in tracked_symbols:
+                continue
+            if _executor is not None and _executor.is_entry_in_flight(pair):
                 continue
 
             base_asset = extract_base_asset(pair)

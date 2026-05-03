@@ -223,19 +223,29 @@ class ManagedLifecycleHelper:
             logger.error("Trade execution failed: %s", result.message)
             return
 
-        self.bot._remember_consumed_signal_trigger(decision.signal)
-
         entry_strategy = self.bot.executor._resolve_strategy_source(decision.plan.strategy_votes)
         state_signal_source = (
             entry_strategy if entry_strategy != "-" else str(self.bot.signal_source.value)
         )
 
-        snapshot = self.bot._state_manager.start_pending_buy(
-            decision.plan.symbol,
-            decision.plan,
-            result,
-            signal_source=state_signal_source,
-        )
+        try:
+            snapshot = self.bot._state_manager.start_pending_buy(
+                decision.plan.symbol,
+                decision.plan,
+                result,
+                signal_source=state_signal_source,
+            )
+        except Exception as exc:
+            logger.error(
+                "State tracking failed for placed order %s — position may be orphaned: %s",
+                decision.plan.symbol,
+                exc,
+                exc_info=True,
+            )
+            self.bot._remember_consumed_signal_trigger(decision.signal)
+            decision.status = "failed"
+            return
+        self.bot._remember_consumed_signal_trigger(decision.signal)
         if result.status == OrderStatus.FILLED and result.filled_amount > 0:
             filled_price = float(result.filled_price or decision.plan.entry_price or 0.0)
             self.bot._register_filled_position_from_state(snapshot, result.filled_amount, filled_price)
