@@ -360,8 +360,8 @@ class CLICommandCenter:
             layout["body"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_compact_new(snapshot), ratio=3, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=20), ratio=1, name="logs"),
+                Layout(self._build_signal_flow_compact_new(snapshot), ratio=2, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=20), ratio=2, name="logs"),
             )
         else:
             layout["body"].split_row(
