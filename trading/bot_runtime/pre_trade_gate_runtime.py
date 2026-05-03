@@ -110,6 +110,23 @@ def check_pre_trade_gate(bot: Any, decision: TradeDecision, portfolio: Dict[str,
         if side_value == "SELL":
             proposed_quote *= max(float(getattr(plan, "entry_price", 0.0) or current_price or 0.0), 0.0)
 
+    if side_value == "BUY" and proposed_quote > 0:
+        try:
+            bm = getattr(bot, "_balance_monitor", None)
+            bstate = (bm.get_state() if bm is not None else None) or {}
+            usdt_info = (bstate.get("balances") or {}).get("USDT") or {}
+            free_usdt = float(usdt_info.get("available") or 0.0)
+            if 0 < free_usdt < proposed_quote:
+                logger.warning(
+                    "[PreTradeGate] Blocking %s BUY — insufficient free USDT (%.2f < %.2f)",
+                    getattr(plan, "symbol", "?"),
+                    free_usdt,
+                    proposed_quote,
+                )
+                return False
+        except Exception:
+            pass
+
     if getattr(bot, "_state_machine_enabled", False) and getattr(bot, "_state_manager", None):
         open_positions_count = len(bot._state_manager.list_active_states())
     else:

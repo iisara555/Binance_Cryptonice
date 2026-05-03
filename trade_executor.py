@@ -540,6 +540,13 @@ class TradeExecutor:
         self._in_flight_entries: set = set()
         self._in_flight_lock = threading.Lock()
 
+        # ── Balance-monitor race condition guard ─────────────────────────────
+        # Populated before execute_order(); cleared after _persist_position().
+        # BalanceMonitor checks this to skip bootstrap / deposit alerts for
+        # trades the bot just placed.
+        self._pending_entry_symbols: set = set()
+        self._pending_entry_symbols_lock = threading.Lock()
+
         self._trailing_stop_pct: float = config.get("trailing_stop_pct", 1.0)
         self._trailing_activation_pct: float = config.get("trailing_activation_pct", 0.5)
         self._allow_trailing_stop: bool = bool(config.get("allow_trailing_stop", True))
@@ -602,6 +609,11 @@ class TradeExecutor:
             return
         with self._oms_processing_lock:
             self._oms_processing.discard(order_id)
+
+    def is_entry_in_flight(self, symbol: str) -> bool:
+        """Return True while a BUY for this symbol is in-flight (placed but not yet persisted)."""
+        with self._pending_entry_symbols_lock:
+            return symbol in self._pending_entry_symbols
 
     def _start_oms_replacement(self, order_id: str, new_order: OrderRequest, old_pos_data: Dict[str, Any]) -> None:
         self._mark_oms_processing(order_id)
@@ -1633,6 +1645,8 @@ class TradeExecutor:
         order = OrderRequest(
             symbol=plan.symbol, side=plan.side, amount=amount, price=plan.entry_price, order_type=self.order_type
         )
+        with self._pending_entry_symbols_lock:
+            self._pending_entry_symbols.add(plan.symbol)
         result = self.execute_order(order)
 
         if result.success and result.order_id:
@@ -1645,6 +1659,8 @@ class TradeExecutor:
                     amount,
                     plan.entry_price,
                 )
+                with self._pending_entry_symbols_lock:
+                    self._pending_entry_symbols.discard(plan.symbol)
                 return result
 
             actual_filled = result.filled_amount
@@ -1683,6 +1699,7 @@ class TradeExecutor:
                     "filled": False,
                     "strategy_source": self._resolve_strategy_source(plan.strategy_votes),
                     "entry_strategy_key": self._resolve_strategy_key(plan.strategy_votes),
+                    "bot_executed": True,
                 }
                 with self._orders_lock:
                     self._open_orders[result.order_id] = pos_data
@@ -1740,6 +1757,7 @@ class TradeExecutor:
                         "filled_price": actual_price if is_filled_now else 0.0,
                         "strategy_source": self._resolve_strategy_source(plan.strategy_votes),
                         "entry_strategy_key": self._resolve_strategy_key(plan.strategy_votes),
+                        "bot_executed": True,
                     }
                     self._open_orders[result.order_id] = pos_data
                 self._persist_position(result.order_id, pos_data)
@@ -1758,6 +1776,8 @@ class TradeExecutor:
             if self.risk_manager:
                 self.risk_manager.record_trade()
 
+        with self._pending_entry_symbols_lock:
+            self._pending_entry_symbols.discard(plan.symbol)
         return result
 
     def execute_exit(
