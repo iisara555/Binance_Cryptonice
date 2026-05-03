@@ -338,8 +338,8 @@ class CLICommandCenter:
         if tablet_mode:
             # Tablet: 2-column — left: positions+risk+sigflow, right: logs (full height = wider)
             n_pos_tablet = len(list(snapshot.get("positions") or []))
-            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) — min 6, max 13
-            pos_size_tablet = max(6, min(13, n_pos_tablet + 5))
+            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
+            pos_size_tablet = max(10, min(15, n_pos_tablet + 8))
             layout["body"].split_row(
                 Layout(name="left", ratio=3),
                 Layout(name="right", ratio=2),
@@ -355,8 +355,8 @@ class CLICommandCenter:
         elif compact_mode:
             # Mobile: stacked single-column — dynamic position height, sigflow+logs fill the rest
             n_pos = len(list(snapshot.get("positions") or []))
-            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) — min 6, max 12
-            pos_size = max(6, min(12, n_pos + 5))
+            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
+            pos_size = max(10, min(15, n_pos + 8))
             layout["body"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
