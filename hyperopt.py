@@ -209,22 +209,23 @@ class HyperoptRunner:
         n_splits: int = 5,
         top_n: int = 5,
         progress_every: int = 50,
+        n_trials: int = 200,
     ) -> List[OptimizationResult]:
-        """Optimise one (symbol, mode) pair.
+        """Optimise one (symbol, mode) pair using Bayesian optimisation.
 
         Returns the top-N combinations sorted by composite score (descending).
+        ``n_trials`` controls how many parameter sets optuna evaluates; 200 is
+        enough for near-optimal results on typical PARAM_SPACE sizes.
         """
+        import optuna
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
         param_grid = PARAM_SPACE.get(mode)
         if not param_grid:
             logger.error("[Hyperopt] Unknown mode '%s' — supported: %s", mode, sorted(PARAM_SPACE.keys()))
             return []
 
-        combinations = self._generate_combinations(param_grid)
-        if not combinations:
-            logger.error("[Hyperopt] No valid parameter combinations for mode %s", mode)
-            return []
-
-        # Pre-load candles once; walk-forward slices it n_splits ways.
         candles = self._load_candles(symbol, self.timeframe, start_date, end_date)
         if candles is None or len(candles) < MIN_CANDLES_REQUIRED:
             logger.error(
@@ -238,10 +239,10 @@ class HyperoptRunner:
             return []
 
         logger.info(
-            "[Hyperopt] %s/%s: testing %d combinations × %d splits " "(%d candles, %s → %s)",
+            "[Hyperopt] %s/%s: Bayesian search %d trials × %d splits (%d candles, %s → %s)",
             symbol,
             mode,
-            len(combinations),
+            n_trials,
             n_splits,
             len(candles),
             start_date,
@@ -250,34 +251,61 @@ class HyperoptRunner:
 
         started_at = time.time()
         results: List[OptimizationResult] = []
+        n_evaluated = 0
 
-        for i, params in enumerate(combinations):
-            if progress_every > 0 and i and (i % progress_every == 0):
-                elapsed = time.time() - started_at
-                pct = (i / len(combinations)) * 100.0
-                logger.info(
-                    "[Hyperopt] Progress: %d/%d (%.1f%%) — %.1fs elapsed",
-                    i,
-                    len(combinations),
-                    pct,
-                    elapsed,
-                )
+        def objective(trial: "optuna.Trial") -> float:
+            nonlocal n_evaluated
+            params = self._suggest_from_space(trial, param_grid)
+
+            # Structural pruning — teach the sampler to avoid invalid regions.
+            fast = params.get("fast_ema")
+            slow = params.get("slow_ema")
+            if fast is not None and slow is not None and fast >= slow:
+                raise optuna.TrialPruned()
+
+            oversold = params.get("rsi_oversold")
+            overbought = params.get("rsi_overbought")
+            if oversold is not None and overbought is not None and oversold >= overbought:
+                raise optuna.TrialPruned()
+
+            sl = params.get("stop_loss_pct")
+            tp = params.get("take_profit_pct")
+            if sl is not None and tp is not None and tp <= sl:
+                raise optuna.TrialPruned()
 
             wf_scores = self._walk_forward(candles, mode, params, n_splits)
             if not wf_scores:
-                continue
+                return -999.0
 
             avg_result = self._average_results(params, wf_scores)
-            if avg_result is not None:
-                results.append(avg_result)
+            if avg_result is None:
+                return -999.0
+
+            results.append(avg_result)
+            n_evaluated += 1
+
+            if progress_every > 0 and n_evaluated and (n_evaluated % progress_every == 0):
+                elapsed = time.time() - started_at
+                logger.info(
+                    "[Hyperopt] Progress: %d trials evaluated — %.1fs elapsed",
+                    n_evaluated,
+                    elapsed,
+                )
+
+            return avg_result.score
+
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=42),
+        )
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
         elapsed_total = time.time() - started_at
         logger.info(
-            "[Hyperopt] Completed %d/%d combinations in %.1fs (%.2fs avg)",
-            len(results),
-            len(combinations),
+            "[Hyperopt] Completed %d/%d trials in %.1fs",
+            n_evaluated,
+            n_trials,
             elapsed_total,
-            elapsed_total / max(len(combinations), 1),
         )
 
         results.sort(key=lambda r: r.score, reverse=True)
@@ -365,6 +393,25 @@ class HyperoptRunner:
         return path
 
     # ────────────────────────── Internals ──────────────────────────
+
+    @staticmethod
+    def _suggest_from_space(
+        trial: Any,
+        param_grid: Mapping[str, List[Any]],
+    ) -> Dict[str, Any]:
+        """Sample one parameter set from ``param_grid`` via an optuna trial.
+
+        Integer lists use ``suggest_int`` (preserving efficient Bayesian search
+        over ordered int ranges); float lists use ``suggest_float``.
+        """
+        params: Dict[str, Any] = {}
+        for key, values in param_grid.items():
+            lo, hi = min(values), max(values)
+            if all(isinstance(v, int) for v in values):
+                params[key] = trial.suggest_int(key, int(lo), int(hi))
+            else:
+                params[key] = trial.suggest_float(key, float(lo), float(hi))
+        return params
 
     @staticmethod
     def _generate_combinations(
@@ -829,7 +876,7 @@ def _format_results_table(
     mode: str,
     start_date: str,
     end_date: str,
-    combinations_tested: int,
+    n_trials: int,
     n_splits: int,
     results: List[OptimizationResult],
 ) -> str:
@@ -847,7 +894,7 @@ def _format_results_table(
         border_top,
         line(f" HYPEROPT RESULTS"),
         line(f" Symbol: {symbol.upper()}  |  Mode: {mode}  |  " f"Period: {start_date} -> {end_date}"),
-        line(f" Combinations tested: {combinations_tested}  |  " f"Walk-forward splits: {n_splits}"),
+        line(f" Trials: {n_trials}  |  Walk-forward splits: {n_splits}"),
         border_mid,
         line(" RANK   SCORE   SHARPE  WIN%    MAX_DD  PF    TRADES"),
     ]
@@ -1012,6 +1059,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--no-save", action="store_true", help="Skip writing the JSON results file")
     parser.add_argument("--quiet", action="store_true", help="Suppress the ranked table output to stdout")
+    parser.add_argument(
+        "--n-trials", type=int, default=200,
+        help="Bayesian optimisation trial budget (default 200)",
+    )
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args(argv)
 
@@ -1052,8 +1103,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     for symbol in pairs:
         for mode in modes:
             try:
-                # Recount to print expected combination count alongside each header.
-                combinations = runner._generate_combinations(PARAM_SPACE[mode])
                 results = runner.run(
                     symbol=symbol,
                     mode=mode,
@@ -1061,6 +1110,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     end_date=args.end,
                     n_splits=args.splits,
                     top_n=args.top,
+                    n_trials=args.n_trials,
                 )
             except Exception as exc:
                 logger.exception("[Hyperopt] %s/%s crashed: %s", symbol, mode, exc)
@@ -1077,7 +1127,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     mode=mode,
                     start_date=args.start,
                     end_date=args.end,
-                    combinations_tested=len(combinations),
+                    n_trials=args.n_trials,
                     n_splits=args.splits,
                     results=results,
                 )
