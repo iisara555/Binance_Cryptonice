@@ -353,7 +353,7 @@ class CLICommandCenter:
                 Layout(self._build_log_stream_panel(snapshot, n_buffer=10), name="logs"),
             )
         elif compact_mode:
-            # Mobile: stacked single-column — dynamic position height, portfolio+sigflow+logs fill the rest
+            # Mobile: stacked single-column — dynamic position height, portfolio+system+sigflow+logs fill the rest
             n_pos = len(list(snapshot.get("positions") or []))
             # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
             pos_size = max(10, min(15, n_pos + 8))
@@ -361,6 +361,7 @@ class CLICommandCenter:
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
                 Layout(self._build_balance_breakdown_panel(snapshot), size=8, name="portfolio"),
+                Layout(self._build_system_status_table(snapshot), size=9, name="system"),
                 Layout(self._build_signal_flow_compact_new(snapshot), ratio=2, name="signal_flow"),
                 Layout(self._build_log_stream_panel(snapshot, n_buffer=16), ratio=2, name="logs"),
             )
