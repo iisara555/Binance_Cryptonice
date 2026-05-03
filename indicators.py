@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pandas_ta as ta
 from numpy.lib.stride_tricks import sliding_window_view
 
 
@@ -60,30 +61,25 @@ class TechnicalIndicators:
         prices: pd.Series, period: int = 20, std_dev: float = 2.0
     ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """Bollinger Bands - returns (upper, middle, lower)"""
-        middle = prices.rolling(window=period).mean()
-        std = prices.rolling(window=period).std()
-        upper = middle + (std * std_dev)
-        lower = middle - (std * std_dev)
+        bb = ta.bbands(prices, length=period, std=std_dev)
+        upper = bb.filter(like="BBU").iloc[:, 0]
+        middle = bb.filter(like="BBM").iloc[:, 0]
+        lower = bb.filter(like="BBL").iloc[:, 0]
         return upper, middle, lower
 
     @staticmethod
     def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
         """Average True Range (ATR)"""
-        tr1 = high - low
-        tr2 = (high - close.shift()).abs()
-        tr3 = (low - close.shift()).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return TechnicalIndicators._wilder_smoothing(tr, period)
+        return ta.atr(high, low, close, length=period)
 
     @staticmethod
     def calculate_stochastic(
         high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
     ) -> Tuple[pd.Series, pd.Series]:
         """Stochastic Oscillator - returns (%K, %D)"""
-        lowest_low = low.rolling(window=period).min()
-        highest_high = high.rolling(window=period).max()
-        k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
-        d = k.rolling(window=3).mean()
+        stoch = ta.stoch(high, low, close, k=period, d=3, smooth_k=1)
+        k = stoch.filter(like="STOCHk").iloc[:, 0]
+        d = stoch.filter(like="STOCHd").iloc[:, 0]
         return k, d
 
     @staticmethod
