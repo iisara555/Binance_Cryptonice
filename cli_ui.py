@@ -350,7 +350,7 @@ class CLICommandCenter:
                 Layout(self._build_signal_flow_panel(snapshot), ratio=1, name="signal_flow"),
             )
             layout["right"].split_column(
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=30), name="logs"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=10), name="logs"),
             )
         elif compact_mode:
             # Mobile: stacked single-column — dynamic position height, sigflow+logs fill the rest
@@ -360,8 +360,8 @@ class CLICommandCenter:
             layout["body"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_compact_new(snapshot), ratio=2, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=20), ratio=2, name="logs"),
+                Layout(self._build_signal_flow_compact_new(snapshot), ratio=1, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=10), size=12, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -691,9 +691,9 @@ class CLICommandCenter:
         compact = self._terminal_compact_mode()
 
         if compact:
-            # Compact: group up-to-date noise, show last 3 meaningful lines with emoji prefix
-            raw_rows = self._get_filtered_log_rows(min_level, n=40)
-            rows = self._group_log_rows(raw_rows)[-3:]
+            # Compact: group up-to-date noise, show last 10 meaningful lines with emoji prefix
+            raw_rows = self._get_filtered_log_rows(min_level, n=60)
+            rows = self._group_log_rows(raw_rows)[-10:]
             if not rows:
                 return self._panel(
                     Text(f"Waiting for logs ({min_level}+)...", style=self._DIM),
