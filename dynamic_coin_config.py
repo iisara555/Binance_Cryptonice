@@ -13,13 +13,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_WHITELIST_JSON = "coin_whitelist.json"
 DEFAULT_QUOTE_ASSET = "USDT"
 LEGACY_QUOTE_ASSETS = {"THB", "USDT"}
-DEFAULT_MIN_QUOTE_BALANCE_THB = 100.0
+DEFAULT_MIN_QUOTE_BALANCE_USDT = 10.0
 DEFAULT_WHITELIST_ASSETS = ("BTC", "DOGE")
 SUPPORTED_WHITELIST_SCHEMA_VERSION = 1
 TOP_LEVEL_SCHEMA_KEYS = {
     "version",
     "quote_asset",
-    "min_quote_balance_thb",
+    "min_quote_balance_usdt",
+    "min_quote_balance_thb",  # legacy key — still accepted for backward compat
     "min_quote_balance_for_pairs",
     "require_supported_market",
     "include_assets_with_balance",
@@ -33,7 +34,8 @@ ENTRY_SCHEMA_KEYS = {
     "pair",
     "enabled",
     "min_asset_balance",
-    "min_quote_balance_thb",
+    "min_quote_balance_usdt",
+    "min_quote_balance_thb",  # legacy key — still accepted for backward compat
     "include_if_held",
     "require_supported_market",
 }
@@ -135,7 +137,7 @@ class CoinWhitelistEntry:
     symbol: str
     enabled: bool = True
     min_asset_balance: float = 0.0
-    min_quote_balance_thb: Optional[float] = None
+    min_quote_balance_usdt: Optional[float] = None
     include_if_held: Optional[bool] = None
     require_supported_market: Optional[bool] = None
 
@@ -144,8 +146,8 @@ class CoinWhitelistEntry:
 class HybridDynamicCoinConfig:
     version: int
     quote_asset: str
-    min_quote_balance_thb: float
-    # When set, include supported whitelist pairs if quote_balance >= this (can be < min_quote_balance_thb).
+    min_quote_balance_usdt: float
+    # When set, include supported whitelist pairs if quote_balance >= this (can be < min_quote_balance_usdt).
     min_quote_balance_for_pairs: Optional[float]
     require_supported_market: bool
     include_assets_with_balance: bool
@@ -239,12 +241,13 @@ class JsonCoinWhitelistRepository:
         else:
             min_quote_balance_for_pairs_opt = max(0.0, _coerce_float(raw_pair_floor, 0.0))
 
+        _raw_min = raw.get("min_quote_balance_usdt") if raw.get("min_quote_balance_usdt") is not None else raw.get("min_quote_balance_thb")
         return HybridDynamicCoinConfig(
             version=schema_version,
             quote_asset=quote_asset,
-            min_quote_balance_thb=max(
+            min_quote_balance_usdt=max(
                 0.0,
-                _coerce_float(raw.get("min_quote_balance_thb"), DEFAULT_MIN_QUOTE_BALANCE_THB),
+                _coerce_float(_raw_min, DEFAULT_MIN_QUOTE_BALANCE_USDT),
             ),
             min_quote_balance_for_pairs=min_quote_balance_for_pairs_opt,
             require_supported_market=_coerce_bool(raw.get("require_supported_market"), True),
@@ -300,9 +303,12 @@ class JsonCoinWhitelistRepository:
                 symbol=symbol,
                 enabled=_coerce_bool(raw_entry.get("enabled"), True),
                 min_asset_balance=max(0.0, _coerce_float(raw_entry.get("min_asset_balance"), 0.0)),
-                min_quote_balance_thb=(
-                    max(0.0, _coerce_float(raw_entry.get("min_quote_balance_thb"), 0.0))
-                    if raw_entry.get("min_quote_balance_thb") is not None
+                min_quote_balance_usdt=(
+                    max(0.0, _coerce_float(
+                        raw_entry.get("min_quote_balance_usdt") if raw_entry.get("min_quote_balance_usdt") is not None else raw_entry.get("min_quote_balance_thb"),
+                        0.0,
+                    ))
+                    if (raw_entry.get("min_quote_balance_usdt") is not None or raw_entry.get("min_quote_balance_thb") is not None)
                     else None
                 ),
                 include_if_held=(
@@ -326,7 +332,7 @@ class JsonCoinWhitelistRepository:
         return HybridDynamicCoinConfig(
             version=SUPPORTED_WHITELIST_SCHEMA_VERSION,
             quote_asset=DEFAULT_QUOTE_ASSET,
-            min_quote_balance_thb=DEFAULT_MIN_QUOTE_BALANCE_THB,
+            min_quote_balance_usdt=DEFAULT_MIN_QUOTE_BALANCE_USDT,
             min_quote_balance_for_pairs=None,
             require_supported_market=True,
             include_assets_with_balance=True,
@@ -349,14 +355,14 @@ class HybridDynamicPairResolver:
         *,
         config_path: Optional[Path] = None,
         configured_pairs: Optional[Iterable[str]] = None,
-        min_quote_balance_thb: Optional[float] = None,
+        min_quote_balance_usdt: Optional[float] = None,
         min_quote_balance_for_pairs: Optional[float] = None,
         require_supported_market: Optional[bool] = None,
         include_assets_with_balance: Optional[bool] = None,
     ) -> RuntimePairSelection:
         config = self.repository.load(config_path)
-        if min_quote_balance_thb is not None:
-            config = replace(config, min_quote_balance_thb=max(0.0, float(min_quote_balance_thb)))
+        if min_quote_balance_usdt is not None:
+            config = replace(config, min_quote_balance_usdt=max(0.0, float(min_quote_balance_usdt)))
         if min_quote_balance_for_pairs is not None:
             config = replace(
                 config,
@@ -416,7 +422,7 @@ class HybridDynamicPairResolver:
         config: HybridDynamicCoinConfig,
     ) -> bool:
         required_quote = (
-            entry.min_quote_balance_thb if entry.min_quote_balance_thb is not None else config.min_quote_balance_thb
+            entry.min_quote_balance_usdt if entry.min_quote_balance_usdt is not None else config.min_quote_balance_usdt
         )
         asset_balance = self._extract_total_balance(balances, entry.symbol)
         include_if_held = (

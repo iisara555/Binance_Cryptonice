@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 def get_hybrid_dynamic_coin_settings(data_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     settings = dict((data_config or {}).get("hybrid_dynamic_coin_config") or {})
     settings.setdefault("whitelist_json_path", DEFAULT_WHITELIST_JSON)
-    settings.setdefault("min_quote_balance_thb", max(float(TRADING.min_order_amount or 0.0), 100.0))
+    settings.setdefault("min_quote_balance_usdt", max(float(TRADING.min_order_amount or 0.0), 10.0))
     settings.setdefault("require_supported_market", True)
     settings.setdefault("include_assets_with_balance", True)
     settings.setdefault("hot_reload_enabled", True)
@@ -309,7 +309,7 @@ def resolve_runtime_trading_pairs(
         api_client,
         config_path=whitelist_path,
         configured_pairs=configured_pairs,
-        min_quote_balance_thb=settings.get("min_quote_balance_thb"),
+        min_quote_balance_usdt=settings.get("min_quote_balance_usdt"),
         min_quote_balance_for_pairs=settings.get("min_quote_balance_for_pairs"),
         require_supported_market=settings.get("require_supported_market"),
         include_assets_with_balance=settings.get("include_assets_with_balance"),
@@ -491,7 +491,7 @@ def get_default_config() -> Dict[str, Any]:
             },
             "hybrid_dynamic_coin_config": {
                 "whitelist_json_path": DEFAULT_WHITELIST_JSON,
-                "min_quote_balance_thb": max(float(TRADING.min_order_amount or 0.0), 100.0),
+                "min_quote_balance_usdt": max(float(TRADING.min_order_amount or 0.0), 10.0),
                 "require_supported_market": True,
                 "include_assets_with_balance": True,
             },
