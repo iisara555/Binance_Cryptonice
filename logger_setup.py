@@ -31,6 +31,11 @@ except ImportError:  # pragma: no cover - fallback when rich is not installed ye
     RichHandler = None  # type: ignore[assignment]
     _RICH_AVAILABLE = False
 
+try:
+    from log_formatter import CryptoBotFormatter as _CryptoBotFormatter
+except Exception:  # pragma: no cover
+    _CryptoBotFormatter = None  # type: ignore[assignment,misc]
+
 
 # ── Default constants (overridable via YAML config) ──────────────────────────
 MAX_LOG_SIZE = 100 * 1024 * 1024  # 100 MB per file
@@ -504,17 +509,25 @@ def setup_logging(
                 console=rich_console,
                 rich_tracebacks=True,
                 tracebacks_show_locals=False,
+                show_time=False,
+                show_level=False,
                 show_path=False,
                 omit_repeated_times=False,
-                log_time_format="%H:%M:%S",
                 markup=False,
             )
             console_handler.setLevel(resolved_level)
-            console_handler.setFormatter(logging.Formatter("%(message)s"))
+            if _CryptoBotFormatter is not None:
+                console_handler.setFormatter(_CryptoBotFormatter(use_color=True))
+            else:
+                console_handler.setFormatter(logging.Formatter("%(message)s"))
         else:
             console_handler = logging.StreamHandler()
             console_handler.setLevel(resolved_level)
-            console_handler.setFormatter(HumanReadableFormatter(use_color=_ansi_enabled(console_handler.stream)))
+            use_cbf = _CryptoBotFormatter is not None
+            if use_cbf:
+                console_handler.setFormatter(_CryptoBotFormatter(use_color=_ansi_enabled(console_handler.stream)))
+            else:
+                console_handler.setFormatter(HumanReadableFormatter(use_color=_ansi_enabled(console_handler.stream)))
         root_logger.addHandler(console_handler)
 
     _configure_category_logger("trades", trade_handler)

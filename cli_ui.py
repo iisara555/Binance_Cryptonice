@@ -10,7 +10,7 @@ import sys
 import threading
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from rich import box
 from rich.align import Align
@@ -23,6 +23,12 @@ from rich.text import Text
 
 from helpers import format_exchange_time
 from logger_setup import get_shared_console
+
+try:
+    from log_formatter import format_log_row as _format_log_row, get_tag as _get_log_tag
+except Exception:  # pragma: no cover
+    _format_log_row = None  # type: ignore[assignment]
+    _get_log_tag = None  # type: ignore[assignment]
 
 try:
     from signal_generator import get_latest_signal_flow_snapshot
@@ -230,16 +236,27 @@ class CLICommandCenter:
         if not self._should_capture_log_record(record):
             return
 
-        rendered = record.getMessage().replace("\n", " ").strip()
-        if not rendered:
+        raw = record.getMessage().replace("\n", " ").strip()
+        if not raw:
             return
 
-        timestamp = format_exchange_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
-        logger_name = str(record.name or "root").split(".")[-1]
-        if len(logger_name) > 14:
-            logger_name = logger_name[-14:]
-        if len(rendered) > 150:
-            rendered = f"{rendered[:147]}..."
+        if _format_log_row is not None:
+            try:
+                row = _format_log_row(record)
+                # Override timestamp to exchange timezone (UTC+7) for display consistency
+                row["timestamp"] = format_exchange_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
+            except Exception:
+                ts = format_exchange_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
+                tag = str(record.name or "root").split(".")[-1][-4:].upper()
+                msg = raw[:150] if len(raw) > 150 else raw
+                row = {"timestamp": ts, "level": record.levelname.upper(), "tag": tag, "message": msg, "emoji": ""}
+        else:
+            ts = format_exchange_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
+            tag = str(record.name or "root").split(".")[-1]
+            if len(tag) > 14:
+                tag = tag[-14:]
+            msg = raw[:150] if len(raw) > 150 else raw
+            row = {"timestamp": ts, "level": record.levelname.upper(), "tag": tag, "message": msg, "emoji": ""}
 
         if not self._log_lock.acquire(blocking=False):
             self._dropped_log_count += 1
@@ -252,22 +269,17 @@ class CLICommandCenter:
             if self._dropped_log_count > 0:
                 dropped_count = self._dropped_log_count
                 self._dropped_log_count = 0
+                ts = format_exchange_time(datetime.fromtimestamp(record.created, tz=timezone.utc))
                 self._log_lines.append(
                     {
-                        "timestamp": timestamp,
+                        "timestamp": ts,
                         "level": "WARNING",
-                        "logger": "cli_ui",
+                        "tag": "UI  ",
+                        "emoji": "⚠️",
                         "message": f"Dropped {dropped_count} log record(s) due to dashboard lock contention",
                     }
                 )
-            self._log_lines.append(
-                {
-                    "timestamp": timestamp,
-                    "level": record.levelname.upper(),
-                    "logger": logger_name,
-                    "message": rendered,
-                }
-            )
+            self._log_lines.append(row)
             self._last_log_rows_snapshot = list(self._log_lines)[-8:]
         finally:
             self._log_lock.release()
@@ -338,12 +350,12 @@ class CLICommandCenter:
                 Layout(self._build_log_stream_panel(snapshot, n_buffer=30), name="logs"),
             )
         elif compact_mode:
-            # Mobile: stacked single-column — equal 3:3:3 ratios fill portrait height evenly
+            # Mobile: stacked single-column — Bloomberg layout with larger sigflow
             layout["body"].split_column(
-                Layout(self._build_mobile_position_book(snapshot), ratio=3, name="positions"),
+                Layout(self._build_mobile_position_book(snapshot), ratio=4, name="positions"),
                 Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_signal_flow_panel(snapshot), ratio=3, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=15), ratio=3, name="logs"),
+                Layout(self._build_signal_flow_compact_new(snapshot), ratio=4, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=20), size=4, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -670,6 +682,21 @@ class CLICommandCenter:
     def _build_log_stream_panel(self, snapshot: Dict[str, Any], *, max_lines: Optional[int] = None, n_buffer: int = 8) -> Panel:
         ui_cfg = dict(snapshot.get("ui") or {})
         min_level = str(ui_cfg.get("log_level_filter") or "INFO").upper()
+        compact = self._terminal_compact_mode()
+
+        if compact:
+            # Compact: group up-to-date noise, show last 3 meaningful lines with emoji prefix
+            raw_rows = self._get_filtered_log_rows(min_level, n=40)
+            rows = self._group_log_rows(raw_rows)[-3:]
+            if not rows:
+                return self._panel(
+                    Text(f"Waiting for logs ({min_level}+)...", style=self._DIM),
+                    title="\u2630 Logs",
+                    theme="logs",
+                )
+            lines = [self._log_row_text_compact(row) for row in rows]
+            return self._panel(Group(*lines), title="\u2630 Logs", theme="logs")
+
         rows = self._get_filtered_log_rows(min_level, n=n_buffer)
         if max_lines is not None and max_lines > 0:
             rows = rows[-max_lines:]
@@ -677,25 +704,31 @@ class CLICommandCenter:
         if not rows:
             return self._panel(
                 Text(f"Waiting for runtime logs ({min_level}+)...", style=self._DIM),
-                title="☰ Logs",
+                title="\u2630 Logs",
                 theme="logs",
             )
 
         lines: List[Text] = []
         for row in rows:
             level = str(row.get("level") or "INFO")
+            tag   = str(row.get("tag")   or row.get("logger") or "")[:4].ljust(4)
+            emoji = str(row.get("emoji") or "")
+            msg   = str(row.get("message") or "-")
+            prefix = f"{emoji} " if emoji and not msg.startswith(emoji) else ""
             lines.append(
                 Text.assemble(
                     (f"{row.get('timestamp', '-')} ", self._DIM),
-                    (f"{level:<8}", self._level_style(level)),
-                    (f" {row.get('logger', '-'):<14}", f"bold {self._WHITE}"),
-                    (f" {row.get('message', '-')}", self._WHITE),
+                    (f"{level:<4}", self._level_style(level)),
+                    (" │ ", self._DIM),
+                    (f"{tag}", f"bold {self._CYAN}"),
+                    (" │ ", self._DIM),
+                    (f"{prefix}{msg}", self._WHITE),
                 )
             )
 
-        title = f"☰ Logs [{min_level}+]"
+        title = f"\u2630 Logs [{min_level}+]"
         if max_lines is not None:
-            title = f"☰ Logs (last {max_lines}) [{min_level}+]"
+            title = f"\u2630 Logs (last {max_lines}) [{min_level}+]"
         return self._panel(Group(*lines), title=title, theme="logs")
 
     def _build_header(self, snapshot: Dict[str, Any]) -> Panel:
@@ -747,37 +780,46 @@ class CLICommandCenter:
         return self._panel(Align.left(header), title="Dashboard", theme="header")
 
     def _build_compact_status_bar(self, snapshot: Dict[str, Any]) -> Panel:
-        """One-line status strip for narrow terminals."""
+        """Bloomberg-style one-line status strip: ⚡ Bot │ 🟢 LIVE │ 22:49 │ 💰 cash │ 📊 slots │ 📉 pnl%."""
         system = dict(snapshot.get("system") or {})
         positions = list(snapshot.get("positions") or [])
         open_n = len(positions)
         max_pos = max(1, int(float(self._extract_numeric(system.get("max_open_positions"), 6))))
-        mode = str(snapshot.get("mode", "-"))
+        mode = str(snapshot.get("mode", "-")).upper()
         mode_style = self._mode_style(mode)
+        mode_icon = "🟢" if mode == "LIVE" else ("🟡" if "SIM" in mode else "🔴")
         t = str(snapshot.get("updated_at") or "-")
+        # Cash: extract numerics from balance strings
         avail_raw = str(system.get("available_balance") or "").strip()
         total_raw = str(system.get("total_balance") or "").strip()
-        cash_compact = self._strip_balance_label_for_status(avail_raw, total_raw)
-        daily = str(system.get("daily_loss") or "-").replace("  ", " ")
-        parts: List[Any] = [
+        avail_num = self._extract_numeric(avail_raw, 0.0)
+        total_num = self._extract_numeric(total_raw, 0.0)
+        try:
+            quote_asset = str(self.app._get_quote_asset()).upper()
+        except Exception:
+            quote_asset = "USDT"
+        cash_part = f"{avail_num:.2f}/{total_num:.2f} {quote_asset}"
+        # Daily PnL% indicator
+        dloss_pct_s = str(system.get("daily_loss_pct") or "-")
+        dloss_val, _ = self._extract_fraction(system.get("daily_loss"))
+        pnl_icon = "📉" if dloss_val > 0 else "📈"
+        pnl_style = f"bold {self._RED}" if dloss_val > 0 else f"bold {self._GREEN}"
+        line = Text.assemble(
+            ("⚡ ", f"bold {self._CYAN}"),
             (str(snapshot.get("bot_name", self.bot_name) or "Bot"), f"bold {self._WHITE}"),
-            (" | ", self._DIM),
+            (" │ ", self._DIM),
+            (f"{mode_icon} ", ""),
             (mode, mode_style),
-            (" | ", self._DIM),
+            (" │ ", self._DIM),
             (t, self._DIM),
-            (" | Cash ", self._DIM),
-            (cash_compact, f"bold {self._EMBER}"),
-            (" | Slots ", self._DIM),
+            (" │ 💰 ", self._DIM),
+            (cash_part, f"bold {self._EMBER}"),
+            (" │ 📊 ", self._DIM),
             (f"{open_n}/{max_pos}", f"bold {self._CYAN}"),
-            (" | Loss ", self._DIM),
-            (daily, self._WHITE),
-        ]
-        line = Text.assemble(*parts)
-        term_w, _ = self._layout_term_dimensions(self.console)
-        plain = line.plain
-        if len(plain) > max(48, term_w - 3):
-            collapsed = self._truncate_inline(plain, max(40, term_w - 6))
-            line = Text(collapsed, style=self._WHITE)
+            (" │ ", self._DIM),
+            (f"{pnl_icon} ", ""),
+            (dloss_pct_s, pnl_style),
+        )
         return self._panel(Align.left(line), title="Status", theme="header")
 
     @staticmethod
@@ -790,113 +832,170 @@ class CLICommandCenter:
         return (a or b or "-").replace(" ", "")
 
     def _build_mobile_position_book(self, snapshot: Dict[str, Any]) -> Panel:
-        """Compact position table: full symbol, SL/TP distance columns; max 5 rows."""
-        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
-        table.add_column("Symbol", style=self._WHITE, no_wrap=True, min_width=10)
-        table.add_column("Side", justify="center", no_wrap=True, width=5)
-        table.add_column("Entry", justify="right", style=self._DIM, no_wrap=True)
-        table.add_column("Curr", justify="right", no_wrap=True)
-        table.add_column("PnL%", justify="right", no_wrap=True)
-        table.add_column("SLΔ%", justify="right", style=self._DIM, no_wrap=True)
-        table.add_column("TPΔ%", justify="right", style=self._DIM, no_wrap=True)
-
-        all_pos_full = list(snapshot.get("positions") or [])
-        positions: List[Dict[str, Any]] = all_pos_full[:5]
+        """Bloomberg position book: emoji + symbol + side + entry→curr + pnl + sl + tp + strat badge."""
         system = dict(snapshot.get("system") or {})
-        quote_asset = "USDT"
+        all_pos = list(snapshot.get("positions") or [])
+        positions: List[Dict[str, Any]] = all_pos[:5]
         try:
             quote_asset = str(self.app._get_quote_asset()).upper()
         except Exception:
-            pass
+            quote_asset = "USDT"
 
+        # Portfolio summary header
         pv = self._extract_numeric(system.get("risk_portfolio_value_quote"), 0.0)
         if pv <= 0:
             pv = self._extract_numeric(str(system.get("total_balance", "0")).replace(",", ""), 0.0)
         dloss_amt, dloss_cap = self._extract_fraction(system.get("daily_loss"))
         dloss_pct_s = str(system.get("daily_loss_pct") or "-")
-        pnl_vals = [self._safe_float(p.get("pnl_pct")) for p in all_pos_full]
+        pnl_vals = [self._safe_float(p.get("pnl_pct")) for p in all_pos]
         valid_pv = [v for v in pnl_vals if v is not None]
         win_n = sum(1 for v in valid_pv if v > 0)
         lose_n = sum(1 for v in valid_pv if v < 0)
         avg_pnl = (sum(valid_pv) / len(valid_pv)) if valid_pv else 0.0
         sign = "-" if dloss_amt > 0 else "+"
-        today_part = f"{sign}{abs(dloss_amt):.2f} {quote_asset} ({dloss_pct_s})" if dloss_cap or dloss_amt else "-"
-
+        today_part_str = f"{sign}{abs(dloss_amt):.2f} {quote_asset} ({dloss_pct_s})" if dloss_cap or dloss_amt else "-"
+        today_style = self._RED if dloss_amt > 0 else self._GREEN
         summary = Text.assemble(
             ("Portfolio: ", self._DIM),
             (f"{pv:.2f} {quote_asset}", f"bold {self._WHITE}"),
-            (" | Today: ", self._DIM),
-            (today_part, self._RED if dloss_amt > 0 else self._GREEN),
-            (" | W/L: ", self._DIM),
+            (" │ Today: ", self._DIM),
+            (today_part_str, today_style),
+            (" │ W/L: ", self._DIM),
             (f"{win_n}/{lose_n}", f"bold {self._CYAN}"),
         )
 
-        if not positions:
-            theme = self._resolve_positions_theme(avg_pnl)
-            return self._panel(
-                Group(summary, Text("No open positions", style=self._DIM)),
-                title="\u25c6 Position Book",
-                theme=theme,
+        # Daily loss progress bar
+        pbar_text: Optional[Text] = None
+        if dloss_cap > 0:
+            used_pct = min(1.0, dloss_amt / dloss_cap)
+            filled = int(round(used_pct * 10))
+            empty = 10 - filled
+            bar_style = (
+                f"bold {self._RED}" if used_pct > 0.7
+                else (f"bold {self._EMBER}" if used_pct > 0.3 else f"bold {self._GREEN}")
+            )
+            pbar_text = Text.assemble(
+                ("PnL: ", self._DIM),
+                ("\u2588" * filled, bar_style),
+                ("\u2591" * empty, self._DIM),
+                (f" {used_pct * 100:.0f}% of daily limit", self._DIM),
             )
 
-        for position in positions:
-            sym = str(position.get("symbol", "-"))
-            sl_d = self._fmt_distance_pct(position.get("sl_distance_pct"))
-            tp_d = self._fmt_distance_pct(position.get("tp_distance_pct"))
+        if not positions:
+            theme = self._resolve_positions_theme(avg_pnl)
+            blocks: List[Any] = [summary]
+            if pbar_text:
+                blocks.append(pbar_text)
+            blocks.append(Text("No open positions", style=self._DIM))
+            return self._panel(Group(*blocks), title="\u25c6 Position Book", theme=theme)
+
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table.add_column("", no_wrap=True, width=2)  # emoji indicator
+        table.add_column("Symbol", style=self._WHITE, no_wrap=True, min_width=9)
+        table.add_column("Side", justify="center", no_wrap=True, width=4)
+        table.add_column("Entry\u2192Curr", justify="right", no_wrap=True, min_width=14)
+        table.add_column("PnL%", justify="right", no_wrap=True, width=7)
+        table.add_column("SL\u25bc", justify="right", no_wrap=True, width=6)
+        table.add_column("TP\u25b2", justify="right", no_wrap=True, width=6)
+        table.add_column("Strat", justify="center", no_wrap=True, width=5)
+
+        for pos in positions:
+            emoji = self._position_emoji(pos.get("pnl_pct"), pos.get("sl_distance_pct"))
+            sym = str(pos.get("symbol", "-"))
+            entry = self._format_price_smart(pos.get("entry_price"))
+            curr = self._format_price_smart(pos.get("current_price"))
+            entry_curr = f"{entry}\u2192{curr}"
+
+            pnl_v = self._safe_float(pos.get("pnl_pct"))
+            pnl_str = (
+                f"+{pnl_v:.2f}%" if pnl_v is not None and pnl_v > 0
+                else (f"{pnl_v:.2f}%" if pnl_v is not None else "-")
+            )
+            pnl_s = self._pnl_style_rich(pnl_v)
+
+            sl_d = self._safe_float(pos.get("sl_distance_pct"))
+            sl_str = f"{sl_d:.1f}%" if sl_d is not None else "-"
+            sl_s = self._sl_dist_style(sl_d)
+
+            tp_d = self._safe_float(pos.get("tp_distance_pct"))
+            tp_str = (
+                f"+{tp_d:.1f}%" if tp_d is not None and tp_d > 0
+                else (f"{tp_d:.1f}%" if tp_d is not None else "-")
+            )
+            tp_s = self._tp_dist_style(tp_d)
+
+            strat_text = self._strategy_label_text(str(pos.get("strategy_source") or "-"))
+
             table.add_row(
+                emoji,
                 sym,
-                self._side_text(str(position.get("side", "-"))).plain,
-                self._fmt_price(position.get("entry_price")),
-                self._fmt_price(position.get("current_price")),
-                self._pnl_text(position.get("pnl_pct")).plain,
-                sl_d.plain if hasattr(sl_d, "plain") else str(sl_d),
-                tp_d.plain if hasattr(tp_d, "plain") else str(tp_d),
+                self._side_text(str(pos.get("side", "-"))),
+                Text(entry_curr, style=self._DIM),
+                Text(pnl_str, style=pnl_s),
+                Text(sl_str, style=sl_s),
+                Text(tp_str, style=tp_s),
+                strat_text,
             )
 
         theme = self._resolve_positions_theme(avg_pnl)
-        return self._panel(Group(summary, table), title="\u25c6 Position Book", theme=theme)
+        blocks2: List[Any] = [summary]
+        if pbar_text:
+            blocks2.append(pbar_text)
+        blocks2.append(table)
+        return self._panel(Group(*blocks2), title="\u25c6 Position Book", theme=theme)
 
     def _build_mobile_risk_rails_line(self, snapshot: Dict[str, Any]) -> Panel:
-        """Single-line risk strip with green/yellow/red emphasis."""
+        """Single-line risk strip: Risk % │ ✓ Ready/⏳ Cooling │ Active │ Expose │ Loss."""
         system = dict(snapshot.get("system") or {})
         positions = list(snapshot.get("positions") or [])
         open_positions = len(positions)
         max_positions = max(1.0, self._extract_numeric(system.get("max_open_positions"), 1.0))
         trade_count = self._extract_numeric(system.get("trade_count"), 0.0)
         max_daily_trades = max(1.0, self._extract_numeric(system.get("max_daily_trades"), 1.0))
-        fresh = str(system.get("freshness") or "fresh").lower()
-        cooling = str(system.get("cooling_down") or "No")
         risk_pt = str(system.get("risk_per_trade") or "-")
+        cooling = str(system.get("cooling_down") or "No")
         daily_loss_str = str(system.get("daily_loss") or "-").replace("  ", " ")
-        line_plain = (
-            f"Risk {risk_pt} | Cool {cooling} | Active {int(trade_count)}/{int(max_daily_trades)} | "
-            f"Expose {open_positions}/{int(max_positions)} | Loss {daily_loss_str}"
+
+        # Cooling indicator
+        cool_text = (
+            Text("\u23f3 Cooling", style=f"bold {self._EMBER}")
+            if cooling == "Yes"
+            else Text("\u2713 Ready", style=f"bold {self._GREEN}")
         )
 
+        # Loss color based on ratio
+        dloss_amt, dloss_cap = self._extract_fraction(system.get("daily_loss"))
+        if dloss_cap > 0:
+            ratio = dloss_amt / dloss_cap
+            if ratio > 0.7:
+                loss_style = f"bold {self._RED}"
+            elif ratio > 0.3:
+                loss_style = f"bold {self._EMBER}"
+            else:
+                loss_style = f"bold {self._GREEN}"
+        else:
+            loss_style = self._WHITE
+
+        # Overall warn/bad state
+        fresh = str(system.get("freshness") or "fresh").lower()
         mode = str(snapshot.get("mode", "")).upper()
         warn = fresh == "warning" or cooling == "Yes"
-        bad = fresh == "critical" or mode in {"READ ONLY", "DEGRADED"} or "BLOCK" in str(snapshot.get("risk_level", "")).upper()
-        try:
-            dlv, dlc = self._extract_fraction(system.get("daily_loss"))
-            if dlc > 0 and dlv / dlc >= 0.85:
-                warn = True
-            if dlc > 0 and dlv / dlc >= 0.98:
-                bad = True
-        except Exception:
-            pass
-        if open_positions >= max_positions * 0.9:
+        if open_positions >= max_positions * 0.9 or trade_count >= max_daily_trades * 0.9:
             warn = True
-        if trade_count >= max_daily_trades * 0.9:
-            warn = True
+        risk_label_style = f"bold {self._EMBER}" if warn else self._WHITE
 
-        if bad:
-            style = f"bold {self._RED}"
-        elif warn:
-            style = f"bold {self._EMBER}"
-        else:
-            style = f"bold {self._GREEN}"
-
-        return self._panel(Text(line_plain, style=style), title="\u26a0 Risk Rails", theme="risk")
+        line = Text.assemble(
+            (f"Risk {risk_pt}", risk_label_style),
+            (" \u2502 ", self._DIM),
+            cool_text,
+            (" \u2502 Active ", self._DIM),
+            (f"{int(trade_count)}/{int(max_daily_trades)}", f"bold {self._WHITE}"),
+            (" \u2502 Expose ", self._DIM),
+            (f"{open_positions}/{int(max_positions)}", f"bold {self._CYAN}"),
+            (" \u2502 Loss ", self._DIM),
+            (daily_loss_str, loss_style),
+        )
+        return self._panel(line, title="\u26a0 Risk Rails", theme="risk")
 
     @staticmethod
     def _sigflow_short_why(reason: str, result: str, *, max_len: int = 28) -> str:
@@ -913,6 +1012,136 @@ class CLICommandCenter:
         if len(s) <= max_len:
             return s
         return s[: max_len - 1] + "\u2026"
+
+    def _build_signal_flow_compact_new(self, snapshot: Dict[str, Any]) -> Panel:
+        """Unified per-pair+strategy SigFlow table (always full, no toggle)."""
+        try:
+            flow_snapshot = get_latest_signal_flow_snapshot()
+        except Exception as exc:
+            self._safe_stderr_write(f"[cli_ui] signal flow snapshot error: {exc}\n")
+            flow_snapshot = {}
+
+        positions = list(snapshot.get("positions") or [])
+        pos_by_sym: Dict[str, Dict[str, Any]] = {str(p.get("symbol", "")).upper(): p for p in positions}
+
+        strategy_defs = [
+            ("machete_v8b_lite", "〔M〕", f"bold {self._CYAN}"),
+            ("simple_scalp_plus", "〔S〕", f"bold {self._EMBER}"),
+        ]
+
+        # Collect pairs: use signal_alignment order then flow_snapshot
+        pairs_ordered: List[str] = []
+        seen_pairs: set = set()
+        for row in list(snapshot.get("signal_alignment") or []):
+            sym = str(row.get("symbol") or "").upper()
+            if sym and sym not in seen_pairs:
+                pairs_ordered.append(sym)
+                seen_pairs.add(sym)
+        for sym in sorted(flow_snapshot.keys()):
+            sym_u = str(sym).upper()
+            if sym_u not in seen_pairs:
+                pairs_ordered.append(sym_u)
+                seen_pairs.add(sym_u)
+
+        # Build stats for summary line
+        stats: Dict[str, Dict[str, int]] = {k: {"pass": 0, "reject": 0} for k, _, _ in strategy_defs}
+        buy_syms: List[str] = []
+        sell_syms: List[str] = []
+
+        # Build table
+        table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
+        table.add_column("Pair",   no_wrap=True, width=9, style=self._WHITE)
+        table.add_column("Strat",  no_wrap=True, width=5, justify="center")
+        table.add_column("Signal", no_wrap=True, width=5, justify="center")
+        table.add_column("Conf",   no_wrap=True, width=6, justify="right")
+        table.add_column("RR",     no_wrap=True, width=5, justify="right")
+        table.add_column("State",  no_wrap=True, width=8)
+        table.add_column("Reason", no_wrap=False, min_width=20, ratio=1, overflow="ellipsis")
+
+        if not pairs_ordered and not flow_snapshot:
+            table.add_row("-", "—", "—", "—", "—", "—", "no SigFlow data")
+        else:
+            for pair in pairs_ordered:
+                flow = flow_snapshot.get(pair, {})
+                if not isinstance(flow, dict):
+                    flow = {}
+                steps_dict = flow.get("steps") or {}
+                pos = pos_by_sym.get(pair)
+                pnl_pct = self._safe_float((pos or {}).get("pnl_pct"))
+                sl_dist = self._safe_float((pos or {}).get("sl_distance_pct"))
+
+                display_pair = pair.replace("USDT", "")
+                if pos:
+                    row_emoji = self._position_emoji(pnl_pct, sl_dist)
+                    pair_cell = Text.assemble((f"{row_emoji} ", ""), (display_pair, self._WHITE))
+                    state_text = Text("HOLDING", style=f"bold {self._CYAN}")
+                else:
+                    pair_cell = Text.assemble(("\u2b1c ", self._DIM), (display_pair, self._DIM))
+                    state_text = Text("IDLE", style=self._DIM)
+
+                for strategy_key, badge, badge_style in strategy_defs:
+                    step_key = f"Strategy:{strategy_key}"
+                    step_data = steps_dict.get(step_key)
+                    strat_text = Text(badge, style=badge_style)
+
+                    if not isinstance(step_data, dict):
+                        table.add_row(
+                            pair_cell, strat_text,
+                            Text("—", style=self._DIM),
+                            Text("—", style=self._DIM),
+                            Text("—", style=self._DIM),
+                            state_text,
+                            Text("warmup", style=self._DIM),
+                        )
+                        continue
+
+                    result_raw = str(step_data.get("result") or "").upper()
+                    reason_raw = str(step_data.get("reason") or "")
+
+                    sig_type, conf_s, rr_s = self._parse_strategy_signal_fields(reason_raw, result_raw)
+
+                    # Signal cell
+                    if sig_type == "BUY":
+                        sig_text = Text("BUY", style=f"bold {self._GREEN}")
+                    elif sig_type == "SELL":
+                        sig_text = Text("SELL", style=f"bold {self._RED}")
+                    elif sig_type not in {"—", "-", ""}:
+                        sig_text = Text(sig_type, style=self._WHITE)
+                    else:
+                        sig_text = Text("—", style=self._DIM)
+
+                    conf_text = Text(conf_s, style=self._conf_style(conf_s) if conf_s != "—" else self._DIM)
+                    rr_text = Text(rr_s, style=self._rr_style(rr_s) if rr_s not in {"—", "N/A"} else self._DIM)
+                    reason_text = self._sigflow_reason_text(reason_raw, result_raw)
+
+                    # Update stats
+                    if result_raw == "PASS":
+                        stats[strategy_key]["pass"] += 1
+                        short = pair.replace("USDT", "").replace("THB_", "")
+                        if sig_type == "BUY" and short not in buy_syms:
+                            buy_syms.append(short)
+                        elif sig_type == "SELL" and short not in sell_syms:
+                            sell_syms.append(short)
+                    elif result_raw == "REJECT":
+                        stats[strategy_key]["reject"] += 1
+
+                    table.add_row(pair_cell, strat_text, sig_text, conf_text, rr_text, state_text, reason_text)
+
+        # Summary line
+        summary_parts: List[Any] = []
+        for strategy_key, badge, badge_style in strategy_defs:
+            st = stats[strategy_key]
+            summary_parts.extend([
+                (badge, badge_style),
+                (f"{st['pass']}\u2713 {st['reject']}\u2717  ", self._DIM),
+            ])
+        if buy_syms:
+            summary_parts.extend([("BUY: ", f"bold {self._GREEN}"), (" ".join(buy_syms[:4]), f"bold {self._GREEN}"), ("  ", "")])
+        if sell_syms:
+            summary_parts.extend([("SELL: ", f"bold {self._RED}"), (" ".join(sell_syms[:4]), f"bold {self._RED}")])
+        summary = Text.assemble(*summary_parts)
+
+        return self._panel(Group(summary, table), title="\u25ec SigFlow", theme="signal_flow")
 
     def _build_signal_flow_collapsed(self, snapshot: Dict[str, Any]) -> Panel:
         """Summary + PASS pairs only; per-strategy counts over full snapshot."""
@@ -1408,11 +1637,13 @@ class CLICommandCenter:
         return self._panel(Group(*summary_lines, table), title="◎ Signal Radar", theme=self._resolve_signal_theme(rows))
 
     def _build_signal_flow_panel(self, snapshot: Dict[str, Any]) -> Panel:
-        """Render Signal Flow by strategy: Machete and SimpleScalpPlus."""
-        ui_cfg = dict(snapshot.get("ui") or {})
+        """Render Signal Flow. Compact mode: unified per-pair+strategy table. Wide: per-strategy tables."""
         compact_term = self._terminal_compact_mode()
-        if compact_term and not ui_cfg.get("sigflow_full"):
-            return self._build_signal_flow_collapsed(snapshot)
+        if compact_term:
+            return self._build_signal_flow_compact_new(snapshot)
+
+        # --- wide-mode path (unchanged) ---
+        ui_cfg = dict(snapshot.get("ui") or {})
 
         try:
             flow_snapshot = get_latest_signal_flow_snapshot()
@@ -2099,6 +2330,257 @@ class CLICommandCenter:
         text.append("]", style=CLICommandCenter._DIM)
         text.append(f" {normalized_pct:5.1f}%", style=CLICommandCenter._DIM)
         return text
+
+    _STRATEGY_SHORT: ClassVar[Dict[str, str]] = {
+        "machetev8blite": "MchtV8",
+        "simplescalpplus": "Scalp+",
+    }
+
+    def _abbrev_strategy(self, name: str) -> str:
+        """Return a compact display name for a strategy_source string."""
+        key = (name or "-").lower().replace(" ", "")
+        return self._STRATEGY_SHORT.get(key, (name or "-")[:6])
+
+    @classmethod
+    def _strategy_label_text(cls, name: str) -> "Text":
+        """Colored strategy badge: 〔M〕cyan, 〔S〕amber, 〔B〕dim, 〔~〕magenta, 〔?〕dim-red."""
+        key = str(name or "").lower().replace(" ", "").replace("_", "")
+        if "machetev8b" in key or key == "machetev8blite":
+            return Text("〔M〕", style=f"bold {cls._CYAN}")
+        if "simplescalp" in key or key == "simplescalpplus":
+            return Text("〔S〕", style=f"bold {cls._EMBER}")
+        if key == "bootstrap":
+            return Text("〔B〕", style=cls._DIM)
+        if key == "manual":
+            return Text("〔~〕", style=f"bold {cls._PURPLE}")
+        return Text("〔?〕", style=f"dim {cls._RED}")
+
+    @staticmethod
+    def _position_emoji(pnl_pct: Any, sl_dist_pct: Any) -> str:
+        """Row emoji: ⚡ SL danger, 🟢 profit, 🔴 big loss, 🟡 small/no loss."""
+        try:
+            sl = abs(float(sl_dist_pct or 999))
+        except (TypeError, ValueError):
+            sl = 999.0
+        if sl < 0.3:
+            return "⚡"
+        try:
+            pnl = float(pnl_pct or 0)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        if pnl > 0:
+            return "🟢"
+        if pnl < -0.5:
+            return "🔴"
+        return "🟡"
+
+    @staticmethod
+    def _pnl_style_rich(pnl_pct: Any) -> str:
+        """PnL style: bold-green > 0, amber -0.5~0, red < -0.5."""
+        try:
+            v = float(pnl_pct or 0)
+        except (TypeError, ValueError):
+            return CLICommandCenter._WHITE
+        if v > 0:
+            return f"bold {CLICommandCenter._GREEN}"
+        if v >= -0.5:
+            return f"bold {CLICommandCenter._EMBER}"
+        return f"bold {CLICommandCenter._RED}"
+
+    @staticmethod
+    def _sl_dist_style(sl_dist_pct: Any) -> str:
+        """SL distance style: bold-red < 1%, amber 1–2%, dim > 2%."""
+        try:
+            v = abs(float(sl_dist_pct or 999))
+        except (TypeError, ValueError):
+            return CLICommandCenter._DIM
+        if v < 1.0:
+            return f"bold {CLICommandCenter._RED}"
+        if v < 2.0:
+            return f"bold {CLICommandCenter._EMBER}"
+        return CLICommandCenter._DIM
+
+    @staticmethod
+    def _tp_dist_style(tp_dist_pct: Any) -> str:
+        """TP distance style: bold-green < 1%, amber 1–3%, dim > 3%."""
+        try:
+            v = abs(float(tp_dist_pct or 999))
+        except (TypeError, ValueError):
+            return CLICommandCenter._DIM
+        if v < 1.0:
+            return f"bold {CLICommandCenter._GREEN}"
+        if v < 3.0:
+            return f"bold {CLICommandCenter._EMBER}"
+        return CLICommandCenter._DIM
+
+    @staticmethod
+    def _conf_style(conf: Any) -> str:
+        """Confidence style: bold-green ≥0.90, amber 0.70–0.89, dim < 0.70."""
+        try:
+            v = float(conf or 0)
+        except (TypeError, ValueError):
+            return CLICommandCenter._DIM
+        if v >= 0.90:
+            return f"bold {CLICommandCenter._GREEN}"
+        if v >= 0.70:
+            return f"bold {CLICommandCenter._EMBER}"
+        return CLICommandCenter._DIM
+
+    @staticmethod
+    def _rr_style(rr: Any) -> str:
+        """Risk/reward style: bold-green ≥2.0, amber 1.5–1.9, red < 1.5."""
+        s = str(rr or "").upper()
+        if s in {"—", "-", "N/A", ""}:
+            return CLICommandCenter._DIM
+        try:
+            v = float(s)
+        except (TypeError, ValueError):
+            return CLICommandCenter._DIM
+        if v >= 2.0:
+            return f"bold {CLICommandCenter._GREEN}"
+        if v >= 1.5:
+            return f"bold {CLICommandCenter._EMBER}"
+        return f"bold {CLICommandCenter._RED}"
+
+    @staticmethod
+    def _parse_strategy_signal_fields(reason: str, result: str) -> "tuple[str, str, str]":
+        """Parse (signal_type, conf, rr) from a Strategy step reason string (PASS only)."""
+        reason_s = str(reason or "")
+        result_u = str(result or "").upper()
+        if result_u != "PASS":
+            return "—", "—", "—"
+        type_m = re.search(r"type=([A-Z]+)", reason_s, re.I)
+        conf_m = re.search(r"\bconf=([0-9.]+)", reason_s, re.I)
+        rr_m = re.search(r"\bRR=([0-9.]+|N/A)\b", reason_s, re.I)
+        signal_type = type_m.group(1).upper() if type_m else "—"
+        conf = conf_m.group(1) if conf_m else "—"
+        rr = rr_m.group(1) if rr_m else "—"
+        return signal_type, conf, rr
+
+    @classmethod
+    def _sigflow_reason_text(cls, reason: str, result: str) -> "Text":
+        """Colored Reason cell for the SigFlow unified table."""
+        s = str(reason or "").strip()
+        result_u = str(result or "").upper()
+        if not s:
+            return Text("—", style=cls._DIM)
+        low = s.lower()
+        # ALL_CAPS_UNDERSCORES reason codes → dim red
+        if re.match(r"^[A-Z][A-Z0-9_]{2,}$", s) and "_" in s:
+            return Text(s[:24], style=f"dim {cls._RED}")
+        # NO_SETUP
+        if "no_setup" in low or "generate_signal() returned none" in low or "no setup" in low:
+            return Text("NO_SETUP", style=cls._DIM)
+        # Insufficient bars
+        m = re.search(r"insufficient.*?(\d+)/(\d+)", low)
+        if m:
+            return Text(f"INSUFF ({m.group(1)}/{m.group(2)})", style=f"dim {cls._EMBER}")
+        m2 = re.search(r"(\d+)/(\d+) bars", low)
+        if m2:
+            return Text(f"INSUFF ({m2.group(1)}/{m2.group(2)})", style=f"dim {cls._EMBER}")
+        # Warmup
+        if "warmup" in low or "first signal cycle" in low or s.lower() == "no diagnostics":
+            return Text("warmup", style=cls._DIM)
+        # Passing signal → cyan summary
+        if result_u == "PASS":
+            conf_m = re.search(r"\bconf=([0-9.]+)", s, re.I)
+            if conf_m:
+                return Text(f"conf={conf_m.group(1)}", style=f"bold {cls._CYAN}")
+            tail = cls._truncate_inline(s.split(":")[-1].strip() if ":" in s else s, 20)
+            return Text(tail, style=f"bold {cls._CYAN}")
+        # SR_GUARD shortcut
+        if "sr_guard" in low:
+            return Text("SR_GUARD_BLOCKED", style=f"dim {cls._RED}")
+        # Cooldown
+        if "cooldown" in low:
+            return Text("cooldown", style=f"dim {cls._EMBER}")
+        # Generic tail
+        tail = cls._truncate_inline(s.split(":")[-1].strip() if ":" in s else s, 22)
+        return Text(tail, style=cls._DIM)
+
+    @staticmethod
+    def _format_price_smart(value: Any) -> str:
+        """Smart price format: fewer decimals for large prices."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return "-"
+        if v <= 0:
+            return "-"
+        if v >= 10000:
+            return f"{v:,.0f}"
+        if v >= 100:
+            return f"{v:,.2f}"
+        if v >= 1:
+            return f"{v:.4f}"
+        return f"{v:.6f}"
+
+    @staticmethod
+    def _group_log_rows(rows: "List[Dict[str, str]]") -> "List[Dict[str, str]]":
+        """Collapse runs of 'up to date' log messages into a single counted line."""
+        result: List[Dict[str, str]] = []
+        udt_count = 0
+        last_udt: Optional[Dict[str, str]] = None
+        for row in rows:
+            msg = str(row.get("message") or "").lower()
+            if "up to date" in msg:
+                udt_count += 1
+                last_udt = row
+            else:
+                if udt_count > 0 and last_udt is not None:
+                    if udt_count > 1:
+                        merged = dict(last_udt)
+                        merged["message"] = f"all pairs: up to date \u00d7{udt_count}"
+                        result.append(merged)
+                    else:
+                        result.append(last_udt)
+                    udt_count = 0
+                    last_udt = None
+                result.append(row)
+        if udt_count > 0 and last_udt is not None:
+            if udt_count > 1:
+                merged = dict(last_udt)
+                merged["message"] = f"all pairs: up to date \u00d7{udt_count}"
+                result.append(merged)
+            else:
+                result.append(last_udt)
+        return result
+
+    @classmethod
+    def _log_row_text_compact(cls, row: "Dict[str, str]") -> "Text":
+        """Compact log line: TS │ TAG │ EMOJI msg, color-coded by level/content."""
+        level   = str(row.get("level") or "INFO").upper()
+        msg     = str(row.get("message") or "-")
+        ts      = str(row.get("timestamp") or "-")
+        tag     = str(row.get("tag") or row.get("logger") or "")[:4].ljust(4)
+        emoji   = str(row.get("emoji") or "")
+        msg_low = msg.lower()
+
+        # Determine style
+        if level in {"ERROR", "CRITICAL"} or any(w in msg_low for w in ("paused", "blocked", "failed", "❗")):
+            style = f"bold {cls._RED}"
+        elif level == "WARNING" or "⚠" in emoji:
+            style = f"bold {cls._EMBER}"
+        elif any(e in emoji for e in ("✅", "💰", "🎯", "📩")):
+            style = f"bold {cls._GREEN}"
+        elif any(e in emoji for e in ("🛑", "🚨", "⛔", "🔴", "❌")):
+            style = f"bold {cls._RED}"
+        elif any(e in emoji for e in ("📊", "🔄", "📡", "🌐")):
+            style = cls._CYAN
+        elif "up to date" in msg_low or "🔁" in emoji:
+            style = cls._DIM
+        else:
+            style = cls._WHITE
+
+        # Prefix emoji (avoid double if message already starts with it)
+        prefix = f"{emoji} " if emoji and not msg.startswith(emoji) else ""
+
+        return Text.assemble(
+            (f"{ts} ", cls._DIM),
+            (f"{tag}", f"bold {cls._CYAN}"),
+            (" │ ", cls._DIM),
+            (f"{prefix}{msg}", style),
+        )
 
     @staticmethod
     def _fmt_distance_pct(value: Any) -> Text:
