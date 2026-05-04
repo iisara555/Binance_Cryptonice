@@ -2413,7 +2413,7 @@ class TestCliSnapshot:
         assert snapshot["system"]["min_balance_threshold_quote"] == 100.0
         assert snapshot["system"]["risk_portfolio_value_quote"] == pytest.approx(42.27)
         assert snapshot["system"]["portfolio_meets_trade_floor"] is False
-        assert "BELOW MIN" in snapshot["system"]["risk_floor_display"]
+        assert "BELOW FLOOR" in snapshot["system"]["risk_floor_display"]
 
         app = TradingBotApp.__new__(TradingBotApp)
         app.config = {

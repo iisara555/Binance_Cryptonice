@@ -560,14 +560,23 @@ def get_cli_snapshot(app, bot_name: Optional[str] = None) -> Dict[str, Any]:
 
     risk_portfolio_value = float(PortfolioRuntimeHelper.get_risk_portfolio_value(portfolio_state))
     try:
-        min_balance_floor = float((app.config.get("portfolio") or {}).get("min_balance_threshold", 100.0) or 100.0)
+        _rm = getattr(getattr(app, "bot", None), "risk_manager", None)
+        _rm_floor = getattr(getattr(_rm, "config", None), "min_balance_threshold", None)
+        if _rm_floor is not None:
+            min_balance_floor = float(_rm_floor)
+        else:
+            min_balance_floor = float((app.config.get("portfolio") or {}).get("min_balance_threshold", 100.0) or 100.0)
     except (TypeError, ValueError):
         min_balance_floor = 100.0
     portfolio_meets_floor = risk_portfolio_value >= min_balance_floor
-    risk_floor_display = (
-        f"{risk_portfolio_value:.2f} / {min_balance_floor:.0f} {quote_asset} "
-        f"({'OK' if portfolio_meets_floor else 'BELOW MIN — entries blocked'})"
-    )
+    if not portfolio_meets_floor:
+        risk_floor_display = (
+            f"{risk_portfolio_value:.2f} / {min_balance_floor:.2f} {quote_asset} ⚠ BELOW FLOOR"
+        )
+    else:
+        risk_floor_display = (
+            f"{risk_portfolio_value:.2f} / {min_balance_floor:.2f} {quote_asset} (OK)"
+        )
 
     return {
         "bot_name": bot_name or app._cli_bot_name,
