@@ -66,8 +66,10 @@ class ManagedLifecycleHelper:
         raw_sig = str(snapshot.signal_source or "").strip()
         if not raw_sig or raw_sig.lower() == "strategy":
             strat_label = "-"
+            entry_key = "-"
         else:
-            strat_label = raw_sig
+            strat_label = self.bot.executor._display_strategy_name(raw_sig)
+            entry_key = raw_sig
         pos_data = {
             "symbol": snapshot.symbol,
             "side": OrderSide.BUY,
@@ -84,6 +86,7 @@ class ManagedLifecycleHelper:
             "filled_price": filled_price,
             "state_managed": True,
             "strategy_source": strat_label,
+            "entry_strategy_key": entry_key,
         }
         self.bot.executor.register_tracked_position(snapshot.entry_order_id, pos_data)
         self.bot._register_sl_hold_entry(snapshot.entry_order_id)
@@ -223,9 +226,9 @@ class ManagedLifecycleHelper:
             logger.error("Trade execution failed: %s", result.message)
             return
 
-        entry_strategy = self.bot.executor._resolve_strategy_source(decision.plan.strategy_votes)
+        entry_strategy_key = self.bot.executor._resolve_strategy_key(decision.plan.strategy_votes)
         state_signal_source = (
-            entry_strategy if entry_strategy != "-" else str(self.bot.signal_source.value)
+            entry_strategy_key if entry_strategy_key != "-" else str(self.bot.signal_source.value)
         )
 
         try:
@@ -584,6 +587,8 @@ class ManagedLifecycleHelper:
                             continue
 
                         if cancelled:
+                            _restore_raw_key = str(snapshot.signal_source or "").strip()
+                            _is_strategy = not _restore_raw_key or _restore_raw_key.lower() == "strategy"
                             restore_position = {
                                 "symbol": snapshot.symbol,
                                 "side": OrderSide.BUY,
@@ -599,6 +604,8 @@ class ManagedLifecycleHelper:
                                 "filled_amount": snapshot.filled_amount,
                                 "filled_price": snapshot.entry_price,
                                 "state_managed": True,
+                                "strategy_source": "-" if _is_strategy else self.bot.executor._display_strategy_name(_restore_raw_key),
+                                "entry_strategy_key": "-" if _is_strategy else _restore_raw_key,
                             }
                             self.bot.executor.register_tracked_position(snapshot.entry_order_id, restore_position)
                             self.bot._state_manager.restore_in_position(snapshot.symbol, "sell timeout cancel")

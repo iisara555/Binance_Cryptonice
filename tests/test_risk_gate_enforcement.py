@@ -712,3 +712,108 @@ def test_register_filled_position_from_state_persists_live_remaining_amount():
 
     pos_data = bot.executor.register_tracked_position.call_args.args[1]
     assert pos_data["remaining_amount"] == pytest.approx(0.001)
+
+
+def test_try_submit_managed_signal_sell_blocks_cross_strategy_exit():
+    """SELL from a different strategy than the one that opened the position must be blocked."""
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = TradeStateSnapshot(
+        symbol="BTCUSDT",
+        state=TradeLifecycleState.IN_POSITION,
+        entry_order_id="entry-1",
+        filled_amount=0.01,
+        entry_price=45_000.0,
+        total_entry_cost=15_000.0,
+        opened_at=datetime.now(),
+    )
+    bot.executor = Mock()
+    # Position was opened by simple_scalp_plus
+    bot.executor.get_open_orders.return_value = [
+        {
+            "order_id": "entry-1",
+            "symbol": "BTCUSDT",
+            "side": OrderSide.BUY,
+            "amount": 0.01,
+            "remaining_amount": 0.01,
+            "entry_price": 45_000.0,
+            "total_entry_cost": 15_000.0,
+            "timestamp": datetime.now(),
+            "entry_strategy_key": "simple_scalp_plus",
+        }
+    ]
+    bot._submit_managed_exit = Mock(return_value=True)
+
+    # SELL decision comes from machete_v8b_lite — different strategy
+    decision = _make_sell_decision()
+    decision.plan.strategy_votes = {"machete_v8b_lite": 1}
+
+    submitted = TradingBotOrchestrator._try_submit_managed_signal_sell(bot, decision)
+
+    assert submitted is False, "Cross-strategy exit must be blocked"
+    bot._submit_managed_exit.assert_not_called()
+
+
+def test_try_submit_managed_signal_sell_allows_same_strategy_exit():
+    """SELL from the same strategy that opened the position must be allowed."""
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot._state_machine_enabled = True
+    bot._state_manager = Mock()
+    bot._state_manager.get_state.return_value = TradeStateSnapshot(
+        symbol="BTCUSDT",
+        state=TradeLifecycleState.IN_POSITION,
+        entry_order_id="entry-1",
+        filled_amount=0.01,
+        entry_price=45_000.0,
+        total_entry_cost=15_000.0,
+        opened_at=datetime.now(),
+    )
+    bot.executor = Mock()
+    bot.executor.get_open_orders.return_value = [
+        {
+            "order_id": "entry-1",
+            "symbol": "BTCUSDT",
+            "side": OrderSide.BUY,
+            "amount": 0.01,
+            "remaining_amount": 0.01,
+            "entry_price": 45_000.0,
+            "total_entry_cost": 15_000.0,
+            "timestamp": datetime.now(),
+            "entry_strategy_key": "simple_scalp_plus",
+        }
+    ]
+    bot._submit_managed_exit = Mock(return_value=True)
+
+    # SELL decision from the same strategy
+    decision = _make_sell_decision()
+    decision.plan.strategy_votes = {"simple_scalp_plus": 1}
+
+    submitted = TradingBotOrchestrator._try_submit_managed_signal_sell(bot, decision)
+
+    assert submitted is True
+    bot._submit_managed_exit.assert_called_once()
+
+
+def test_register_filled_position_from_state_sets_entry_strategy_key():
+    """entry_strategy_key in pos_data must match the raw strategy key from signal_source."""
+    bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
+    bot.executor = Mock()
+    bot.executor._display_strategy_name.return_value = "SimpleScalpPlus"
+    bot._log_filled_order = Mock()
+    snapshot = TradeStateSnapshot(
+        symbol="BTCUSDT",
+        state=TradeLifecycleState.PENDING_BUY,
+        entry_order_id="ord-1",
+        total_entry_cost=1500.0,
+        stop_loss=44_100.0,
+        take_profit=46_800.0,
+        opened_at=datetime.now(),
+        signal_source="simple_scalp_plus",
+    )
+
+    TradingBotOrchestrator._register_filled_position_from_state(bot, snapshot, 0.001, 45_000.0)
+
+    pos_data = bot.executor.register_tracked_position.call_args.args[1]
+    assert pos_data["entry_strategy_key"] == "simple_scalp_plus"
+    assert pos_data["strategy_source"] == "SimpleScalpPlus"
