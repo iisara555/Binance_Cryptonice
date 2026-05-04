@@ -14,6 +14,32 @@ from trading.coercion import coerce_trade_float as _coerce_trade_float
 
 logger = logging.getLogger(__name__)
 
+
+def _recover_bootstrap_strategy(bot: Any, symbol: str, restored_context: Dict[str, Any]) -> str:
+    """Return the best-known strategy name for a coin being bootstrapped, falling back to 'bootstrap'."""
+    # 1. State machine: if IN_POSITION/PENDING_SELL state has a signal_source, use it.
+    if getattr(bot, "_state_machine_enabled", False):
+        state_manager = getattr(bot, "_state_manager", None)
+        if state_manager is not None:
+            try:
+                snapshot = state_manager.get_state(symbol)
+                if snapshot.state in (TradeLifecycleState.IN_POSITION, TradeLifecycleState.PENDING_SELL):
+                    sig = str(snapshot.signal_source or "").strip()
+                    if sig and sig.lower() not in ("", "strategy"):
+                        executor = getattr(bot, "executor", None)
+                        if executor is not None and hasattr(executor, "_display_strategy_name"):
+                            return executor._display_strategy_name(sig)
+            except Exception:
+                pass
+
+    # 2. Persisted position context already has a non-bootstrap strategy_source.
+    ctx_src = str(restored_context.get("strategy_source") or "").strip()
+    if ctx_src and ctx_src not in ("", "bootstrap"):
+        return ctx_src
+
+    return "bootstrap"
+
+
 _QUOTE_ASSETS_FOR_WALLET_BOOTSTRAP = frozenset({"USDT", "THB", "BUSD", "FDUSD", "EUR"})
 _SYNTHETIC_ORDER_PREFIXES = ("bootstrap_", "manual_")
 
@@ -315,6 +341,7 @@ class StartupRuntimeHelper:
                 acquired_at = datetime.now()
 
             bootstrap_source = restored_context.get("source") or "estimated_from_ticker"
+            strategy_source = _recover_bootstrap_strategy(self.bot, pair, restored_context)
             synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
             pos_data = {
                 "symbol": pair,
@@ -332,7 +359,7 @@ class StartupRuntimeHelper:
                 "filled_amount": total_qty,
                 "filled_price": entry_price,
                 "bootstrap_source": bootstrap_source,
-                "strategy_source": "bootstrap",
+                "strategy_source": strategy_source,
             }
 
             self.bot.executor.register_tracked_position(synthetic_id, pos_data)

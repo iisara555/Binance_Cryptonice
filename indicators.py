@@ -11,7 +11,6 @@ from typing import Optional, Tuple
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
-from numpy.lib.stride_tricks import sliding_window_view
 
 
 class TechnicalIndicators:
@@ -85,60 +84,14 @@ class TechnicalIndicators:
     @staticmethod
     def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
         """Average Directional Index (ADX) - Trend strength"""
-        up_move = high.diff()
-        down_move = -low.diff()
-        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-
-        atr = TechnicalIndicators.calculate_atr(high, low, close, period)
-        plus_dm_smoothed = TechnicalIndicators._wilder_smoothing(plus_dm, period)
-        minus_dm_smoothed = TechnicalIndicators._wilder_smoothing(minus_dm, period)
-
-        atr_values = atr.to_numpy(dtype=float)
-        plus_dm_values = plus_dm_smoothed.to_numpy(dtype=float)
-        minus_dm_values = minus_dm_smoothed.to_numpy(dtype=float)
-        valid_atr = np.isfinite(atr_values) & (atr_values > 0.0)
-
-        plus_di_values = np.divide(
-            100.0 * plus_dm_values,
-            atr_values,
-            out=np.zeros_like(atr_values, dtype=float),
-            where=valid_atr,
-        )
-        minus_di_values = np.divide(
-            100.0 * minus_dm_values,
-            atr_values,
-            out=np.zeros_like(atr_values, dtype=float),
-            where=valid_atr,
-        )
-
-        di_sum_values = plus_di_values + minus_di_values
-        valid_di_sum = np.isfinite(di_sum_values) & (di_sum_values > 0.0)
-        dx_values = np.divide(
-            100.0 * np.abs(plus_di_values - minus_di_values),
-            di_sum_values,
-            out=np.zeros_like(di_sum_values, dtype=float),
-            where=valid_di_sum,
-        )
-
-        dx = pd.Series(dx_values, index=high.index)
-        adx = TechnicalIndicators._wilder_smoothing(dx, period).fillna(0.0)
-        return adx.clip(0.0, 100.0)
+        adx_df = ta.adx(high, low, close, length=period)
+        adx = adx_df.filter(like="ADX_").iloc[:, 0]
+        return adx.fillna(0.0).clip(0.0, 100.0)
 
     @staticmethod
     def calculate_cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
         """Commodity Channel Index (CCI)"""
-        tp = ((high + low + close) / 3).astype(float)
-        sma_tp = tp.rolling(window=period).mean()
-        tp_values = tp.to_numpy(dtype=float)
-        mad_values = np.full(tp_values.shape, np.nan, dtype=float)
-        if period > 0 and len(tp_values) >= period:
-            windows = sliding_window_view(tp_values, window_shape=period)
-            window_means = windows.mean(axis=1)
-            mad_values[period - 1 :] = np.abs(windows - window_means[:, None]).mean(axis=1)
-        mad = pd.Series(mad_values, index=tp.index)
-        cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
-        return cci
+        return ta.cci(high, low, close, length=period)
 
 
 # Convenience functions for direct import

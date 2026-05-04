@@ -484,6 +484,7 @@ class PositionBootstrapHelper:
                         "total_entry_cost": total_entry_cost if total_entry_cost > 0 else (quantity * entry_price),
                         "acquired_at": acquired_at,
                         "source": "persisted_position",
+                        "strategy_source": row.get("strategy_source"),
                     }
             elif bootstrap_rows:
                 bootstrap_rows.sort(key=lambda row: row.get("timestamp") or datetime.min, reverse=True)
