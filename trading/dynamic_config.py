@@ -95,11 +95,13 @@ def fetch_startup_nav(api_client: Any, config: Dict[str, Any]) -> float:
             logger.warning("[DynamicConfig] Empty balance response — using initial_balance %.2f", fallback)
             return fallback
 
-        quote = str(
-            (config.get("data") or {})
-            .get("hybrid_dynamic_coin_config", {})
-            .get("quote_asset", "THB")
-        ).upper()
+        # Resolve quote asset from config in priority order; default "USDT" not "THB"
+        # so USDT-pair bots don't accidentally compute NAV in Baht.
+        quote = (
+            str((config.get("data") or {}).get("hybrid_dynamic_coin_config", {}).get("quote_asset") or "").upper()
+            or str((config.get("balance_monitor") or {}).get("quote_asset") or "").upper()
+            or "USDT"
+        )
 
         total = 0.0
         for asset, payload in balances.items():
@@ -123,6 +125,15 @@ def fetch_startup_nav(api_client: Any, config: Dict[str, Any]) -> float:
 
         if total <= 0:
             logger.warning("[DynamicConfig] NAV sum is zero — using initial_balance %.2f", fallback)
+            return fallback
+
+        # Sanity: if computed NAV is >50× the fallback, likely wrong currency (e.g. THB instead of USDT)
+        if fallback > 0 and total > fallback * 50:
+            logger.warning(
+                "[DynamicConfig] NAV %.2f %s seems implausibly large vs initial_balance %.2f"
+                " — possible wrong quote_asset; using initial_balance fallback",
+                total, quote, fallback,
+            )
             return fallback
 
         logger.info("[DynamicConfig] Startup NAV = %.2f %s", total, quote)

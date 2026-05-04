@@ -248,17 +248,38 @@ class TestFetchStartupNav:
         api.get_ticker.return_value = {"last": ticker_price}
         return api
 
+    # Helper to build a config that explicitly sets the quote asset
+    def _cfg(self, quote: str = "USDT", initial_balance: float = 42.0) -> dict:
+        return {
+            "portfolio": {"initial_balance": initial_balance},
+            "data": {"hybrid_dynamic_coin_config": {"quote_asset": quote}},
+        }
+
     def test_returns_quote_balance(self):
+        # THB-denominated account with explicit quote_asset
         api = self._make_api({"THB": {"available": 100.0, "reserved": 0.0}})
-        nav = fetch_startup_nav(api, {})
+        nav = fetch_startup_nav(api, self._cfg("THB", initial_balance=100.0))
         assert nav == pytest.approx(100.0)
 
+    def test_returns_usdt_quote_balance(self):
+        # USDT-denominated account — the default case for Binance.th USDT pairs
+        api = self._make_api({"USDT": {"available": 42.0, "reserved": 0.0}})
+        nav = fetch_startup_nav(api, self._cfg("USDT", initial_balance=42.0))
+        assert nav == pytest.approx(42.0)
+
+    def test_default_quote_is_usdt_not_thb(self):
+        # When no quote_asset is configured, USDT balance should be recognised directly
+        api = self._make_api({"USDT": {"available": 50.0, "reserved": 0.0}})
+        nav = fetch_startup_nav(api, {"portfolio": {"initial_balance": 50.0}})
+        assert nav == pytest.approx(50.0)
+
     def test_marks_non_quote_assets(self):
+        # THB account: BTC is priced in THB
         api = self._make_api(
             {"THB": {"available": 50.0, "reserved": 0.0}, "BTC": {"available": 0.001, "reserved": 0.0}},
             ticker_price=1_000_000.0,
         )
-        nav = fetch_startup_nav(api, {})
+        nav = fetch_startup_nav(api, self._cfg("THB", initial_balance=50.0 + 0.001 * 1_000_000.0))
         assert nav == pytest.approx(50.0 + 0.001 * 1_000_000.0)
 
     def test_falls_back_to_initial_balance_on_empty(self):
@@ -274,13 +295,22 @@ class TestFetchStartupNav:
         assert nav == pytest.approx(99.0)
 
     def test_skips_unpriceable_assets(self):
+        # THB account: WEIRD cannot be priced → only THB counts
         api = self._make_api(
             {"THB": {"available": 50.0, "reserved": 0.0}, "WEIRD": {"available": 1.0, "reserved": 0.0}},
         )
         api.get_ticker.side_effect = Exception("no market")
-        nav = fetch_startup_nav(api, {})
+        nav = fetch_startup_nav(api, self._cfg("THB", initial_balance=50.0))
         # Only quote balance should be counted
         assert nav == pytest.approx(50.0)
+
+    def test_sanity_check_rejects_implausibly_large_nav(self):
+        # Simulates wrong-currency bug: USDT holdings priced at USDTTHB ≈ 33.5
+        # would make 42 USDT appear as 1407 THB. Sanity guard should reject it.
+        api = self._make_api({"USDT": {"available": 42.0, "reserved": 0.0}}, ticker_price=33.5)
+        # No quote_asset set → defaults to USDT, USDT == USDT → no ticker needed
+        nav = fetch_startup_nav(api, {"portfolio": {"initial_balance": 42.0}})
+        assert nav == pytest.approx(42.0)
 
 
 # ── run_iteration_runtime integration: recompute trigger ──────────────────────
