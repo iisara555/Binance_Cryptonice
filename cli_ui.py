@@ -336,7 +336,7 @@ class CLICommandCenter:
                 Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
             )
         if tablet_mode:
-            # Tablet: 2-column — left: positions+risk+sigflow, right: logs (full height = wider)
+            # Tablet: 2-column — left: positions+sigflow, right: logs (full height = wider)
             n_pos_tablet = len(list(snapshot.get("positions") or []))
             # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
             pos_size_tablet = max(10, min(15, n_pos_tablet + 8))
@@ -346,24 +346,32 @@ class CLICommandCenter:
             )
             layout["left"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size_tablet, name="positions"),
-                Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
                 Layout(self._build_signal_flow_panel(snapshot), ratio=1, name="signal_flow"),
             )
             layout["right"].split_column(
                 Layout(self._build_log_stream_panel(snapshot, n_buffer=10), name="logs"),
             )
         elif compact_mode:
-            # Mobile: stacked single-column — dynamic position height, portfolio+system+sigflow+logs fill the rest
+            # Mobile: stacked single-column — dynamic heights, logs fill remaining space
             n_pos = len(list(snapshot.get("positions") or []))
+            n_breakdown = len(list((snapshot.get("system") or {}).get("balance_breakdown") or []))
+            n_sig_pairs = len({
+                str(r.get("symbol") or "")
+                for r in list(snapshot.get("signal_alignment") or [])
+                if r.get("symbol")
+            })
             # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
             pos_size = max(10, min(15, n_pos + 8))
+            # summary(3) + asset rows + border(2) + 1 buffer — min 8
+            port_size = max(8, n_breakdown + 6)
+            # summary(1) + header(1) + pairs×2_strategies + border(2) + 1 buffer — min 8, max 22
+            sf_size = max(8, min(22, n_sig_pairs * 2 + 5))
             layout["body"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
-                Layout(self._build_mobile_risk_rails_line(snapshot), size=3, name="risk"),
-                Layout(self._build_balance_breakdown_panel(snapshot), size=8, name="portfolio"),
+                Layout(self._build_balance_breakdown_panel(snapshot), size=port_size, name="portfolio"),
                 Layout(self._build_system_status_table(snapshot), size=9, name="system"),
-                Layout(self._build_signal_flow_compact_new(snapshot), ratio=2, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=16), ratio=2, name="logs"),
+                Layout(self._build_signal_flow_compact_new(snapshot), size=sf_size, name="signal_flow"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=16), ratio=1, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -1060,7 +1068,7 @@ class CLICommandCenter:
         table = Table(expand=True, show_lines=False, row_styles=["", "on #111111"], padding=(0, 0), pad_edge=False)
         table.add_column("Pair",   no_wrap=True, width=9, style=self._WHITE)
         table.add_column("Strat",  no_wrap=True, width=5, justify="center")
-        table.add_column("Signal", no_wrap=True, width=5, justify="center")
+        table.add_column("Signal", no_wrap=True, width=6, justify="center")
         table.add_column("Conf",   no_wrap=True, width=6, justify="right")
         table.add_column("RR",     no_wrap=True, width=5, justify="right")
         table.add_column("State",  no_wrap=True, width=8)
