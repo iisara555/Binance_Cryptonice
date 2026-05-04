@@ -2085,8 +2085,11 @@ class CLICommandCenter:
         normalized = side.strip().lower()
         if normalized in {"buy", "long"}:
             return Text("LONG", style=f"bold {CLICommandCenter._GREEN}")
-        if normalized in {"sell", "short"}:
+        if normalized == "short":
             return Text("SHORT", style=f"bold {CLICommandCenter._RED}")
+        if normalized == "sell":
+            # Spot exchange — "sell" is an exit order, not a short position
+            return Text("SELL", style=f"bold {CLICommandCenter._EMBER}")
         return Text(normalized.upper() or "-", style=CLICommandCenter._WHITE)
 
     @staticmethod

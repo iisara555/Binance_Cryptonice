@@ -647,6 +647,13 @@ class TradeExecutor:
             return
         data = dict(pos_data)
         data["order_id"] = position_id
+        _side_raw = str(data.get("side") or "").strip().lower()
+        if _side_raw in ("sell", "short") and not position_id.startswith(("manual_", "bootstrap_")):
+            logger.warning(
+                "[OMS] Registering sell-side position %s (%s) — expected only for exit orders on spot",
+                position_id,
+                data.get("symbol", "?"),
+            )
         # Persist to DB first; skip memory update on failure (M2 atomicity fix).
         if self._db:
             try:

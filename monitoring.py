@@ -339,7 +339,9 @@ class ReconciliationState:
                     issues.append(f"Bot orders missing on exchange: {', '.join(missing_on_exchange[:3])}")
                 if unexpected_on_exchange:
                     issues.append(f"Exchange-only open orders detected: {', '.join(unexpected_on_exchange[:3])}")
-            elif len(pending_exchange_orders) != len(remote_orders):
+            elif abs(len(pending_exchange_orders) - len(remote_orders)) > 1:
+                # Tolerate ±1 difference — a single order completing between our two
+                # API calls is normal race; only pause on persistent multi-order divergence.
                 issues.append(
                     f"Open-order count mismatch: bot={len(pending_exchange_orders)} exchange={len(remote_orders)}"
                 )
