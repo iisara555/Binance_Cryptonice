@@ -901,6 +901,23 @@ class TradeExecutor:
                                         self._open_orders.pop(order_id, None)
                                     self._remove_persisted_position(order_id)
                                     continue
+                                if _avail < amount * 0.1:
+                                    # Available is <10% of tracked amount — position is effectively
+                                    # closed (coins already sold/moved). Repricing would just get
+                                    # -2010 (insufficient balance) and FATAL-04 would restore the
+                                    # ghost order, causing an infinite OMS retry loop.
+                                    logger.warning(
+                                        "[OMS] Order %s — %s avail %.6f << tracked %.6f (<10%%). "
+                                        "Position likely closed externally. Cleaning up.",
+                                        order_id,
+                                        _base,
+                                        _avail,
+                                        amount,
+                                    )
+                                    with self._orders_lock:
+                                        self._open_orders.pop(order_id, None)
+                                    self._remove_persisted_position(order_id)
+                                    continue
                             except Exception as bal_err:
                                 logger.warning("[OMS] Balance check failed: %s — proceeding", bal_err, exc_info=True)
 
@@ -1960,10 +1977,11 @@ class TradeExecutor:
                     self._cleanup_completed_order(order_id)
                     return True
                 # -2011: order is already gone on exchange (filled or cancelled externally).
-                # Treat as terminal — remove local tracking so OMS doesn't retry forever
-                # and monitoring doesn't see a count mismatch that triggers a trade pause.
+                # Treat as terminal — skip reprice (via _oms_cancel_was_error_21 flag) and
+                # remove local tracking so monitoring doesn't see a count mismatch.
                 if isinstance(e, BinanceAPIError) and getattr(e, "code", 0) == -2011:
-                    logger.info("[OMS] Order %s already gone (-2011) — cleaning up local tracking", order_id)
+                    logger.info("[OMS] Order %s already gone (-2011) — cleaning up, skipping reprice", order_id)
+                    self._oms_cancel_was_error_21 = True
                     self._cleanup_completed_order(order_id)
                     return True
                 self._last_cancel_error = str(e)
