@@ -366,12 +366,15 @@ class CLICommandCenter:
             port_size = max(8, n_breakdown + 6)
             # summary(1) + header(1) + pairs×2_strategies + border(2) + 1 buffer — min 8, max 22
             sf_size = max(8, min(22, n_sig_pairs * 2 + 5))
+            # logs: fill everything left — estimate inner height so buffer matches visible rows
+            fixed_rows = 3 + pos_size + port_size + 9 + sf_size + footer_size
+            log_inner = max(8, term_height - fixed_rows - 2)
             layout["body"].split_column(
                 Layout(self._build_mobile_position_book(snapshot), size=pos_size, name="positions"),
                 Layout(self._build_balance_breakdown_panel(snapshot), size=port_size, name="portfolio"),
                 Layout(self._build_system_status_table(snapshot), size=9, name="system"),
                 Layout(self._build_signal_flow_compact_new(snapshot), size=sf_size, name="signal_flow"),
-                Layout(self._build_log_stream_panel(snapshot, n_buffer=16), ratio=1, name="logs"),
+                Layout(self._build_log_stream_panel(snapshot, n_buffer=log_inner), ratio=1, name="logs"),
             )
         else:
             layout["body"].split_row(
@@ -701,9 +704,9 @@ class CLICommandCenter:
         compact = self._terminal_compact_mode()
 
         if compact:
-            # Compact: group up-to-date noise, show last 16 meaningful lines with emoji prefix
-            raw_rows = self._get_filtered_log_rows(min_level, n=80)
-            rows = self._group_log_rows(raw_rows)[-16:]
+            # Compact: group up-to-date noise, show last n_buffer meaningful lines to fill the panel
+            raw_rows = self._get_filtered_log_rows(min_level, n=max(80, n_buffer * 2))
+            rows = self._group_log_rows(raw_rows)[-n_buffer:]
             if not rows:
                 return self._panel(
                     Text(f"Waiting for logs ({min_level}+)...", style=self._DIM),
