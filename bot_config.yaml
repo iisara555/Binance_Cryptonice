@@ -89,10 +89,10 @@ strategy_mode:
     max_trades_per_day: 8                 # AUDIT FIX: was 50 — overtrading was the dominant loss driver
     min_time_between_trades_minutes: 15   # AUDIT FIX: was 2 — give signals room to settle, prevent thrashing
     monitor_check_interval_seconds: 5
-    max_position_per_trade_pct: 28.0      # FIX: ≥11 USDT hard_cap so MIN_ORDER_BUFFER bump fits (was 25%≈10.57 < min_viable 11)
+    max_position_per_trade_pct: 28.0      # FLOOR — dynamic overrides at runtime (DynamicRiskConfig scales to NAV)
     max_risk_per_trade_pct: 2.5           # FIX: 0.5% bound risk-based notional ~4 USDT vs min_order 10 — raise for ~42 USDT NAV
     position_risk_per_trade_pct: 2.5
-    position_size_cap_pct: 28.0          # FIX: sync with max_position_per_trade_pct (min_viable quote headroom)
+    position_size_cap_pct: 28.0          # FLOOR — dynamic overrides at runtime (keeps in sync with max_position_per_trade_pct)
 
 # ── Mode-Specific Indicator Profiles ─────────────────────────────────────
 # active_strategies: authoritative list for the signal loop (see get_active_strategies_for_mode).
@@ -237,8 +237,8 @@ risk:
   use_fractional_kelly: false           # false = if Kelly edge <= 0, use fixed max_risk_per_trade_pct (no hard reject)
   max_risk_per_trade_pct: 2.5        # FIX: aligned with strategy_mode.scalping — unlock min notional with risk-based sizing
   max_daily_loss_pct: 3.0            # AUDIT FIX: was 5.0 — circuit breaker triggers earlier
-  max_position_per_trade_pct: 28.0   # FIX: 25% cap 10.57 < min_viable 11 (10*1.1) — sizing rejected / PreTradeGate 0 quote
-  max_open_positions: 6              # เพิ่มจาก 4 → 6
+  max_position_per_trade_pct: 28.0   # FLOOR — dynamic overrides at runtime; DynamicRiskConfig scales to current NAV
+  max_open_positions: 6              # CEILING — dynamic may reduce based on NAV (slots = floor(85% / position_pct))
   max_daily_trades: 8               # AUDIT FIX: was 50 — keep trade frequency disciplined
   # Optional explicit % SL/TP for path (3); also overwritten by strategy_mode when scalping/trend_only is active.
   stop_loss_pct: 4.5               # Used when use_dynamic_sl_tp false, or when sl_tp_percent_source_when_dynamic is risk_config
@@ -409,7 +409,7 @@ execution:
   order_timeout_seconds: 30          # Timeout for order execution
   enforce_min_profit_gate_for_voluntary_exit: true  # Block TIME/SIGSELL exits until net profit clears the threshold below
   min_voluntary_exit_net_profit_pct: 0.2  # Minimum net profit % after fees for TIME/SIGSELL exits
-  trailing_activation_pct: 3.0       # เริ่ม ratchet trailing stop เมื่อกำไรอย่างน้อย 3.0%
+  trailing_activation_pct: 3.0       # FLOOR — dynamic sets 50% of take_profit_pct at runtime
   trailing_stop_pct: 1.5             # ลาก stop loss ตามหลังราคาปัจจุบัน 1.5%
   allow_trailing_stop: true          # อนุญาตให้ระบบประมวลผลการเลื่อนจุดตัดขาดทุนได้
 
@@ -481,7 +481,7 @@ candle_retention:
 # Portfolio
 portfolio:
   initial_balance: 42.0            # Initial balance (for simulation)
-  min_balance_threshold: 40.0       # PreTradeGate / RiskGate floor; must be below NAV (e.g. ~42 USDT live)
+  min_balance_threshold: 40.0       # FLOOR — dynamic sets 80% of current NAV at runtime (DynamicRiskConfig)
   read_only: false                  # Mirror top-level read_only; executor reads top-level + BOT_READ_ONLY env
   persist_path: "portfolio_state.json"  # Persist rebalancer state (cooldown survives restart)
 

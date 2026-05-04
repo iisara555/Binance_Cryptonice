@@ -9,6 +9,33 @@ from signal_generator import ensure_signal_flow_record
 
 logger = logging.getLogger(__name__)
 
+_DYNAMIC_RECOMPUTE_EVERY_N = 10  # check NAV every N iterations
+
+
+def _try_dynamic_risk_recompute(bot: Any) -> None:
+    """If NAV changed >10% since last compute, recompute and apply to RiskManager."""
+    drc = getattr(bot, "_dynamic_risk_config", None)
+    if drc is None:
+        return
+    try:
+        portfolio_state = bot._get_portfolio_state(allow_refresh=False)
+        current_nav = bot._get_risk_portfolio_value(portfolio_state)
+        if current_nav <= 0 or not drc.should_recompute(current_nav):
+            return
+        dynamic = drc.recompute(current_nav)
+        from trading.dynamic_config import apply_dynamic_risk_to_manager
+
+        apply_dynamic_risk_to_manager(bot.risk_manager, dynamic)
+        logger.info(
+            "📐 DynamicConfig updated: nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
+            current_nav,
+            dynamic["max_position_per_trade_pct"],
+            dynamic["max_open_positions"],
+            dynamic["min_balance_threshold"],
+        )
+    except Exception as exc:
+        logger.debug("[DynamicConfig] Recompute skipped: %s", exc)
+
 
 def _resolve_active_pairs_for_iteration(bot: Any, *, allow_refresh: bool) -> list[str]:
     trading_pairs = bot._get_trading_pairs()
@@ -124,8 +151,9 @@ def run_trading_iteration(bot: Any) -> None:
     bot._reconcile_tracked_positions_with_balance_state()
 
     trading_cfg = (getattr(bot, "config", {}) or {}).get("trading", {}) or {}
+    loop_count = int(getattr(bot, "_loop_count", 0) or 0)
+
     if bool(trading_cfg.get("runtime_order_reconcile", True)):
-        loop_count = int(getattr(bot, "_loop_count", 0) or 0)
         interval_seconds = max(1, int(getattr(bot, "interval_seconds", 60) or 60))
         reconcile_every_loops = max(1, int(300 / interval_seconds))
         if loop_count > 0 and loop_count % reconcile_every_loops == 0:
@@ -133,6 +161,10 @@ def run_trading_iteration(bot: Any) -> None:
                 bot._reconcile_open_orders_with_exchange(source="runtime")
             except Exception as exc:
                 logger.warning("[OrderReconcile] runtime reconcile failed: %s", exc, exc_info=True)
+
+    # Dynamic risk recompute: check NAV every N iterations; apply if drifted >10%
+    if loop_count > 0 and loop_count % _DYNAMIC_RECOMPUTE_EVERY_N == 0:
+        _try_dynamic_risk_recompute(bot)
 
     paused, reason = bot._is_paused()
     if paused:

@@ -1719,7 +1719,41 @@ class TradingBotApp:
                         min_quote_vol,
                     )
 
-        # 2. Initialize Risk Manager
+        # 2. Dynamic risk config — scale parameters to current NAV before building RiskManager
+        self._app_startup_nav: float = float(
+            (self.config.get("portfolio") or {}).get("initial_balance", 42.0)
+        )
+        try:
+            from trading.dynamic_config import (
+                apply_dynamic_risk_to_config as _apply_dyn_risk,
+                compute_dynamic_risk as _compute_dyn_risk,
+                fetch_startup_nav as _fetch_startup_nav,
+            )
+
+            _dyn_input = {
+                "min_order_amount": float(
+                    (self.config.get("trading") or {}).get("min_order_amount", 10.0)
+                ),
+                "take_profit_pct": float(
+                    (self.config.get("risk") or {}).get("take_profit_pct", 10.0)
+                ),
+            }
+            self._app_startup_nav = _fetch_startup_nav(self.api_client, self.config)
+            _dynamic = _compute_dyn_risk(self._app_startup_nav, _dyn_input)
+            _apply_dyn_risk(self.config, _dynamic)
+            logger.info(
+                "📐 DynamicConfig nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
+                self._app_startup_nav,
+                _dynamic["max_position_per_trade_pct"],
+                _dynamic["max_open_positions"],
+                _dynamic["min_balance_threshold"],
+            )
+        except Exception as _dyn_exc:
+            logger.warning(
+                "[DynamicConfig] Startup computation failed (%s) — using static config", _dyn_exc
+            )
+
+        # 2b. Initialize Risk Manager (reads the dynamically patched config)
         self.risk_manager = _risk_manager_from_config(self.config)
         logger.info("Risk Manager initialized")
 
@@ -1800,6 +1834,24 @@ class TradingBotApp:
             trading_disabled_event=self.trading_disabled,
         )
         logger.info("Trading Bot Orchestrator ready")
+
+        # 6a. Attach DynamicRiskConfig for runtime NAV-triggered recomputes
+        try:
+            from trading.dynamic_config import DynamicRiskConfig as _DynamicRiskConfig
+
+            _dyn_cfg_input = {
+                "min_order_amount": float(
+                    (self.config.get("trading") or {}).get("min_order_amount", 10.0)
+                ),
+                "take_profit_pct": float(
+                    (self.config.get("risk") or {}).get("take_profit_pct", 10.0)
+                ),
+            }
+            self.bot._dynamic_risk_config = _DynamicRiskConfig(
+                self._app_startup_nav, _dyn_cfg_input
+            )
+        except Exception as _drc_exc:
+            logger.debug("[DynamicConfig] Could not attach runtime tracker: %s", _drc_exc)
 
         # 6b. Initialize Telegram Bot Handler
         telegram_pairs = list(self.config.get("data", {}).get("pairs") or [])

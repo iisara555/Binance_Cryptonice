@@ -60,6 +60,7 @@ $runtimeFiles = @(
     'trading/startup_runtime.py',
     'trading/status_runtime.py',
     'trading/bootstrap_config.py',
+    'trading/dynamic_config.py',
     'trading/cli_pair_normalize.py',
     'trading/cli_snapshot_builder.py',
     'trading/manual_trading_service.py',
