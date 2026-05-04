@@ -623,7 +623,7 @@ def get_cli_snapshot(app, bot_name: Optional[str] = None) -> Dict[str, Any]:
             ),
             "daily_loss_pct": f"{risk_summary.get('daily_loss_pct', 0):.2f}%" if risk_summary else "-",
             "max_open_positions": str(risk_summary.get("max_open_positions", "-")),
-            "cooling_down": "Yes" if risk_summary.get("cooling_down") else "No",
+            "cooling_down": risk_summary.get("cooling_down_display", "Yes" if risk_summary.get("cooling_down") else "No"),
             "risk_per_trade": f"{float((app.config.get('risk', {}) or {}).get('max_risk_per_trade_pct', 0.0) or 0.0):.1f}%",
             "risk_portfolio_value_quote": round(risk_portfolio_value, 4),
             "min_balance_threshold_quote": min_balance_floor,

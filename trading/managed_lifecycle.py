@@ -201,7 +201,7 @@ class ManagedLifecycleHelper:
         if risk_manager is not None:
             record_trade_activity = getattr(risk_manager, "record_trade_activity", None)
             if callable(record_trade_activity):
-                record_trade_activity()
+                record_trade_activity(snapshot.symbol)
         self.bot._cleanup_sl_hold_entry(snapshot.entry_order_id)
 
         if str(snapshot.trigger or "").upper() == "TIME":
@@ -259,7 +259,7 @@ class ManagedLifecycleHelper:
             )
             self.bot.db.record_held_coin(decision.plan.symbol, result.filled_amount)
             if self.bot.risk_manager:
-                self.bot.risk_manager.record_trade()
+                self.bot.risk_manager.record_trade(decision.plan.symbol)
         decision.status = snapshot.state.value
         self.bot._executed_today.append(
             {
@@ -488,7 +488,7 @@ class ManagedLifecycleHelper:
                         self.bot._state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
                         self.bot.db.record_held_coin(snapshot.symbol, filled_amount)
                         if self.bot.risk_manager:
-                            self.bot.risk_manager.record_trade()
+                            self.bot.risk_manager.record_trade(snapshot.symbol)
                         logger.info(
                             "[State] %s -> in_position | order=%s amount=%.8f @ %.2f",
                             snapshot.symbol,
@@ -533,7 +533,7 @@ class ManagedLifecycleHelper:
                                 self.bot._state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
                                 self.bot.db.record_held_coin(snapshot.symbol, filled_amount)
                                 if self.bot.risk_manager:
-                                    self.bot.risk_manager.record_trade()
+                                    self.bot.risk_manager.record_trade(snapshot.symbol)
                             continue
                         if cancelled:
                             self.bot._state_manager.cancel_pending_buy(snapshot.symbol, "buy timeout cancel")

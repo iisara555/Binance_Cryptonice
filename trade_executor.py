@@ -1774,7 +1774,7 @@ class TradeExecutor:
                 )
 
             if self.risk_manager:
-                self.risk_manager.record_trade()
+                self.risk_manager.record_trade(plan.symbol)
 
         with self._pending_entry_symbols_lock:
             self._pending_entry_symbols.discard(plan.symbol)

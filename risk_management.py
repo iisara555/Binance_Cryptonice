@@ -303,7 +303,8 @@ class RiskManager:
         self._daily_loss_start: Optional[float] = None
         self._daily_loss_date: Optional[date] = None
         self._trade_count_today: int = 0
-        self._last_trade_time: Optional[datetime] = None
+        self._last_trade_time: Optional[datetime] = None  # kept for backward-compat persistence
+        self._last_trade_time_per_pair: Dict[str, datetime] = {}
         self._cooling_down: bool = False
         self._peak_portfolio_value: Optional[float] = None
         self._state_file = Path("risk_state.json")
@@ -327,6 +328,9 @@ class RiskManager:
             "daily_loss_date": self._daily_loss_date.isoformat() if self._daily_loss_date else None,
             "trade_count_today": self._trade_count_today,
             "last_trade_time": self._last_trade_time.isoformat() if self._last_trade_time else None,
+            "last_trade_time_per_pair": {
+                sym: dt.isoformat() for sym, dt in self._last_trade_time_per_pair.items()
+            },
             "cooling_down": self._cooling_down,
             "peak_portfolio_value": self._peak_portfolio_value,
         }
@@ -365,6 +369,10 @@ class RiskManager:
                 self._trade_count_today = data.get("trade_count_today", 0)
                 last_time_str = data.get("last_trade_time")
                 self._last_trade_time = datetime.fromisoformat(last_time_str) if last_time_str else None
+                per_pair_raw = data.get("last_trade_time_per_pair") or {}
+                self._last_trade_time_per_pair = {
+                    sym: datetime.fromisoformat(ts) for sym, ts in per_pair_raw.items() if ts
+                }
                 self._cooling_down = data.get("cooling_down", False)
                 self._peak_portfolio_value = data.get("peak_portfolio_value")
 
@@ -388,6 +396,7 @@ class RiskManager:
             self._daily_loss_date = None
             self._trade_count_today = 0
             self._last_trade_time = None
+            self._last_trade_time_per_pair = {}
             self._cooling_down = True  # fail-closed: hold cooldown until state can be verified
             self._peak_portfolio_value = None
             return False
@@ -731,7 +740,7 @@ class RiskManager:
         """Public read accessor for today's completed trade count."""
         return self._trade_count_today
 
-    def record_trade(self):
+    def record_trade(self, symbol: Optional[str] = None):
         """Call after a completed trade to update counters."""
         today = datetime.now(timezone.utc).date()
         if self._daily_loss_date != today:
@@ -740,10 +749,13 @@ class RiskManager:
             self._trade_count_today = 0
             self._cooling_down = False
         self._trade_count_today += 1
-        self._last_trade_time = datetime.now()
+        now = datetime.now()
+        self._last_trade_time = now
+        if symbol:
+            self._last_trade_time_per_pair[symbol] = now
         self.save_state()
 
-    def record_trade_activity(self):
+    def record_trade_activity(self, symbol: Optional[str] = None):
         """Refresh cooldown timestamp without incrementing the daily trade counter."""
         today = datetime.now(timezone.utc).date()
         if self._daily_loss_date != today:
@@ -751,19 +763,63 @@ class RiskManager:
             self._daily_loss_start = None
             self._trade_count_today = 0
             self._cooling_down = False
-        self._last_trade_time = datetime.now()
+        now = datetime.now()
+        self._last_trade_time = now
+        if symbol:
+            self._last_trade_time_per_pair[symbol] = now
         self.save_state()
 
     # ── Cooldown ───────────────────────────────────────────────────────
 
-    def check_cooldown(self) -> bool:
-        """Return True if bot should wait before next trade."""
+    def check_cooldown(self, symbol: Optional[str] = None) -> bool:
+        """Return True if the given symbol (or any pair) is still in cooldown."""
+        cool_minutes = self.config.cool_down_minutes
+        now = datetime.now()
+        if symbol:
+            with self._state_lock:
+                last = self._last_trade_time_per_pair.get(symbol)
+            if last is None:
+                return False
+            return (now - last).total_seconds() / 60 < cool_minutes
+        # No symbol: True if ANY tracked pair is cooling (used by global checks)
         with self._state_lock:
-            last = self._last_trade_time
-        if last is None:
-            return False
-        elapsed = (datetime.now() - last).total_seconds() / 60
-        return elapsed < self.config.cool_down_minutes
+            times = dict(self._last_trade_time_per_pair)
+            global_last = self._last_trade_time
+        if times:
+            return any((now - last).total_seconds() / 60 < cool_minutes for last in times.values())
+        # Backward-compat: fall back to global timestamp when no per-pair data
+        if global_last is not None:
+            return (now - global_last).total_seconds() / 60 < cool_minutes
+        return False
+
+    def get_cooling_down_display(self) -> str:
+        """Return a human-readable per-pair cooldown status for the CLI."""
+        cool_minutes = self.config.cool_down_minutes
+        now = datetime.now()
+        with self._state_lock:
+            times = dict(self._last_trade_time_per_pair)
+            global_last = self._last_trade_time
+
+        cooling_pairs: List[tuple] = []
+        for sym, last in times.items():
+            remaining = cool_minutes - (now - last).total_seconds() / 60
+            if remaining > 0:
+                base = sym.replace("USDT", "").replace("BUSD", "")
+                cooling_pairs.append((base, remaining))
+
+        if not cooling_pairs and global_last is not None:
+            remaining = cool_minutes - (now - global_last).total_seconds() / 60
+            if remaining > 0:
+                cooling_pairs.append(("all", remaining))
+
+        if not cooling_pairs:
+            return "No"
+
+        parts = [f"{sym} {rem:.0f}m" for sym, rem in sorted(cooling_pairs)]
+        ready_count = len(times) - len(cooling_pairs)
+        if ready_count > 0:
+            parts.append("others ready")
+        return "  ".join(parts)
 
     # ── Global Risk Checks ──────────────────────────────────────────────
 
@@ -772,6 +828,7 @@ class RiskManager:
         portfolio_value: float,
         open_positions_count: int,
         current_time: Optional[datetime] = None,
+        symbol: Optional[str] = None,
     ) -> RiskCheckResult:
         """
         Run all risk checks before opening a new position.
@@ -809,8 +866,8 @@ class RiskManager:
             return RiskCheckResult(False, reason)
 
         # 5. Cooldown
-        if self.check_cooldown():
-            _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", "Cooldown period active")
+        if self.check_cooldown(symbol):
+            _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", f"Cooldown period active for {symbol or 'all'}")
             return RiskCheckResult(False, "Cooldown period active")
 
         _diag(
@@ -846,6 +903,7 @@ class RiskManager:
             "max_daily_trades": self.config.max_daily_trades,
             "max_open_positions": self.config.max_open_positions,
             "cooling_down": self.check_cooldown(),
+            "cooling_down_display": self.get_cooling_down_display(),
         }
 
 
@@ -1364,8 +1422,8 @@ class PreTradeGate:
             }
         )
 
-        # ── 7. Cooldown between trades (delegated to RiskManager) ──
-        cooling = bool(risk_manager.check_cooldown())
+        # ── 7. Cooldown between trades (delegated to RiskManager, per-pair) ──
+        cooling = bool(risk_manager.check_cooldown(symbol))
         checks.append(
             {
                 "name": "Cooldown not active",

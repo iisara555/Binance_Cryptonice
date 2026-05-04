@@ -119,7 +119,7 @@ class CliCommandDispatcher:
                     lines.append(
                         f"Today: {rs.get('trades_today', 0)}/{rs.get('max_daily_trades', '-')} trades | Loss: {rs.get('daily_loss', 0):.2f}/{rs.get('daily_loss_max', 0):.2f} quote ({rs.get('daily_loss_pct', 0):.2f}%)"
                     )
-                    lines.append(f"Cooldown active: {'Yes' if rs.get('cooling_down') else 'No'}")
+                    lines.append(f"Cooldown: {rs.get('cooling_down_display', 'Yes' if rs.get('cooling_down') else 'No')}")
                 return "\n".join(lines)
             if len(args) == 2 and args[0].lower() == "set":
                 result = app.set_runtime_risk_pct(float(args[1]))

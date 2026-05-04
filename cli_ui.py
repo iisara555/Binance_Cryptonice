@@ -967,7 +967,7 @@ class CLICommandCenter:
         # Cooling indicator
         cool_text = (
             Text("\u23f3 Cooling", style=f"bold {self._EMBER}")
-            if cooling == "Yes"
+            if cooling not in ("No", "")
             else Text("\u2713 Ready", style=f"bold {self._GREEN}")
         )
 
@@ -1542,7 +1542,7 @@ class CLICommandCenter:
                 ("Cooldown  ", self._DIM),
                 (
                     str(system.get("cooling_down", "-")),
-                    f"bold {self._EMBER}" if str(system.get("cooling_down", "-")) == "Yes" else f"bold {self._GREEN}",
+                    f"bold {self._EMBER}" if str(system.get("cooling_down", "-")) not in ("No", "-", "") else f"bold {self._GREEN}",
                 ),
             ),
         ]
@@ -1946,7 +1946,7 @@ class CLICommandCenter:
                     str(system.get("cooling_down") or "No"),
                     (
                         f"bold {self._EMBER}"
-                        if str(system.get("cooling_down") or "No") == "Yes"
+                        if str(system.get("cooling_down") or "No") not in ("No", "")
                         else f"bold {self._GREEN}"
                     ),
                 ),

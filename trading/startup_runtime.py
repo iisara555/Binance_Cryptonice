@@ -424,7 +424,7 @@ class StartupRuntimeHelper:
                     state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
                     self.bot.db.record_held_coin(snapshot.symbol, filled_amount)
                     if self.bot.risk_manager:
-                        self.bot.risk_manager.record_trade()
+                        self.bot.risk_manager.record_trade(snapshot.symbol)
                     logger.info(
                         "[Reconcile] Pending BUY %s filled while offline -> restored in_position %.8f @ %.2f",
                         snapshot.symbol,

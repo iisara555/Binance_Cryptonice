@@ -1583,7 +1583,7 @@ class TestFullIntegrationFlow:
         bot._log_filled_order.assert_called_once()
         assert bot._log_filled_order.call_args.kwargs["fee"] == pytest.approx(float(expected_exit_fee))
         bot._send_alert.assert_called_once_with("alert", to_telegram=True)
-        bot.risk_manager.record_trade_activity.assert_called_once_with()
+        bot.risk_manager.record_trade_activity.assert_called_once_with("THB_BTC")
         bot._state_manager.block_new_entries_after_exit.assert_not_called()
         format_args = bot._format_exit_alert.call_args.args
         assert format_args[2] == pytest.approx(float(amount))
@@ -1625,7 +1625,7 @@ class TestFullIntegrationFlow:
 
         bot._report_completed_exit(snapshot, exit_price=8.1, price_source="order")
 
-        bot.risk_manager.record_trade_activity.assert_called_once_with()
+        bot.risk_manager.record_trade_activity.assert_called_once_with("THB_ADA")
         bot._state_manager.block_new_entries_after_exit.assert_called_once()
         _, kwargs = bot._state_manager.block_new_entries_after_exit.call_args
         assert kwargs["duration_seconds"] == pytest.approx(300.0)
