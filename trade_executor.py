@@ -1952,6 +1952,13 @@ class TradeExecutor:
                     self._oms_cancel_was_error_21 = True
                     self._cleanup_completed_order(order_id)
                     return True
+                # -2011: order is already gone on exchange (filled or cancelled externally).
+                # Treat as terminal — remove local tracking so OMS doesn't retry forever
+                # and monitoring doesn't see a count mismatch that triggers a trade pause.
+                if isinstance(e, BinanceAPIError) and getattr(e, "code", 0) == -2011:
+                    logger.info("[OMS] Order %s already gone (-2011) — cleaning up local tracking", order_id)
+                    self._cleanup_completed_order(order_id)
+                    return True
                 self._last_cancel_error = str(e)
                 logger.warning("[OMS] Cancel order %s error (attempt %d/%d): %s", order_id, attempt, max_retries, e)
                 if attempt < max_retries:
