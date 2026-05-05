@@ -495,7 +495,10 @@ class ManagedLifecycleHelper:
                         self.bot._state_manager.mark_entry_filled(snapshot.symbol, filled_amount, filled_price)
                         self.bot.db.record_held_coin(snapshot.symbol, filled_amount)
                         if self.bot.risk_manager:
-                            self.bot.risk_manager.record_trade(snapshot.symbol)
+                            _entry_strat_key = str(snapshot.signal_source or "").strip() or None
+                            self.bot.risk_manager.record_trade(
+                                snapshot.symbol, strategy_key=_entry_strat_key
+                            )
                         logger.info(
                             "[State] %s -> in_position | order=%s amount=%.8f @ %.2f",
                             snapshot.symbol,

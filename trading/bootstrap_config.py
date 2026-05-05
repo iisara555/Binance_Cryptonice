@@ -256,6 +256,11 @@ def risk_manager_from_config(config: Dict[str, Any]) -> RiskManager:
         max_open_positions=risk_config.get("max_open_positions", 3),
         max_daily_trades=risk_config.get("max_daily_trades", 10),
         cool_down_minutes=risk_config.get("cool_down_minutes", 5),
+        per_strategy_cooldown_minutes={
+            strat: int(cfg["cool_down_minutes"])
+            for strat, cfg in (config.get("strategies") or {}).items()
+            if isinstance(cfg, dict) and "cool_down_minutes" in cfg
+        },
         min_order_amount=config.get("trading", {}).get("min_order_amount", 15.0),
     )
     return RiskManager(risk_params)

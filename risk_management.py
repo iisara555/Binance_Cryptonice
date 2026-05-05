@@ -8,7 +8,7 @@ Includes dynamic SL/TP based on pair volatility (BTC vs ALT) and ATR-based stop 
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -202,6 +202,7 @@ class RiskConfig:
     max_open_positions: int = 5
     max_daily_trades: int = 10
     cool_down_minutes: int = 5
+    per_strategy_cooldown_minutes: Dict[str, int] = field(default_factory=dict)
     min_order_amount: float = DEFAULT_MIN_ORDER_QUOTE
     # ATR-based SL settings
     atr_multiplier: float = 2.5  # SL distance = ATR * this
@@ -312,6 +313,7 @@ class RiskManager:
         self._trade_count_today: int = 0
         self._last_trade_time: Optional[datetime] = None  # kept for backward-compat persistence
         self._last_trade_time_per_pair: Dict[str, datetime] = {}
+        self._last_trade_time_per_strategy: Dict[str, datetime] = {}  # key = "SYMBOL:strategy_key"
         self._cooling_down: bool = False
         self._peak_portfolio_value: Optional[float] = None
         self._state_file = Path("risk_state.json")
@@ -337,6 +339,9 @@ class RiskManager:
             "last_trade_time": self._last_trade_time.isoformat() if self._last_trade_time else None,
             "last_trade_time_per_pair": {
                 sym: dt.isoformat() for sym, dt in self._last_trade_time_per_pair.items()
+            },
+            "last_trade_time_per_strategy": {
+                k: dt.isoformat() for k, dt in self._last_trade_time_per_strategy.items()
             },
             "cooling_down": self._cooling_down,
             "peak_portfolio_value": self._peak_portfolio_value,
@@ -380,6 +385,10 @@ class RiskManager:
                 self._last_trade_time_per_pair = {
                     sym: datetime.fromisoformat(ts) for sym, ts in per_pair_raw.items() if ts
                 }
+                per_strat_raw = data.get("last_trade_time_per_strategy") or {}
+                self._last_trade_time_per_strategy = {
+                    k: datetime.fromisoformat(ts) for k, ts in per_strat_raw.items() if ts
+                }
                 self._cooling_down = data.get("cooling_down", False)
                 self._peak_portfolio_value = data.get("peak_portfolio_value")
 
@@ -404,6 +413,7 @@ class RiskManager:
             self._trade_count_today = 0
             self._last_trade_time = None
             self._last_trade_time_per_pair = {}
+            self._last_trade_time_per_strategy = {}
             self._cooling_down = True  # fail-closed: hold cooldown until state can be verified
             self._peak_portfolio_value = None
             return False
@@ -782,12 +792,18 @@ class RiskManager:
         """Public read accessor for today's completed trade count."""
         return self._trade_count_today
 
-    def record_trade(self, symbol: Optional[str] = None, portfolio_value: Optional[float] = None):
+    def record_trade(
+        self,
+        symbol: Optional[str] = None,
+        portfolio_value: Optional[float] = None,
+        strategy_key: Optional[str] = None,
+    ):
         """Call after a completed trade to update counters.
 
         FIX 2 (Drawdown peak): peak is advanced here — the only meaningful event
         that confirms a new high-water mark after a successful close.  Pass the
         current NAV as ``portfolio_value`` so the peak can be updated correctly.
+        strategy_key: raw strategy key (e.g. "simple_scalp_plus") for per-strategy cooldown.
         """
         today = datetime.now(timezone.utc).date()
         if self._daily_loss_date != today:
@@ -800,6 +816,8 @@ class RiskManager:
         self._last_trade_time = now
         if symbol:
             self._last_trade_time_per_pair[symbol] = now
+        if symbol and strategy_key:
+            self._last_trade_time_per_strategy[f"{symbol}:{strategy_key}"] = now
         # Advance the peak only on confirmed trade close.
         if portfolio_value is not None and portfolio_value > 0:
             self._advance_peak_on_trade_close(portfolio_value)
@@ -822,10 +840,29 @@ class RiskManager:
 
     # ── Cooldown ───────────────────────────────────────────────────────
 
-    def check_cooldown(self, symbol: Optional[str] = None) -> bool:
-        """Return True if the given symbol (or any pair) is still in cooldown."""
-        cool_minutes = self.config.cool_down_minutes
+    def check_cooldown(self, symbol: Optional[str] = None, strategy_key: Optional[str] = None) -> bool:
+        """Return True if the given symbol (or any pair) is still in cooldown.
+
+        When strategy_key is provided and has a per-strategy override in config,
+        the per-strategy cooldown for (symbol, strategy_key) is checked instead of
+        the global per-pair cooldown.
+        """
         now = datetime.now()
+
+        # Per-strategy cooldown: only fires when both symbol and strategy_key are given
+        # and the strategy has an explicit override in config.
+        if symbol and strategy_key:
+            strat_minutes = self.config.per_strategy_cooldown_minutes.get(strategy_key)
+            if strat_minutes is not None:
+                key = f"{symbol}:{strategy_key}"
+                with self._state_lock:
+                    last = self._last_trade_time_per_strategy.get(key)
+                if last is None:
+                    return False
+                return (now - last).total_seconds() / 60 < strat_minutes
+
+        # Global per-pair cooldown (existing logic)
+        cool_minutes = self.config.cool_down_minutes
         if symbol:
             with self._state_lock:
                 last = self._last_trade_time_per_pair.get(symbol)

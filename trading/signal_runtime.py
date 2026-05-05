@@ -231,10 +231,30 @@ class SignalRuntimeHelper:
                 )
                 continue
 
+            # Per-strategy cooldown: check before global risk gate so each strategy
+            # has its own (symbol, strategy) cooldown independent of other strategies.
+            winning_strategy = (
+                max(signal.strategy_votes, key=lambda k: signal.strategy_votes[k])
+                if signal.strategy_votes else None
+            )
+            risk_manager = deps.risk_manager
+            if (
+                signal_type == "buy"
+                and winning_strategy
+                and risk_manager is not None
+                and risk_manager.check_cooldown(symbol, strategy_key=winning_strategy)
+            ):
+                deps.remember_consumed_signal_trigger(signal)
+                logger.info(
+                    "[Cooldown:%s] %s BUY trigger consumed — waiting for fresh signal",
+                    winning_strategy,
+                    symbol,
+                )
+                continue
+
             risk_check = deps.signal_generator.check_risk(signal, portfolio)
 
-            # Cooldown: consume the trigger so the same stale signal cannot fire
-            # again once cooldown expires — bot must wait for a fresh signal instead.
+            # Global cooldown block: consume trigger so stale signal cannot re-fire.
             if not risk_check.passed and "cooldown" in str(getattr(risk_check, "reason", "")).lower():
                 deps.remember_consumed_signal_trigger(signal)
                 logger.info(
