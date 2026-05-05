@@ -1174,17 +1174,34 @@ class Database:
         session = self.get_session()
         try:
             positions = session.query(Position).all()
+
+            # Build symbol→signal_source map from trade_states so bootstrap positions
+            # show the real strategy name instead of generic "bootstrap".
+            try:
+                ts_rows = session.query(TradeState).all()
+                _ts_by_order: Dict[str, str] = {}
+                for ts in ts_rows:
+                    sig = str(getattr(ts, "signal_source", None) or "").strip()
+                    oid = str(getattr(ts, "entry_order_id", None) or "").strip()
+                    if sig and oid and sig.lower() not in ("", "strategy", "bootstrap"):
+                        _ts_by_order[oid] = sig
+            except Exception:
+                _ts_by_order = {}
+
             result = []
             for p in positions:
                 strategy_source = getattr(p, "strategy_source", None)
-                if not strategy_source:
-                    order_key = str(p.order_id or "")
-                    if order_key.startswith("bootstrap_"):
+                order_key = str(p.order_id or "")
+                if not strategy_source or strategy_source == "bootstrap":
+                    # Try trade_states first for the real strategy label
+                    recovered = _ts_by_order.get(order_key, "")
+                    if recovered:
+                        strategy_source = recovered
+                    elif order_key.startswith("bootstrap_"):
                         strategy_source = "bootstrap"
                     elif order_key.startswith("manual_"):
                         strategy_source = "manual"
                 filled = bool(getattr(p, "filled", False))
-                order_key = str(p.order_id or "")
                 if not filled and (order_key.startswith("bootstrap_") or order_key.startswith("manual_")):
                     filled = True
                 filled_amount = getattr(p, "filled_amount", 0.0) or 0.0

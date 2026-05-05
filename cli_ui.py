@@ -2371,6 +2371,8 @@ class CLICommandCenter:
             return Text("〔M〕", style=f"bold {cls._CYAN}")
         if "simplescalp" in key or key == "simplescalpplus":
             return Text("〔S〕", style=f"bold {cls._EMBER}")
+        if key == "sniper" or key.startswith("sniper"):
+            return Text("〔N〕", style=f"bold {cls._GREEN}")
         if key == "bootstrap":
             return Text("〔B〕", style=cls._DIM)
         if key == "manual":
