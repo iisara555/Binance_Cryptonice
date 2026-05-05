@@ -163,9 +163,18 @@ class StatusRuntimeHelper:
         conf = plan.confidence if plan else 0
         coin = self.format_coin_symbol(plan.symbol) if plan else ""
 
+        # Extract strategy name(s) from votes — show top contributors
+        votes: Dict[str, int] = getattr(plan, "strategy_votes", {}) or {}
+        if votes:
+            sorted_strategies = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+            strategy_label = ", ".join(name for name, _ in sorted_strategies[:3])
+        else:
+            strategy_label = "N/A"
+
         return self.format_alert_block(
             f"📥 <b>Position Opened</b>  {coin}",
             [
+                f"Strategy <code>{strategy_label}</code>",
                 f"Size <code>{float(result.filled_amount or 0.0):.8f}</code> {coin}",
                 f"Fill Price <code>{fill_price:,.0f}</code> {quote}",
                 f"Notional <code>{notional:,.0f}</code> {quote}  |  Confidence {conf:.0%}",

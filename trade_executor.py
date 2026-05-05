@@ -2096,14 +2096,14 @@ class TradeExecutor:
                     except Exception as db_err:
                         logger.warning("[OMS] DB update failed for filled order %s: %s", order_id, db_err)
 
-                # 📱 Send Telegram notification with PnL in THB
+                # 📱 Send Telegram notification with PnL via AlertSystem
                 if self._notifier:
                     try:
-                        from alerts import format_trade_alert
+                        from alerts import AlertLevel, format_trade_alert
 
                         filled_amt = status_result.filled_amount
                         fill_price = status_result.filled_price or 0
-                        value_thb = filled_amt * fill_price
+                        value_quote = filled_amt * fill_price
                         side_str = side_val.upper() if side_val else "SELL"
                         # Spot rule: BUY fill establishes cost basis (no realized PnL).
                         # Realized PnL is reported only for SELL fills.
@@ -2120,12 +2120,17 @@ class TradeExecutor:
                             side=side_str,
                             price=fill_price,
                             amount=filled_amt,
-                            value_thb=value_thb,
+                            value_quote=value_quote,
                             pnl_amt=pnl_amt,
                             pnl_pct=pnl_pct,
                             status="filled",
                         )
-                        self._notifier.send(msg)
+                        # Route through AlertSystem for rate limiting; fall back to
+                        # raw TelegramSender.send() if _notifier is not an AlertSystem.
+                        if hasattr(self._notifier, 'send') and hasattr(self._notifier, 'rate_limiter'):
+                            self._notifier.send(AlertLevel.TRADE, msg)
+                        else:
+                            self._notifier.send(msg)
                         logger.info("[OMS] Telegram notification sent for filled order %s", order_id)
                     except Exception as notify_err:
                         logger.warning("[OMS] Failed to send Telegram notification: %s", notify_err)
