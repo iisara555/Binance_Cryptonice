@@ -71,6 +71,7 @@ class SignalRuntimeDeps:
     database: Any
     is_reused_signal_trigger: Callable[[Optional[AggregatedSignal]], bool]
     get_signal_trigger_token: Callable[[Optional[AggregatedSignal]], str]
+    remember_consumed_signal_trigger: Callable[[Optional[AggregatedSignal]], None]
     allow_sell_entries_from_idle: bool
     create_execution_plan_for_symbol: Callable[[AggregatedSignal, str], Optional[ExecutionPlan]]
     signal_source: Any
@@ -231,6 +232,16 @@ class SignalRuntimeHelper:
                 continue
 
             risk_check = deps.signal_generator.check_risk(signal, portfolio)
+
+            # Cooldown: consume the trigger so the same stale signal cannot fire
+            # again once cooldown expires — bot must wait for a fresh signal instead.
+            if not risk_check.passed and "cooldown" in str(getattr(risk_check, "reason", "")).lower():
+                deps.remember_consumed_signal_trigger(signal)
+                logger.info(
+                    "[Cooldown] %s %s trigger consumed — will require fresh signal after cooldown",
+                    symbol,
+                    signal_type.upper(),
+                )
 
             if deps.state_machine_enabled:
                 if signal_type == "buy":

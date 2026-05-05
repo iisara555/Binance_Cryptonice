@@ -30,6 +30,7 @@ def build_signal_runtime_deps(bot: Any) -> SignalRuntimeDeps:
         database=bot.db,
         is_reused_signal_trigger=bot._is_reused_signal_trigger,
         get_signal_trigger_token=bot._get_signal_trigger_token,
+        remember_consumed_signal_trigger=bot._remember_consumed_signal_trigger,
         allow_sell_entries_from_idle=bool(getattr(bot, "_allow_sell_entries_from_idle", False)),
         create_execution_plan_for_symbol=bot._create_execution_plan_for_symbol,
         signal_source=bot.signal_source,
