@@ -358,6 +358,8 @@ class StartupRuntimeHelper:
 
             bootstrap_source = restored_context.get("source") or "estimated_from_ticker"
             strategy_source = _recover_bootstrap_strategy(self.bot, pair, restored_context)
+            _STRAT_DISPLAY_TO_KEY = {"MacheteV8bLite": "machete_v8b_lite", "SimpleScalpPlus": "simple_scalp_plus"}
+            entry_strategy_key = _STRAT_DISPLAY_TO_KEY.get(strategy_source, "")
             synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
             pos_data = {
                 "symbol": pair,
@@ -376,6 +378,7 @@ class StartupRuntimeHelper:
                 "filled_price": entry_price,
                 "bootstrap_source": bootstrap_source,
                 "strategy_source": strategy_source,
+                "entry_strategy_key": entry_strategy_key,
             }
 
             self.bot.executor.register_tracked_position(synthetic_id, pos_data)

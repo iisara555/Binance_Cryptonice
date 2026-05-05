@@ -208,6 +208,15 @@ class TradeStateManager:
 
         return normalize_buy_quantity(amount, entry_price, total_entry_cost)
 
+    @staticmethod
+    def _infer_signal_source_from_pos(pos: Dict[str, Any]) -> str:
+        """Return strategy key inferred from pos dict when trade_states has no signal_source."""
+        _DISPLAY_MAP = {"MacheteV8bLite": "machete_v8b_lite", "SimpleScalpPlus": "simple_scalp_plus"}
+        key = str(pos.get("entry_strategy_key") or "").strip()
+        if key and key not in ("-", "bootstrap", "manual"):
+            return key
+        return _DISPLAY_MAP.get(str(pos.get("strategy_source") or "").strip(), "")
+
     def sync_in_position_states(self, positions: Iterable[Dict[str, Any]]) -> None:
         """Ensure persisted state matches already-open filled positions after restart/reconcile."""
         active_position_symbols = set()
@@ -264,7 +273,7 @@ class TradeStateManager:
                     take_profit=float(pos.get("take_profit") or snapshot.take_profit or 0.0),
                     total_entry_cost=total_entry_cost,
                     signal_confidence=snapshot.signal_confidence,
-                    signal_source=snapshot.signal_source,
+                    signal_source=snapshot.signal_source or self._infer_signal_source_from_pos(pos),
                     trigger=snapshot.trigger,
                     notes=snapshot.notes,
                     opened_at=pos.get("timestamp") or snapshot.opened_at or datetime.now(timezone.utc),
@@ -298,7 +307,7 @@ class TradeStateManager:
                 take_profit=float(pos.get("take_profit") or snapshot.take_profit or 0.0),
                 total_entry_cost=total_entry_cost,
                 signal_confidence=snapshot.signal_confidence,
-                signal_source=snapshot.signal_source,
+                signal_source=snapshot.signal_source or self._infer_signal_source_from_pos(pos),
                 trigger=snapshot.trigger,
                 notes=snapshot.notes,
                 opened_at=pos.get("timestamp") or snapshot.opened_at or datetime.now(timezone.utc),
