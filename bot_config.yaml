@@ -314,15 +314,8 @@ strategies:
     enable_relaxed_confirmation: true
     relaxed_requires_adx_and_volume: true
     relaxed_confirmation_delta: 1
-    # Freqtrade-style compatibility knobs (mapped into runtime metadata/policy)
-    stoploss: -0.10
-    custom_stoploss: "dynamic_bb_trailing_profit_divider"
-    trailing_stop: true
-    minimal_roi:
-      "0":   0.08
-      "60":  0.04
-      "120": 0.02
-      "240": 0.0
+    # SL/TP จริงคำนวณจาก atr_multiplier (1.8) × ATR และ risk_reward (2.0) ด้านบน
+    # ไม่มี fixed-pct SL สำหรับ strategy นี้
   simple_scalp_plus:
     enabled: true
     cool_down_minutes: 8           # per-strategy cooldown (scalping — shorter)
@@ -350,17 +343,8 @@ strategies:
     min_confirmations_sell: 4
     primary_timeframe: "5m"
     informative_timeframe: "15m"
-    # Freqtrade-style compatibility knobs (mapped into runtime metadata/policy)
-    stoploss: -0.015
-    trailing_stop: true
-    trailing_stop_positive: 0.01
-    trailing_stop_positive_offset: 0.015
-    trailing_only_offset_is_reached: true
-    minimal_roi:
-      "0":  0.02
-      "20": 0.015
-      "30": 0.01
-      "60": 0.007
+    # SL/TP จริงคำนวณจาก atr_multiplier (1.2) × ATR และ risk_reward (1.8) ด้านบน
+    # ไม่มี fixed-pct SL สำหรับ strategy นี้
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:

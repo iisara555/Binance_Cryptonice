@@ -220,7 +220,6 @@ class SignalGenerator:
         # (the root cause of the 5.3% win rate). They are still loaded above so
         # that mode profiles in bot_config.yaml can opt them in explicitly.
         self._aggregate_strategy_names = [
-            "sniper",
             "machete_v8b_lite",
             "simple_scalp_plus",
         ]
