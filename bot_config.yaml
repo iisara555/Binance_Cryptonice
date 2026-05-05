@@ -236,6 +236,10 @@ multi_timeframe:
 risk:
   use_fractional_kelly: false           # false = if Kelly edge <= 0, use fixed max_risk_per_trade_pct (no hard reject)
   max_risk_per_trade_pct: 2.5        # FIX: aligned with strategy_mode.scalping — unlock min notional with risk-based sizing
+  # FIX 1 (Kelly min floor): absolute minimum effective risk % when use_fractional_kelly=false.
+  # Prevents drawdown + Kelly reductions from collapsing position size to near-zero, silently
+  # blocking all trades.  Must be > 0.  Safe default: 0.5% (produces ~0.21 USDT on 42 USDT NAV).
+  min_risk_per_trade_pct: 0.5
   max_daily_loss_pct: 3.0            # AUDIT FIX: was 5.0 — circuit breaker triggers earlier
   max_position_per_trade_pct: 28.0   # FLOOR — dynamic overrides at runtime; DynamicRiskConfig scales to current NAV
   max_open_positions: 6              # CEILING — dynamic may reduce based on NAV (slots = floor(85% / position_pct))

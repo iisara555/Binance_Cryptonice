@@ -209,6 +209,11 @@ class RiskConfig:
     use_dynamic_sl_tp: bool = True  # Use pair-specific SL/TP
     # When False and Kelly edge is non-positive, keep fixed max_risk_per_trade_pct (no hard reject).
     use_fractional_kelly: bool = True
+    # FIX 1 (Kelly min floor): absolute minimum risk % used when use_fractional_kelly=False.
+    # Prevents Kelly / drawdown reductions from collapsing effective_risk_pct to near-zero,
+    # which would produce a sub-min_order_amount position that silently blocks all trades.
+    # Expressed in % of portfolio (e.g. 0.5 = 0.5%).  Must be > 0.
+    min_risk_per_trade_pct: float = 0.5
 
     def __post_init__(self):
         # Hard reject anything above 8.0% (obvious misconfiguration).
@@ -244,6 +249,7 @@ class RiskConfig:
             atr_period=risk.get("atr_period", 14),
             use_dynamic_sl_tp=risk.get("use_dynamic_sl_tp", True),
             use_fractional_kelly=bool(risk.get("use_fractional_kelly", True)),
+            min_risk_per_trade_pct=float(risk.get("min_risk_per_trade_pct", 0.5)),
             initial_balance=data.get("portfolio", {}).get("initial_balance", 1000.0),
             min_balance_threshold=data.get("portfolio", {}).get("min_balance_threshold", 100.0),
             max_open_positions=data.get("trading", {}).get("max_open_positions", 5),
@@ -268,6 +274,7 @@ class RiskConfig:
                 "atr_period": self.atr_period,
                 "use_dynamic_sl_tp": self.use_dynamic_sl_tp,
                 "use_fractional_kelly": self.use_fractional_kelly,
+                "min_risk_per_trade_pct": self.min_risk_per_trade_pct,
             },
             "portfolio": {
                 "initial_balance": self.initial_balance,
@@ -401,7 +408,27 @@ class RiskManager:
             self._peak_portfolio_value = None
             return False
 
-    def _update_peak_portfolio_value(self, portfolio_value: float) -> None:
+    def _maybe_init_peak(self, portfolio_value: float) -> None:
+        """Set the peak on first observation only — does NOT chase NAV on every loop tick.
+
+        FIX 2 (Drawdown peak resets too often): The former _update_peak_portfolio_value
+        was called on every loop iteration, making the drawdown circuit breaker
+        ineffective because the peak always caught up to the current price.
+        This replacement only initialises the peak when it has never been set.
+        The peak is only *advanced* via _advance_peak_on_trade_close, which is called
+        from record_trade (i.e. after a successful close) and daily reset.
+        """
+        if portfolio_value <= 0:
+            return
+        if self._peak_portfolio_value is None:
+            self._peak_portfolio_value = portfolio_value
+
+    def _advance_peak_on_trade_close(self, portfolio_value: float) -> None:
+        """Advance the drawdown peak after a confirmed trade close or daily reset.
+
+        Only moves the peak upward; never resets it downward.  Persists to disk
+        because a trade close is a meaningful event worth recording.
+        """
         if portfolio_value <= 0:
             return
         if self._peak_portfolio_value is None or portfolio_value > self._peak_portfolio_value:
@@ -453,7 +480,8 @@ class RiskManager:
             _diag("GLOBAL", "RiskMgr:PositionSize", "REJECT", "Invalid portfolio value")
             return RiskCheckResult(False, "Invalid portfolio value")
 
-        self._update_peak_portfolio_value(portfolio_value)
+        # FIX 2: only initialise peak on first call, never advance it intra-loop.
+        self._maybe_init_peak(portfolio_value)
 
         # Use the configured max risk
         effective_risk_pct = self.config.max_risk_per_trade_pct
@@ -509,6 +537,20 @@ class RiskManager:
                         f"\U0001f4d0 [Kelly Sizing] P={p:.2f}, b={b:.2f} -> Full=({kelly_pct*100:.1f}%), Half-Kelly=({half_kelly*100:.1f}%) -> Final Risk: {dynamic_risk:.2f}%"
                     )
                     effective_risk_pct = dynamic_risk
+
+        # FIX 1 (Kelly min floor): when use_fractional_kelly=False, all reductions
+        # (drawdown, half-kelly) are applied on top of max_risk_per_trade_pct but the
+        # result can collapse to near-zero for tiny portfolios, silently blocking trades.
+        # Clamp to min_risk_per_trade_pct so position size never drops below the safe floor.
+        if not self.config.use_fractional_kelly:
+            floor_pct = max(float(self.config.min_risk_per_trade_pct or 0.5), 0.0)
+            if effective_risk_pct < floor_pct:
+                logger.info(
+                    "[Kelly MinFloor] effective_risk_pct=%.4f%% below min_risk_per_trade_pct=%.4f%% — clamped.",
+                    effective_risk_pct,
+                    floor_pct,
+                )
+                effective_risk_pct = floor_pct
 
         drawdown_pct = self._get_current_drawdown_pct(portfolio_value)
         drawdown_multiplier = self._get_drawdown_risk_multiplier(portfolio_value)
@@ -740,8 +782,13 @@ class RiskManager:
         """Public read accessor for today's completed trade count."""
         return self._trade_count_today
 
-    def record_trade(self, symbol: Optional[str] = None):
-        """Call after a completed trade to update counters."""
+    def record_trade(self, symbol: Optional[str] = None, portfolio_value: Optional[float] = None):
+        """Call after a completed trade to update counters.
+
+        FIX 2 (Drawdown peak): peak is advanced here — the only meaningful event
+        that confirms a new high-water mark after a successful close.  Pass the
+        current NAV as ``portfolio_value`` so the peak can be updated correctly.
+        """
         today = datetime.now(timezone.utc).date()
         if self._daily_loss_date != today:
             self._daily_loss_date = today
@@ -753,7 +800,11 @@ class RiskManager:
         self._last_trade_time = now
         if symbol:
             self._last_trade_time_per_pair[symbol] = now
-        self.save_state()
+        # Advance the peak only on confirmed trade close.
+        if portfolio_value is not None and portfolio_value > 0:
+            self._advance_peak_on_trade_close(portfolio_value)
+        else:
+            self.save_state()
 
     def record_trade_activity(self, symbol: Optional[str] = None):
         """Refresh cooldown timestamp without incrementing the daily trade counter."""
@@ -839,7 +890,8 @@ class RiskManager:
             _diag("GLOBAL", "RiskMgr:CanOpen", "REJECT", reason)
             return RiskCheckResult(False, reason)
 
-        self._update_peak_portfolio_value(portfolio_value)
+        # FIX 2: read-only initialisation only — peak advances on trade close.
+        self._maybe_init_peak(portfolio_value)
 
         # 2. Daily loss limit
         daily_check = self.check_daily_loss_limit(portfolio_value)
@@ -880,9 +932,14 @@ class RiskManager:
         return RiskCheckResult(True, "All checks passed")
 
     def update_daily_start(self, portfolio_value: float):
-        """Manually set the daily starting balance (e.g., on restart)."""
+        """Manually set the daily starting balance (e.g., on restart).
+
+        FIX 2: also advances the peak here because a daily reset is a meaningful
+        event (the bot operator has verified the NAV at the start of the day).
+        """
         self._daily_loss_start = portfolio_value
         self._daily_loss_date = date.today()
+        self._advance_peak_on_trade_close(portfolio_value)
         self.save_state()
 
     def get_risk_summary(self, portfolio_value: float) -> dict:

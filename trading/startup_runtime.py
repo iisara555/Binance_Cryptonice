@@ -32,6 +32,22 @@ def _recover_bootstrap_strategy(bot: Any, symbol: str, restored_context: Dict[st
             except Exception:
                 pass
 
+    # 1b. DB fallback: trade_states table retains the correct signal_source even when
+    #     the state machine is disabled or the in-memory snapshot is not yet populated.
+    db = getattr(bot, "db", None)
+    if db is not None and hasattr(db, "get_trade_state"):
+        try:
+            state_row = db.get_trade_state(symbol)
+            if state_row:
+                sig = str(state_row.get("signal_source") or "").strip()
+                if sig and sig.lower() not in ("", "strategy", "bootstrap"):
+                    executor = getattr(bot, "executor", None)
+                    if executor is not None and hasattr(executor, "_display_strategy_name"):
+                        return executor._display_strategy_name(sig)
+                    return sig
+        except Exception:
+            pass
+
     # 2. Persisted position context already has a non-bootstrap strategy_source.
     ctx_src = str(restored_context.get("strategy_source") or "").strip()
     if ctx_src and ctx_src not in ("", "bootstrap"):

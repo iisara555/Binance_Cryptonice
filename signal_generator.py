@@ -387,8 +387,15 @@ class SignalGenerator:
         """
         Generate signals from all or specified strategies.
 
-        Uses a 30-second cache keyed on the last few candle closes' hash
-        to avoid recalculating when data hasn't changed.
+        Uses a cache keyed on the last **closed** candle's timestamp + symbol +
+        active strategy names so the key is stable for the full duration of the
+        candle, regardless of mid-bar OHLCV updates to the current live candle.
+
+        FIX 3 (Signal cache key unstable): The previous implementation hashed the
+        last-5-row OHLCV tail, which changed every loop tick as the current candle
+        updated.  This caused cache misses on every loop and redundant recalculation.
+        The new key uses ``data.index[-1]`` (the last closed candle timestamp) so a
+        cache hit is guaranteed for the entire duration of that candle bar.
 
         Args:
             data: OHLCV DataFrame
@@ -398,8 +405,6 @@ class SignalGenerator:
         Returns:
             List of AggregatedSignal objects
         """
-        import hashlib
-
         # Reset daily count if new day
         self._reset_daily_state()
 
@@ -407,15 +412,17 @@ class SignalGenerator:
             logger.debug("generate_signals skipped: empty OHLCV | symbol=%s", symbol)
             return []
 
-        # Build a cache key from symbol + OHLCV hash (SHA-256, 24 chars)
+        # FIX 3: Build a stable cache key from the last closed candle timestamp
+        # + symbol + the sorted strategy names in use.  This is invariant within
+        # a candle interval (the timestamp only changes when a new bar opens),
+        # so the cache is hit on every subsequent loop tick within that bar.
+        strategies_to_use = use_strategies or list(self._aggregate_strategy_names)
         try:
-            tail_data = data[["open", "high", "low", "close", "volume"]].tail(5)
-            serialized_tail = str(tail_data.to_json() or "")
-            data_hash = hashlib.sha256(serialized_tail.encode("utf-8")).hexdigest()[:24]
+            last_ts = str(data.index[-1])
         except Exception:
-            data_hash = "unknown"
-
-        cache_key = f"{symbol}:{data_hash}"
+            last_ts = "unknown"
+        strategies_key = ",".join(sorted(strategies_to_use))
+        cache_key = f"{symbol}:{last_ts}:{strategies_key}"
         now = time.time()
 
         # Return cached result if fresh
@@ -436,8 +443,6 @@ class SignalGenerator:
 
         # Detect market condition
         market_condition = detect_market_condition(data["close"].tolist() if isinstance(data, pd.DataFrame) else data)
-
-        strategies_to_use = use_strategies or list(self._aggregate_strategy_names)
 
         all_signals, strategy_reject_reasons = collect_raw_trading_signals(
             strategies=self.strategies,
@@ -607,25 +612,30 @@ class SignalGenerator:
                     except Exception:
                         continue
 
-            if macro_trend is None and len(data) >= 60 and "close" in data.columns:
-                ema_60 = data["close"].ewm(span=60, adjust=False).mean().iloc[-1]
-                current_price = data["close"].iloc[-1]
-                macro_trend = SignalType.BUY if current_price > ema_60 else SignalType.SELL
-                htf_used = "ema60_approx"
-
-            if macro_trend is not None:
-                if sig_type != macro_trend:
-                    logger.debug(
-                        "[MTF Filter] Micro %s contradicts %s Macro %s -> Halving confidence",
-                        sig_type.name,
-                        htf_used,
-                        macro_trend.name,
-                    )
-                    adj_conf *= 0.5
-                    risk_score += 25
-                    mtf_rationale = f" | ⚠️ MTF Misaligned ({htf_used})"
-                else:
-                    mtf_rationale = f" | ✅ MTF Aligned ({htf_used})"
+            # FIX 4 (MTF EMA fallback uses wrong timeframe): the previous code
+            # fell back to computing EMA-60 on the current (15m) DataFrame when
+            # HTF data was unavailable.  A 15m EMA-60 is NOT equivalent to a
+            # 1h EMA-60; using it produced systematically wrong trend bias.
+            # Correct behaviour: skip the MTF check entirely when HTF is absent.
+            # "Skip" means pass without confirmation — NOT a rejection.
+            if macro_trend is None:
+                logger.debug(
+                    "[MTF Filter] %s — no HTF data available; skipping MTF check (pass without confirmation)",
+                    symbol,
+                )
+                mtf_rationale = " | ⏭️ MTF Skipped (no HTF data)"
+            elif sig_type != macro_trend:
+                logger.debug(
+                    "[MTF Filter] Micro %s contradicts %s Macro %s -> Halving confidence",
+                    sig_type.name,
+                    htf_used,
+                    macro_trend.name,
+                )
+                adj_conf *= 0.5
+                risk_score += 25
+                mtf_rationale = f" | ⚠️ MTF Misaligned ({htf_used})"
+            else:
+                mtf_rationale = f" | ✅ MTF Aligned ({htf_used})"
         except Exception as e:
             logger.debug(f"[MTF] Filter skipped: {e}")
 
