@@ -280,9 +280,16 @@ class ManagedLifecycleHelper:
         )
         coin = self.bot._format_coin_symbol(decision.plan.symbol)
         quote = self.bot._status_helper.quote_asset() if hasattr(self.bot, "_status_helper") else "USDT"
+        votes: dict = getattr(decision.plan, "strategy_votes", {}) or {}
+        if votes:
+            sorted_votes = sorted(votes.items(), key=lambda x: x[1], reverse=True)
+            strategy_label = ", ".join(name for name, _ in sorted_votes[:3])
+        else:
+            strategy_label = "N/A"
         msg = self.bot._format_alert_block(
             f"📥 <b>ส่งคำสั่งซื้อ</b>  {coin}",
             [
+                f"Strategy  <code>{strategy_label}</code>",
                 f"ราคา  <code>{decision.plan.entry_price:,.0f}</code> {quote}  ({decision.plan.confidence:.0%})",
                 "ขนาดไม้จะคำนวณตามยอดคงเหลือ/ความเสี่ยงตอนส่งออเดอร์",
                 f"SL <code>{decision.plan.stop_loss:,.0f}</code>  TP <code>{decision.plan.take_profit:,.0f}</code>",
