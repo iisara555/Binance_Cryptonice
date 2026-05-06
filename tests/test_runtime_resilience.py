@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import time
 from datetime import datetime
 from unittest.mock import Mock
@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from bitkub_websocket import BitkubWebSocket, PriceTick
+from binance_websocket import BinanceWebSocket, PriceTick
 from database import Database
 from helpers import get_current_price
 from telegram_bot import TelegramBotHandler
@@ -134,7 +134,7 @@ def test_telegram_handler_stops_polling_after_409_conflict():
 
 
 def test_websocket_recent_messages_count_as_heartbeat_activity():
-    ws = BitkubWebSocket(["THB_BTC"], on_tick=None)
+    ws = BinanceWebSocket(["BTCUSDT"], on_tick=None)
     ws._last_pong_time = 100.0
     ws._last_activity_time = 155.0
 
@@ -143,7 +143,7 @@ def test_websocket_recent_messages_count_as_heartbeat_activity():
 
 
 def test_websocket_heartbeat_uses_warning_and_reconnect_grace_windows():
-    ws = BitkubWebSocket(["THB_BTC"], on_tick=None)
+    ws = BinanceWebSocket(["BTCUSDT"], on_tick=None)
     ws._last_pong_time = 100.0
     ws._last_activity_time = 100.0
 
@@ -153,7 +153,7 @@ def test_websocket_heartbeat_uses_warning_and_reconnect_grace_windows():
 
 
 def test_websocket_reports_connection_age_and_proactive_recycle_stats():
-    ws = BitkubWebSocket(["THB_BTC"], on_tick=None)
+    ws = BinanceWebSocket(["BTCUSDT"], on_tick=None)
     ws._last_connection_time = 100.0
     ws._last_pong_time = 190.0
     ws._last_activity_time = 190.0
@@ -178,7 +178,7 @@ def test_get_current_price_uses_rest_when_ws_tick_is_stale(monkeypatch):
         percent_change_24h=0.0,
         timestamp=1.0,
     )
-    monkeypatch.setattr("bitkub_websocket.get_latest_ticker", lambda _symbol: stale_tick)
+    monkeypatch.setattr("binance_websocket.get_latest_ticker", lambda _symbol: stale_tick)
 
     class _Api:
         @staticmethod
@@ -200,7 +200,7 @@ def test_get_current_price_uses_ws_stale_last_resort_when_rest_unavailable(monke
         percent_change_24h=0.0,
         timestamp=1.0,
     )
-    monkeypatch.setattr("bitkub_websocket.get_latest_ticker", lambda _symbol: stale_tick)
+    monkeypatch.setattr("binance_websocket.get_latest_ticker", lambda _symbol: stale_tick)
 
     class _Api:
         @staticmethod

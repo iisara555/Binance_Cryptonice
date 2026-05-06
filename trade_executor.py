@@ -51,13 +51,15 @@ def _ws_ticker(symbol: str):
 
                     _ws_mod = _bws
                 except ImportError:
-                    try:
-                        import bitkub_websocket as _bws
-
-                        _ws_mod = _bws
-                    except ImportError:
-                        return None
-    return _ws_mod.get_latest_ticker(symbol)
+                    logger.warning(
+                        "[WS] binance_websocket module not available — WS price lookup disabled."
+                    )
+                    _ws_mod = object()  # sentinel: prevents repeated import attempts
+                    return None
+    get_fn = getattr(_ws_mod, "get_latest_ticker", None)
+    if get_fn is None:
+        return None
+    return get_fn(symbol)
 
 
 class OrderStatus(Enum):
@@ -256,7 +258,6 @@ class TradeExecutor:
         "XRP": 0,
         "ADA": 0,
         "DOGE": 0,
-        "THB": 2,
         "SHIB": 0,
         "USDT": 2,
     }
@@ -295,18 +296,18 @@ class TradeExecutor:
         return self.ASSET_DECIMALS.get(upper_sym, 8)
 
     def _format_balance_for_display(self, symbol: str, amount: Any) -> str:
-        """Format balance with 8 decimal places for crypto, 2 for THB.
+        """Format balance with 8 decimal places for crypto, 2 for USDT.
         Keep all decimals to avoid losing value opportunities.
 
         Args:
-            symbol: Asset symbol (e.g., 'BTC', 'THB')
+            symbol: Asset symbol (e.g., 'BTC', 'USDT')
             amount: The balance amount to format
 
         Returns:
             Formatted string with full decimal places
         """
         amount_dec = to_decimal(amount)
-        if symbol.upper() in ("THB", "USDT"):
+        if symbol.upper() in ("USDT",):
             return f"{amount_dec:.2f}"
         return f"{amount_dec:.8f}".rstrip("0").rstrip(".")
 
@@ -386,7 +387,8 @@ class TradeExecutor:
         )[0]
 
     def _split_symbol(self, symbol: Optional[str]) -> Tuple[str, str]:
-        """Return (base_asset, quote_asset) for THB_BTC, BTC_THB, or BTCUSDT."""
+        """Return (base_asset, quote_asset) for Binance TH symbols (e.g. BTCUSDT → ('BTC', 'USDT')).
+        Also handles legacy underscore format (BTC_USDT) for DB record compatibility."""
         sym = str(symbol or "").strip().upper()
         if not sym:
             return "", "USDT"
@@ -679,8 +681,6 @@ class TradeExecutor:
         if rem <= 0 and not partial and amt > 0:
             rem = amt
         if rem <= 0:
-            return False
-        if sym in ("THB_BTC", "BTC_THB") and side == "sell" and amt > 1.0:
             return False
         return True
 
@@ -1138,7 +1138,7 @@ class TradeExecutor:
                 self._open_orders[order_id]["trailing_peak"] = current_price
 
         logger.debug(
-            "[Trailing Stop] %s | profit +%.2f%% | SL: %.2f -> %.2f THB | Price: %.2f",
+            "[Trailing Stop] %s | profit +%.2f%% | SL: %.2f -> %.2f USDT | Price: %.2f",
             symbol,
             profit_pct,
             old_sl,
@@ -2155,12 +2155,12 @@ class TradeExecutor:
 
     def _round_amount(self, amount: float, symbol: Optional[str] = None) -> float:
         """Round order amount to 8 decimal places for crypto (keep full precision).
-        Use 2 decimals for THB/USDT only.
+        Use 2 decimals for USDT only.
         """
         if symbol:
             base = self._extract_base_asset(symbol)
             # Keep full 8 decimals for crypto to avoid losing value
-            if base.upper() in ("THB", "USDT"):
+            if base.upper() == "USDT":
                 return float(quantize_decimal(amount, 2))
         # Default to 8 decimals for all crypto (BTC, ETH, DOGE, etc.)
         return float(quantize_decimal(amount, 8))
@@ -2169,6 +2169,7 @@ class TradeExecutor:
         """Get summary of execution performance."""
         with self._orders_lock:
             history = list(self._order_history)
+            open_count = len(self._open_orders)  # R3: read inside lock — OMS monitor may write concurrently
         if not history:
             return {
                 "total_orders": 0,
@@ -2176,7 +2177,7 @@ class TradeExecutor:
                 "failed_orders": 0,
                 "avg_execution_time_ms": 0,
                 "success_rate": 0,
-                "open_orders": len(self._open_orders),
+                "open_orders": open_count,
             }
         total = len(history)
         successful = sum(1 for r in history if r.success)
@@ -2186,5 +2187,5 @@ class TradeExecutor:
             "failed_orders": total - successful,
             "avg_execution_time_ms": sum(r.execution_time_ms for r in history) / total,
             "success_rate": successful / total * 100 if total > 0 else 0,
-            "open_orders": len(self._open_orders),
+            "open_orders": open_count,
         }

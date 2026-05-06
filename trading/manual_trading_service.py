@@ -1,4 +1,4 @@
-"""Manual BUY / SELL / track-position CLI flows delegated from ``TradingBotApp``."""
+﻿"""Manual BUY / SELL / track-position CLI flows delegated from ``TradingBotApp``."""
 
 from __future__ import annotations
 
@@ -145,7 +145,7 @@ class ManualTradingService:
         bot = getattr(app, "bot", None)
         if bot is not None:
             try:
-                min_quote = float(getattr(bot, "min_trade_value_thb", min_quote) or min_quote)
+                min_quote = float(getattr(bot, "min_trade_value_usdt", min_quote) or min_quote)
             except (TypeError, ValueError):
                 min_quote = 15.0
         notion = quantity * avg_cost

@@ -8,7 +8,7 @@ Manages portfolio rebalancing with multiple strategies:
 
 Data-Aware: Skips rebalancing for assets with insufficient candle data.
 
-Author: Memo 🐕
+Author: Memo ๐•
 """
 
 import json
@@ -23,9 +23,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Constants
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 # Minimum candles needed before an asset can be traded/rebalanced by ML system
 MIN_CANDLES_FOR_TRADING = 1000
@@ -33,7 +33,7 @@ MIN_CANDLES_FOR_TRADING = 1000
 # Database path (can be overridden via config)
 DEFAULT_DB_PATH = "crypto_bot.db"
 DEFAULT_QUOTE_ASSET = "USDT"
-_CASH_ASSETS = {"USDT", "THB"}
+_CASH_ASSETS = {"USDT"}
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -157,9 +157,9 @@ def _apply_sideways_target_allocation(
     return _normalize_target_allocation(adjusted)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Helper Functions
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 
 def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, bool, str]:
@@ -181,7 +181,7 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
         raw_symbol = str(symbol or "").upper()
         db_symbols = [raw_symbol] if raw_symbol else []
         if raw_symbol and "_" not in raw_symbol and not raw_symbol.endswith(DEFAULT_QUOTE_ASSET):
-            db_symbols.extend([f"{raw_symbol}{DEFAULT_QUOTE_ASSET}", f"THB_{raw_symbol}"])
+            db_symbols.extend([f"{raw_symbol}{DEFAULT_QUOTE_ASSET}"])
         if not db_symbols:
             return 0, False, "No symbol"
 
@@ -386,9 +386,9 @@ class RebalancePlan:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Base Strategy
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 
 class RebalanceStrategyBase(ABC):
@@ -413,9 +413,9 @@ class RebalanceStrategyBase(ABC):
         pass
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Threshold-Based Strategy
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 
 class ThresholdRebalanceStrategy(RebalanceStrategyBase):
@@ -491,9 +491,9 @@ class ThresholdRebalanceStrategy(RebalanceStrategyBase):
         return orders
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Calendar-Based Strategy
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 
 class CalendarRebalanceStrategy(RebalanceStrategyBase):
@@ -594,9 +594,9 @@ class CalendarRebalanceStrategy(RebalanceStrategyBase):
         return orders
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Risk-Based Strategy
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 
 class RiskRebalanceStrategy(RebalanceStrategyBase):
@@ -777,9 +777,9 @@ class RiskRebalanceStrategy(RebalanceStrategyBase):
         return orders
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Main Portfolio Rebalancer
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
 
 class PortfolioRebalancer:
@@ -901,7 +901,7 @@ class PortfolioRebalancer:
         except Exception as e:
             logger.warning(f"Could not save rebalancer state: {e}")
 
-    # ── Public API ───────────────────────────────────────────────────────────
+    # โ”€โ”€ Public API โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def increment_iteration(self):
         """Call this each trading loop iteration."""
@@ -1030,7 +1030,7 @@ class PortfolioRebalancer:
         db_path = self.config.get("db_path", DEFAULT_DB_PATH)
 
         # Build allocations (with data readiness check & held-coins filter)
-        # ✓ NOTE: Only processes coins that are currently held in the portfolio
+        # โ“ NOTE: Only processes coins that are currently held in the portfolio
         allocations, skipped = self._build_allocations(portfolio_manager, price_data, target_allocation, db_path)
 
         # Log rebalancing scope
@@ -1039,11 +1039,11 @@ class PortfolioRebalancer:
         insufficient_data_coins = [s["symbol"] for s in skipped if not s["reason"].startswith("Not currently held")]
 
         if held_coins:
-            logger.info(f"📊 Rebalancing held coins: {held_coins}")
+            logger.info(f"๐“ Rebalancing held coins: {held_coins}")
         if not_held_coins:
-            logger.info(f"💤 Skipping coins not in portfolio: {not_held_coins}")
+            logger.info(f"๐’ค Skipping coins not in portfolio: {not_held_coins}")
         if insufficient_data_coins:
-            logger.info(f"⏰ Skipping coins without sufficient data: {insufficient_data_coins}")
+            logger.info(f"โฐ Skipping coins without sufficient data: {insufficient_data_coins}")
 
         # Determine strategy to use (needed before skip check for aborted plan)
         strat_type = RebalanceStrategy(strategy) if strategy else self.strategy_type
@@ -1053,7 +1053,7 @@ class PortfolioRebalancer:
         if skipped:
             skipped_names = [s["symbol"] for s in skipped]
             logger.warning(
-                f"⏳ REBALANCE ABORTED: Waiting for data. "
+                f"โณ REBALANCE ABORTED: Waiting for data. "
                 f"Skipped: {skipped_names}. "
                 f"Will rebalance when all assets have sufficient data."
             )
@@ -1136,7 +1136,7 @@ class PortfolioRebalancer:
                     if key not in seen or abs(o.quantity) > abs(seen[key].quantity):
                         seen[key] = o
                 orders = list(seen.values())
-                # FIX: Execute SELL orders BEFORE BUY orders to free up capital
+                # Execute SELL orders before BUY orders to free up capital
                 orders.sort(key=lambda x: (0 if x.side == "sell" else 1, -x.priority))
 
         if trigger_override is not None:
@@ -1204,7 +1204,7 @@ class PortfolioRebalancer:
 
             if not is_cash_asset and not self.allow_new_assets and not has_ever_held(asset, db_path):
                 logger.debug(
-                    f"💤 Skipping {asset} for rebalance: "
+                    f"๐’ค Skipping {asset} for rebalance: "
                     f"Coin has never been held by this bot. Only historically held coins are rebalanced."
                 )
                 skipped.append(
@@ -1217,7 +1217,7 @@ class PortfolioRebalancer:
                 continue
 
             if not is_cash_asset and current_price <= 0:
-                logger.debug(f"💤 Skipping {asset} for rebalance: " f"Missing or invalid market price")
+                logger.debug(f"๐’ค Skipping {asset} for rebalance: " f"Missing or invalid market price")
                 skipped.append(
                     {
                         "symbol": asset,
@@ -1252,7 +1252,7 @@ class PortfolioRebalancer:
 
             if not data_ready:
                 logger.info(
-                    f"⏳ Skipping {asset} for rebalance: "
+                    f"โณ Skipping {asset} for rebalance: "
                     f"Insufficient data ({candle_count}/{MIN_CANDLES_FOR_TRADING} candles). "
                     f"Status: {status_msg}"
                 )
@@ -1266,7 +1266,7 @@ class PortfolioRebalancer:
 
         return allocations, skipped
 
-    # ── Simulation / Backtest ────────────────────────────────────────────────
+    # โ”€โ”€ Simulation / Backtest โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def simulate_rebalance(
         self,
@@ -1353,6 +1353,6 @@ class PortfolioRebalancer:
         }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 # Quick Test
-# ─────────────────────────────────────────────────────────────────────────────
+# โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€

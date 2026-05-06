@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from bitkub_websocket import BitkubWebSocket
+from binance_websocket import BinanceWebSocket
 from rate_limiter import TokenBucketRateLimiter
 
 
@@ -23,7 +23,7 @@ def test_rate_limiter_prevents_impossible_acquire_request():
 
 
 def test_websocket_sets_circuit_open_time_on_failure_threshold():
-    ws = BitkubWebSocket(["THB_BTC"], on_tick=lambda tick: None)
+    ws = BinanceWebSocket(["BTCUSDT"], on_tick=lambda tick: None)
     ws._running = True
     ws._reconnect_delay = 0.01
     ws.MAX_RECONNECT_ATTEMPTS = 2
@@ -37,7 +37,7 @@ def test_websocket_sets_circuit_open_time_on_failure_threshold():
 
 
 def test_websocket_stop_interrupts_reconnect_backoff_sleep():
-    ws = BitkubWebSocket(["THB_BTC"], on_tick=lambda tick: None)
+    ws = BinanceWebSocket(["BTCUSDT"], on_tick=lambda tick: None)
     ws._running = True
     ws._reconnect_delay = 10.0  # intentionally long to verify interruption
 

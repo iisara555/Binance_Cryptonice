@@ -1,4 +1,4 @@
-"""Wire SignalRuntimeDeps / MultiTimeframeRuntimeDeps / ExecutionPlanDeps / ExecutionRuntimeDeps."""
+﻿"""Wire SignalRuntimeDeps / MultiTimeframeRuntimeDeps / ExecutionPlanDeps / ExecutionRuntimeDeps."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def build_execution_plan_deps(bot: Any) -> ExecutionPlanDeps:
         database=bot.db,
         held_coins_only=bool(getattr(bot, "_held_coins_only", False)),
         api_client=bot.api_client,
-        min_trade_value_thb=float(getattr(bot, "min_trade_value_thb", 15.0) or 15.0),
+        min_trade_value_usdt=float(getattr(bot, "min_trade_value_usdt", 15.0) or 15.0),
         get_latest_atr=bot._get_latest_atr,
         risk_manager=bot.risk_manager,
         loop_count=int(getattr(bot, "_loop_count", 0) or 0),

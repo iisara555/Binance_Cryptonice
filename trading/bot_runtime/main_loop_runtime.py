@@ -52,4 +52,10 @@ def run_trading_main_loop(bot: Any) -> None:
 
         elapsed = (datetime.now() - (bot._last_loop_time or datetime.now())).total_seconds()
         sleep_time = max(1, getattr(bot, "interval_seconds", 60) - elapsed)
-        time.sleep(sleep_time)
+        # Use shutdown event for instant exit response instead of blocking sleep.
+        shutdown_event = getattr(bot, "_shutdown_event", None)
+        if shutdown_event is not None:
+            shutdown_event.wait(timeout=sleep_time)
+        else:
+            time.sleep(sleep_time)
+

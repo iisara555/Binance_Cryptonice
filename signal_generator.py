@@ -86,9 +86,11 @@ def _diag(pair: str, step: str, result: str, reason: str = ""):
 
 from indicators import TechnicalIndicators
 from strategies.breakout import BreakoutStrategy
+from strategies.machete_v8b import MacheteV8b
 from strategies.machete_v8b_lite import MacheteV8bLite
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.scalping import ScalpingStrategy
+from strategies.simple_scalp import SimpleScalp
 from strategies.simple_scalp_plus import SimpleScalpPlus
 from strategies.sniper import SniperStrategy
 from strategies.trend_following import TrendFollowingStrategy
@@ -187,17 +189,65 @@ class SignalRiskCheck:
     risk_score: float = 0.0
 
 
+# ── Strategy key registry ──────────────────────────────────────────────
+# Single source of truth for strategy config keys.  Adding a new strategy
+# here is the *only* change required to keep both initial init and
+# adaptive-router rebuild in sync.
+_STRATEGY_CONFIG_KEYS: tuple[str, ...] = (
+    "trend_following",
+    "mean_reversion",
+    "breakout",
+    "scalping",
+    "sniper",
+    "machete_v8b",
+    "machete_v8b_lite",
+    "simple_scalp",
+    "simple_scalp_plus",
+)
+
+
+def build_signal_generator_config(full_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a SignalGenerator config dict from the bot's full config.
+
+    Centralises the hand-assembled dictionary that was previously duplicated
+    in ``BotApp._apply_new_strategy_mode`` and ``BotApp._initialize_components``.
+    """
+    strategies_config = dict(full_config.get("strategies", {}) or {})
+    risk_section = dict(full_config.get("risk", {}) or {})
+    cfg: Dict[str, Any] = {
+        "risk": risk_section,
+        "min_confidence": strategies_config.get("min_confidence", 0.5),
+        "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
+        "max_open_positions": risk_section.get("max_open_positions", 3),
+        "max_daily_trades": risk_section.get("max_daily_trades", 10),
+        "strategies": {
+            "enabled": list(strategies_config.get("enabled") or []),
+        },
+        "mode_indicator_profiles": dict(full_config.get("mode_indicator_profiles", {}) or {}),
+    }
+    # Auto-discover all strategy-specific config blocks.
+    for key in _STRATEGY_CONFIG_KEYS:
+        if key == "sniper":
+            cfg[key] = strategies_config.get("sniper", {}) or strategies_config.get("scalping", {})
+        else:
+            cfg[key] = strategies_config.get(key, {})
+    return cfg
+
+
 class SignalGenerator:
     """
     รวม signals จากทุก strategy, คำนวณ confidence, และ filter by risk
     """
+
+    # Expose key registry as a class-level constant for external consumers.
+    STRATEGY_KEYS = _STRATEGY_CONFIG_KEYS
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self.runtime_config = StrategyRuntimeConfig.from_bot_config(self.config)
         sniper_cfg = dict(self.config.get("sniper", {}) or {})
 
-        # Initialize strategies
+        # Initialize strategies — all registered so mode profiles can opt any in.
         self.strategies: Dict[str, StrategyBase] = {
             "trend_following": TrendFollowingStrategy(self.config.get("trend_following", {})),
             "mean_reversion": MeanReversionStrategy(self.config.get("mean_reversion", {})),
@@ -207,20 +257,24 @@ class SignalGenerator:
                 sniper_cfg,
                 indicators=TechnicalIndicators,
             ),
+            "machete_v8b": MacheteV8b(
+                self.config.get("machete_v8b", {}),
+            ),
             "machete_v8b_lite": MacheteV8bLite(
                 self.config.get("machete_v8b_lite", {}),
+            ),
+            "simple_scalp": SimpleScalp(
+                self.config.get("simple_scalp", {}),
             ),
             "simple_scalp_plus": SimpleScalpPlus(
                 self.config.get("simple_scalp_plus", {}),
             ),
         }
-        # Trusted strategies for default aggregation. The legacy "trend_following",
-        # "mean_reversion", "breakout", and "scalping" entries are NOT included by
-        # default — historically they fired continuously while a condition held
-        # (the root cause of the 5.3% win rate). They are still loaded above so
-        # that mode profiles in bot_config.yaml can opt them in explicitly.
+        # Default active strategies for signal aggregation.
+        # machete_v8b_lite and simple_scalp are registered above but inactive by default;
+        # mode profiles in bot_config.yaml can opt them in explicitly.
         self._aggregate_strategy_names = [
-            "machete_v8b_lite",
+            "machete_v8b",
             "simple_scalp_plus",
         ]
 

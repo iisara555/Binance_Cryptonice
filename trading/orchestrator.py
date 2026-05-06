@@ -25,7 +25,7 @@ from backtesting_validation import BacktestingValidator, ValidationStatus
 
 if TYPE_CHECKING:
     from api_client import BinanceThClient
-    from bitkub_websocket import BitkubWebSocket
+    from binance_websocket import BinanceWebSocket
     from monitoring import MonitoringService
     from risk_management import RiskManager
     from signal_generator import SignalGenerator

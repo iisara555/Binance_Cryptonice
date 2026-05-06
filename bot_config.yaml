@@ -106,9 +106,9 @@ strategy_mode:
 mode_indicator_profiles:
 
   scalping:
-    # AUDIT FIX: dropped legacy "scalping" strategy — its always-on signaling was
-    # the single biggest loss source. Keeping the rebuilt SimpleScalpPlus + Sniper.
-    active_strategies: ["machete_v8b_lite", "simple_scalp_plus", "simple_scalp", "machete_v8b"]
+    # Active strategies: machete_v8b (full) + simple_scalp_plus.
+    # machete_v8b_lite and simple_scalp are registered but inactive — opt in via this list if needed.
+    active_strategies: ["machete_v8b", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "15m"
     min_confidence: 0.40                  # AUDIT FIX: was 0.30 — require stronger conviction
@@ -123,8 +123,7 @@ mode_indicator_profiles:
     min_hold_seconds: 30
 
   trend_only:
-    # AUDIT FIX: dropped legacy trend_following / breakout from default profile.
-    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
+    active_strategies: ["machete_v8b", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
@@ -137,8 +136,7 @@ mode_indicator_profiles:
     min_hold_seconds: 300
 
   standard:
-    # AUDIT FIX: dropped 4 legacy strategies that historically pyramided into trends.
-    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
+    active_strategies: ["machete_v8b", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
@@ -275,7 +273,7 @@ pre_trade_gate:
 # here only after a 2-week paper trade window confirms behaviour.
 strategies:
   enabled:
-    - "machete_v8b_lite"
+    - "machete_v8b"
     - "simple_scalp_plus"
   min_confidence: 0.40               # AUDIT FIX: was 0.35 — require stronger conviction
   min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
@@ -477,7 +475,7 @@ data:
   collect_interval_seconds: 60       # Interval for data collector loop
   hybrid_dynamic_coin_config:
     whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON); also drives symbol_registry THB_* → *USDT map
-    min_quote_balance_thb: 100.0     # Legacy key name: min quote (USDT for *USDT pairs) before opening a new BUY
+    min_quote_balance_usdt: 10.0     # Minimum USDT balance before opening a new BUY on a new pair
     # Minimum USDT to attach whitelist pairs to runtime (WS, collector, trading_pairs). Can be below min_quote_balance_thb for small accounts.
     min_quote_balance_for_pairs: 10.0
     require_supported_market: true   # Drop whitelist entries not on Binance.th exchangeInfo
@@ -521,7 +519,7 @@ rebalance:
   # Environment overrides supported:
   #   REBALANCE_TARGET_ALLOCATION=USDT:20,BTC:50,DOGE:30
   #   REBALANCE_TARGET_<ASSET>=<percent>
-  #   REBALANCE_CASH_ASSETS=USDT,THB
+  #   REBALANCE_CASH_ASSETS=USDT
   #   REBALANCE_SIDEWAYS_EXPOSURE_FACTOR=0.5
   
   # How often to check for rebalance (every N main loop iterations)

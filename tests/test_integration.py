@@ -1,8 +1,8 @@
-"""
+﻿"""
 Integration Tests
 =================
 Full end-to-end integration tests for the trading system.
-Tests signal → risk → execution flow with mocked API responses.
+Tests signal โ’ risk โ’ execution flow with mocked API responses.
 """
 
 import asyncio
@@ -24,7 +24,7 @@ from alerts import AlertLevel, AlertSystem, TelegramSender
 from api_client import BinanceAPIError, BinanceThClient
 from cli_ui import CLICommandCenter
 from dynamic_coin_config import JsonCoinWhitelistRepository
-from helpers import calc_net_pnl, format_bitkub_time
+from helpers import calc_net_pnl, format_exchange_time
 from main import TradingBotApp
 from trading.bootstrap_config import _apply_strategy_mode_profile, resolve_runtime_trading_pairs
 from trading.runtime_process import (
@@ -1098,7 +1098,7 @@ class TestFullIntegrationFlow:
         app_ref.api_client.get_balances.assert_not_called()
         sent_text = handler._send.call_args.args[0]
         assert "DEGRADED" in sent_text
-        assert "การเทรดถูกปิดใช้งาน" in sent_text
+        assert "เธเธฒเธฃเน€เธ—เธฃเธ”เธ–เธนเธเธเธดเธ”เนเธเนเธเธฒเธ" in sent_text
         assert "Exchange private API unavailable" in sent_text
 
     def test_telegram_status_escapes_degraded_reason_once(self, tmp_path):
@@ -2090,26 +2090,26 @@ class TestFullIntegrationFlow:
         assert test_config["trading_pair"] == "BTCUSDT"
         assert test_config["interval_seconds"] == 1
         assert "trend_following" in test_config["strategies"]["enabled"]
-        logger.info("✅ Configuration loading test passed")
+        logger.info("โ… Configuration loading test passed")
 
     def test_signal_generator_initialization(self, mock_signal_generator):
         """Test signal generator can be initialized with mocks"""
         assert mock_signal_generator is not None
         assert hasattr(mock_signal_generator, "generate_signals")
-        logger.info("✅ Signal generator initialization test passed")
+        logger.info("โ… Signal generator initialization test passed")
 
     def test_risk_manager_initialization(self, mock_risk_manager):
         """Test risk manager can be initialized with mocks"""
         assert mock_risk_manager is not None
         assert hasattr(mock_risk_manager, "calc_sl_tp_from_atr")
-        logger.info("✅ Risk manager initialization test passed")
+        logger.info("โ… Risk manager initialization test passed")
 
     def test_trade_executor_initialization(self, mock_trade_executor):
         """Test trade executor can be initialized with mocks"""
         assert mock_trade_executor is not None
         assert hasattr(mock_trade_executor, "execute_entry")
         assert hasattr(mock_trade_executor, "execute_exit")
-        logger.info("✅ Trade executor initialization test passed")
+        logger.info("โ… Trade executor initialization test passed")
 
 
 class TestSignalFlow:
@@ -2122,7 +2122,7 @@ class TestSignalFlow:
             data=None, symbol="THB_BTC", use_strategies=["trend_following"]
         )
         assert signals == []
-        logger.info("✅ Empty signal generation test passed")
+        logger.info("โ… Empty signal generation test passed")
 
     def test_signal_with_mock_data(self, mock_signal_generator):
         """Test signal generation with mocked data"""
@@ -2148,7 +2148,7 @@ class TestSignalFlow:
         )
 
         assert isinstance(signals, list)
-        logger.info("✅ Signal generation with mock data test passed")
+        logger.info("โ… Signal generation with mock data test passed")
 
 
 class TestRiskManagement:
@@ -2186,14 +2186,14 @@ class TestRiskManagement:
         assert sl < entry_price
         assert tp > entry_price
         assert tp > sl
-        logger.info(f"✅ ATR calculation: Entry={entry_price}, SL={sl}, TP={tp}")
+        logger.info(f"โ… ATR calculation: Entry={entry_price}, SL={sl}, TP={tp}")
 
     def test_risk_checks(self, mock_risk_manager):
         """Test that risk checks can be called"""
         daily_check = mock_risk_manager.check_daily_loss_limit()
 
         assert daily_check is True
-        logger.info("✅ Risk checks test passed")
+        logger.info("โ… Risk checks test passed")
 
 
 class TestExecutionFlow:
@@ -2205,21 +2205,21 @@ class TestExecutionFlow:
 
         assert result.success is True
         assert result.filled_price == 1500000.0
-        logger.info("✅ Entry execution mock test passed")
+        logger.info("โ… Entry execution mock test passed")
 
     def test_exit_execution_mock(self, mock_trade_executor):
         """Test exit execution with mock"""
         result = mock_trade_executor.execute_exit(Mock())
 
         assert result.success is True
-        logger.info("✅ Exit execution mock test passed")
+        logger.info("โ… Exit execution mock test passed")
 
     def test_open_orders_retrieval(self, mock_trade_executor):
         """Test open orders retrieval"""
         orders = mock_trade_executor.get_open_orders()
 
         assert isinstance(orders, list)
-        logger.info("✅ Open orders retrieval test passed")
+        logger.info("โ… Open orders retrieval test passed")
 
 
 class TestBotMode:
@@ -2230,12 +2230,12 @@ class TestBotMode:
         assert BotMode.FULL_AUTO.value == "full_auto"
         assert BotMode.SEMI_AUTO.value == "semi_auto"
         assert BotMode.DRY_RUN.value == "dry_run"
-        logger.info("✅ BotMode enum test passed")
+        logger.info("โ… BotMode enum test passed")
 
     def test_signal_source_enum(self):
         """Test SignalSource enum values"""
         assert SignalSource.STRATEGY.value == "strategy"
-        logger.info("✅ SignalSource enum test passed")
+        logger.info("โ… SignalSource enum test passed")
 
     def test_cli_mode_shows_live_for_full_auto_without_safety_flags(self):
         app = TradingBotApp.__new__(TradingBotApp)
@@ -2673,7 +2673,7 @@ class TestCliSnapshot:
         assert snapshot["positions"][0]["bootstrap_source"] == "estimated_from_ticker"
         assert snapshot["positions"][0]["pnl_pct"] is None
 
-    def test_format_cli_timestamp_converts_runtime_utc_to_bitkub_time(self):
+    def test_format_cli_timestamp_converts_runtime_utc_to_exchange_time(self):
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00") == "22:35:00"
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00Z") == "22:35:00"
 
@@ -2926,7 +2926,7 @@ class TestCliUi:
         assert "Suggestions:" not in rendered
         assert "Input>" not in rendered
 
-    def test_log_buffer_uses_bitkub_time(self):
+    def test_log_buffer_uses_exchange_time(self):
         app = Mock()
         command_center = CLICommandCenter(app)
         record = logging.LogRecord(
@@ -2949,7 +2949,7 @@ class TestCliUi:
         command_center = CLICommandCenter(app)
 
         noisy_info = logging.LogRecord(
-            name="bitkub_websocket",
+            name="binance_websocket",
             level=logging.INFO,
             pathname=__file__,
             lineno=1,
@@ -2958,7 +2958,7 @@ class TestCliUi:
             exc_info=None,
         )
         important_warning = logging.LogRecord(
-            name="bitkub_websocket",
+            name="binance_websocket",
             level=logging.WARNING,
             pathname=__file__,
             lineno=1,
@@ -3072,8 +3072,8 @@ class TestCliUi:
         assert "4/6" in rendered
 
 
-def test_format_bitkub_time_normalizes_to_thailand_timezone():
-    assert format_bitkub_time(datetime(2026, 4, 11, 15, 35, 0, tzinfo=timezone.utc)) == "22:35:00"
+def test_format_exchange_time_normalizes_to_thailand_timezone():
+    assert format_exchange_time(datetime(2026, 4, 11, 15, 35, 0, tzinfo=timezone.utc)) == "22:35:00"
 
 
 if __name__ == "__main__":

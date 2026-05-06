@@ -390,7 +390,7 @@ class TestTradingBotStartSignalsOMS:
 
     def _build_bot_and_start(self, auth_degraded: bool):
         """Build a minimal bot, call start(), return (bot, signal_was_set)."""
-        from api_client import BitkubClient
+        from api_client import BinanceThClient
         from risk_management import RiskManager
         from signal_generator import SignalGenerator
         from trading_bot import TradingBotOrchestrator
@@ -401,7 +401,7 @@ class TestTradingBotStartSignalsOMS:
         mock_db.list_trade_states.return_value = []
         mock_db.has_ever_held.return_value = False
 
-        api = Mock(spec=BitkubClient)
+        api = Mock(spec=BinanceThClient)
         api.is_circuit_open.return_value = False
         api.check_clock_sync.return_value = True
         api.get_balances.return_value = {}

@@ -102,8 +102,8 @@ def kill_confirm_keyboard() -> Dict[str, Any]:
     return {
         "inline_keyboard": [
             [
-                {"text": "⚠️ CONFIRM KILL", "callback_data": "kill_confirm"},
-                {"text": "❌ CANCEL", "callback_data": "kill_cancel"},
+                {"text": "โ ๏ธ CONFIRM KILL", "callback_data": "kill_confirm"},
+                {"text": "โ CANCEL", "callback_data": "kill_cancel"},
             ]
         ]
     }
@@ -119,11 +119,6 @@ def _normalize_ticker_symbol(symbol: str) -> str:
     raw = str(symbol or "").strip().upper()
     if not raw:
         return ""
-    if "_" in raw:
-        base, quote = raw.split("_", 1)
-        if quote == "THB":
-            return f"THB_{base}"
-        return raw
     if raw.endswith("USDT"):
         return raw
     return ""
@@ -134,10 +129,6 @@ def _extract_base_asset(symbol: str, quote_asset: str = "USDT") -> str:
     quote = str(quote_asset or "USDT").strip().upper()
     if not raw:
         return ""
-    if raw.startswith("THB_"):
-        return raw.split("_", 1)[1]
-    if raw.endswith("_THB"):
-        return raw.split("_", 1)[0]
     if quote and raw.endswith(quote):
         return raw[: -len(quote)]
     return raw
@@ -148,8 +139,6 @@ def _build_pair(base_asset: str, quote_asset: str = "USDT") -> str:
     quote = str(quote_asset or "USDT").strip().upper()
     if not base:
         return ""
-    if quote == "THB":
-        return f"THB_{base}"
     return f"{base}{quote}"
 
 
@@ -193,7 +182,7 @@ class TelegramBotHandler:
         self._base_assets = ["BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOT", "LINK", "DOGE", "POL"]
         self._start_time = time.time()
 
-    # ── Public API ─────────────────────────────────────────────────────────────
+    # โ”€โ”€ Public API โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def start(self):
         """Start the polling thread."""
@@ -228,7 +217,7 @@ class TelegramBotHandler:
             self._thread.join(timeout=5)
         logger.info("Telegram bot handler stopped")
 
-    # ── Polling loop ──────────────────────────────────────────────────────────
+    # โ”€โ”€ Polling loop โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def _poll_loop(self):
         """Background thread: long-poll Telegram for updates."""
@@ -283,7 +272,7 @@ class TelegramBotHandler:
         except Exception as e:
             logger.error("Error dispatching update: %s", e)
 
-    # ── Message handler ────────────────────────────────────────────────────────
+    # โ”€โ”€ Message handler โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def _handle_message(self, msg: Dict[str, Any]):
         """Handle incoming text messages."""
@@ -307,17 +296,17 @@ class TelegramBotHandler:
             try:
                 self._cmd_pnl()
             except Exception as e:
-                self._send("❌ /pnl error: %s", e)
+                self._send("โ /pnl error: %s", e)
         else:
             self._send(
-                "🤖 <b>คำสั่งที่ใช้ได้</b>\n\n"
-                "/status  สถานะพอร์ต\n"
-                "/pnl  กำไรขาดทุน\n"
-                "/kill  หยุดฉุกเฉิน\n"
-                "/resume  กลับมาเทรด"
+                "๐ค– <b>เธเธณเธชเธฑเนเธเธ—เธตเนเนเธเนเนเธ”เน</b>\n\n"
+                "/status  เธชเธ–เธฒเธเธฐเธเธญเธฃเนเธ•\n"
+                "/pnl  เธเธณเนเธฃเธเธฒเธ”เธ—เธธเธ\n"
+                "/kill  เธซเธขเธธเธ”เธเธธเธเน€เธเธดเธ\n"
+                "/resume  เธเธฅเธฑเธเธกเธฒเน€เธ—เธฃเธ”"
             )
 
-    # ── Callback handler ───────────────────────────────────────────────────────
+    # โ”€โ”€ Callback handler โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def _handle_callback(self, cq: Dict[str, Any]):
         """Handle inline button presses."""
@@ -346,7 +335,7 @@ class TelegramBotHandler:
             if message_id:
                 self.telegram.edit_message(
                     message_id,
-                    "❌ <b>Kill Cancelled</b>\n\nการเทรดยังคงทำงานต่อ",
+                    "โ <b>Kill Cancelled</b>\n\nเธเธฒเธฃเน€เธ—เธฃเธ”เธขเธฑเธเธเธเธ—เธณเธเธฒเธเธ•เนเธญ",
                     reply_markup=no_keyboard(),
                 )
         elif data == "resume_confirm":
@@ -357,7 +346,7 @@ class TelegramBotHandler:
                     logger.warning("Failed to answer callback resume_confirm: %s", e)
             self._execute_resume(msg)
 
-    # ── Command handlers ───────────────────────────────────────────────────────
+    # โ”€โ”€ Command handlers โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def _cmd_start(self):
         disabled = self.trading_disabled.is_set()
@@ -365,29 +354,29 @@ class TelegramBotHandler:
         bot_status = bot_ref.get_status() if bot_ref and hasattr(bot_ref, "get_status") else {}
         degraded = bool((bot_status.get("auth_degraded") or {}).get("active", False))
         degraded_reason = str((bot_status.get("auth_degraded") or {}).get("reason") or "")
-        status_emoji = "🟡 DEGRADED" if degraded else ("🔴 DISABLED" if disabled else "🟢 ACTIVE")
+        status_emoji = "๐ก DEGRADED" if degraded else ("๐”ด DISABLED" if disabled else "๐ข ACTIVE")
         mode = bot_status.get("mode") or getattr(self.app_ref, "config", {}).get("mode", "unknown")
         pairs = bot_status.get("trading_pairs") or self.pairs
 
         text = (
-            f"🤖 <b>Binance Thailand Trading Bot</b>\n"
-            f"{'─' * 20}\n"
-            f"สถานะ  {status_emoji}\n"
-            f"โหมด  {mode}\n"
-            f"คู่เทรด  {', '.join(pairs)}\n"
+            f"๐ค– <b>Binance Thailand Trading Bot</b>\n"
+            f"{'โ”€' * 20}\n"
+            f"เธชเธ–เธฒเธเธฐ  {status_emoji}\n"
+            f"เนเธซเธกเธ”  {mode}\n"
+            f"เธเธนเนเน€เธ—เธฃเธ”  {', '.join(pairs)}\n"
             f"\n"
-            f"<b>คำสั่ง</b>\n"
-            f"/status  สถานะพอร์ต\n"
-            f"/pnl  กำไรขาดทุน\n"
-            f"/pairs  คู่เทรด\n"
-            f"/kill  หยุดฉุกเฉิน\n"
-            f"/resume  กลับมาเทรด"
+            f"<b>เธเธณเธชเธฑเนเธ</b>\n"
+            f"/status  เธชเธ–เธฒเธเธฐเธเธญเธฃเนเธ•\n"
+            f"/pnl  เธเธณเนเธฃเธเธฒเธ”เธ—เธธเธ\n"
+            f"/pairs  เธเธนเนเน€เธ—เธฃเธ”\n"
+            f"/kill  เธซเธขเธธเธ”เธเธธเธเน€เธเธดเธ\n"
+            f"/resume  เธเธฅเธฑเธเธกเธฒเน€เธ—เธฃเธ”"
         )
         if degraded:
             text += (
-                f"\n\n⚠️ <b>Degraded Mode</b>\n"
+                f"\n\nโ ๏ธ <b>Degraded Mode</b>\n"
                 f"{degraded_reason or 'Exchange private API unavailable'}\n"
-                f"การเทรดถูกปิดใช้งานจนกว่าจะแก้ไข credentials"
+                f"เธเธฒเธฃเน€เธ—เธฃเธ”เธ–เธนเธเธเธดเธ”เนเธเนเธเธฒเธเธเธเธเธงเนเธฒเธเธฐเนเธเนเนเธ credentials"
             )
         self._send(text)
 
@@ -432,8 +421,6 @@ class TelegramBotHandler:
             text = str(pair or "").upper()
             if text.endswith("USDT"):
                 return "USDT"
-            if text.startswith("THB_") or text.endswith("_THB"):
-                return "THB"
         return "USDT"
 
     def _get_cached_price(self, symbol: str) -> Optional[float]:
@@ -442,7 +429,7 @@ class TelegramBotHandler:
         pair = _build_pair(symbol, quote_asset)
 
         cache = getattr(self.app_ref, "_cli_price_cache", {}) or {}
-        cached = cache.get(pair) or cache.get(f"THB_{str(symbol or '').upper()}")
+        cached = cache.get(pair)
         if isinstance(cached, tuple) and cached:
             try:
                 return float(cached[0]) if cached[0] is not None else None
@@ -462,15 +449,15 @@ class TelegramBotHandler:
         hours, rem = divmod(int(uptime_secs), 3600)
         mins, secs = divmod(rem, 60)
         uptime_str = f"{hours}h {mins}m" if hours > 0 else f"{mins}m {secs}s"
-        status_text = "🟡 DEGRADED" if auth_degraded else ("🔴 DISABLED" if disabled else "🟢 ACTIVE")
+        status_text = "๐ก DEGRADED" if auth_degraded else ("๐”ด DISABLED" if disabled else "๐ข ACTIVE")
 
-        text = f"📊 <b>สถานะระบบ</b>\n" f"{'─' * 20}\n" f"สถานะ  {status_text}\n" f"Uptime  {uptime_str}\n"
+        text = f"๐“ <b>เธชเธ–เธฒเธเธฐเธฃเธฐเธเธ</b>\n" f"{'โ”€' * 20}\n" f"เธชเธ–เธฒเธเธฐ  {status_text}\n" f"Uptime  {uptime_str}\n"
 
         if auth_degraded:
             text += (
-                f"\n⚠️ <b>Degraded Mode</b>\n"
+                f"\nโ ๏ธ <b>Degraded Mode</b>\n"
                 f"{auth_reason or 'Exchange private API unavailable'}\n"
-                f"การเทรดถูกปิดใช้งาน\n"
+                f"เธเธฒเธฃเน€เธ—เธฃเธ”เธ–เธนเธเธเธดเธ”เนเธเนเธเธฒเธ\n"
             )
         else:
             try:
@@ -496,49 +483,49 @@ class TelegramBotHandler:
                 initial = float(self.app_ref.config.get("portfolio", {}).get("initial_balance", 500.0))
                 pnl = total_value - initial
                 pnl_pct = (pnl / initial) * 100 if initial > 0 else 0
-                pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+                pnl_emoji = "๐ข" if pnl >= 0 else "๐”ด"
 
-                text += f"\n<b>พอร์ต</b>\n" f"เงินสด  <code>{quote_balance:,.2f}</code> {quote_asset}\n"
+                text += f"\n<b>เธเธญเธฃเนเธ•</b>\n" f"เน€เธเธดเธเธชเธ”  <code>{quote_balance:,.2f}</code> {quote_asset}\n"
                 if holdings:
                     text += "\n".join(holdings) + "\n"
                 text += (
-                    f"รวม  <code>{total_value:,.2f}</code> {quote_asset}\n"
+                    f"เธฃเธงเธก  <code>{total_value:,.2f}</code> {quote_asset}\n"
                     f"{pnl_emoji} PnL  <code>{pnl:+,.2f}</code> {quote_asset} ({pnl_pct:+.2f}%)\n"
                 )
             except Exception as e:
                 logger.warning("Balance error: %s", e)
-                text += "\nดึงยอดเงินไม่ได้\n"
+                text += "\nเธ”เธถเธเธขเธญเธ”เน€เธเธดเธเนเธกเนเนเธ”เน\n"
 
         self._send(text)
 
     def _cmd_pairs(self):
-        text = "📊 <b>คู่เทรด</b>\n" + "\n".join(f"  • {p}" for p in self.pairs)
+        text = "๐“ <b>เธเธนเนเน€เธ—เธฃเธ”</b>\n" + "\n".join(f"  โ€ข {p}" for p in self.pairs)
         self._send(text)
 
     def _cmd_kill(self):
         """Send kill confirmation message with inline buttons."""
         self._send(
-            "⚠️ <b>หยุดฉุกเฉิน</b>\n"
-            f"{'─' * 20}\n"
-            "กด CONFIRM KILL เพื่อ:\n"
-            "  1. ยกเลิกคำสั่งซื้อขายทั้งหมด\n"
-            "  2. ขายเหรียญทั้งหมด (ราคาตลาด)\n"
-            "  3. ปิดการเทรด\n\n"
-            "ไม่สามารถย้อนกลับได้",
+            "โ ๏ธ <b>เธซเธขเธธเธ”เธเธธเธเน€เธเธดเธ</b>\n"
+            f"{'โ”€' * 20}\n"
+            "เธเธ” CONFIRM KILL เน€เธเธทเนเธญ:\n"
+            "  1. เธขเธเน€เธฅเธดเธเธเธณเธชเธฑเนเธเธเธทเนเธญเธเธฒเธขเธ—เธฑเนเธเธซเธกเธ”\n"
+            "  2. เธเธฒเธขเน€เธซเธฃเธตเธขเธเธ—เธฑเนเธเธซเธกเธ” (เธฃเธฒเธเธฒเธ•เธฅเธฒเธ”)\n"
+            "  3. เธเธดเธ”เธเธฒเธฃเน€เธ—เธฃเธ”\n\n"
+            "เนเธกเนเธชเธฒเธกเธฒเธฃเธ–เธขเนเธญเธเธเธฅเธฑเธเนเธ”เน",
             reply_markup=kill_confirm_keyboard(),
         )
 
     def _cmd_resume(self):
         """Send resume confirmation message with inline buttons."""
         if not self.trading_disabled.is_set():
-            self._send("✅ Bot กำลังเทรดอยู่แล้ว")
+            self._send("โ… Bot เธเธณเธฅเธฑเธเน€เธ—เธฃเธ”เธญเธขเธนเนเนเธฅเนเธง")
             return
         self._send(
-            "▶️ <b>กลับมาเทรด</b>\n\nกดปุ่มด้านล่างเพื่อยืนยัน",
+            "โ–ถ๏ธ <b>เธเธฅเธฑเธเธกเธฒเน€เธ—เธฃเธ”</b>\n\nเธเธ”เธเธธเนเธกเธ”เนเธฒเธเธฅเนเธฒเธเน€เธเธทเนเธญเธขเธทเธเธขเธฑเธ",
             reply_markup={
                 "inline_keyboard": [
                     [
-                        {"text": "▶️ CONFIRM RESUME", "callback_data": "resume_confirm"},
+                        {"text": "โ–ถ๏ธ CONFIRM RESUME", "callback_data": "resume_confirm"},
                     ]
                 ]
             },
@@ -550,7 +537,7 @@ class TelegramBotHandler:
         raw_db = (self.app_ref.config.get("database") or {}).get("db_path", "crypto_bot.db")
         db_path = _resolve_sqlite_db_path(self.app_ref, raw_db)
         if not os.path.exists(db_path):
-            self._send("❌ ไม่พบฐานข้อมูล")
+            self._send("โ เนเธกเนเธเธเธเธฒเธเธเนเธญเธกเธนเธฅ")
             return
 
         conn = sqlite3.connect(db_path)
@@ -591,37 +578,37 @@ class TelegramBotHandler:
         recent = cur.fetchall()
         conn.close()
 
-        pnl_emoji = "🟢" if total_pnl >= 0 else "🔴"
+        pnl_emoji = "๐ข" if total_pnl >= 0 else "๐”ด"
         lines = [
-            f"{pnl_emoji} <b>สรุป P&amp;L</b>",
-            f"{'─' * 20}",
+            f"{pnl_emoji} <b>เธชเธฃเธธเธ P&amp;L</b>",
+            f"{'โ”€' * 20}",
             "",
-            f"<b>ตลอดกาล</b>",
-            f"  จำนวน  {total_trades} เที่ยว",
-            f"  ผลลัพธ์  <code>{total_pnl:+,.2f}</code> {quote_asset}",
-            f"  ค่าธรรมเนียม  <code>{total_fees:,.2f}</code> {quote_asset}",
-            f"  สถิติ  {wins}W / {losses}L ({win_rate:.1f}%)",
+            f"<b>เธ•เธฅเธญเธ”เธเธฒเธฅ</b>",
+            f"  เธเธณเธเธงเธ  {total_trades} เน€เธ—เธตเนเธขเธง",
+            f"  เธเธฅเธฅเธฑเธเธเน  <code>{total_pnl:+,.2f}</code> {quote_asset}",
+            f"  เธเนเธฒเธเธฃเธฃเธกเน€เธเธตเธขเธก  <code>{total_fees:,.2f}</code> {quote_asset}",
+            f"  เธชเธ–เธดเธ•เธด  {wins}W / {losses}L ({win_rate:.1f}%)",
             "",
-            f"<b>วันนี้</b>",
-            f"  จำนวน  {today_trades} เที่ยว",
-            f"  ผลลัพธ์  <code>{today_pnl:+,.2f}</code> {quote_asset}",
+            f"<b>เธงเธฑเธเธเธตเน</b>",
+            f"  เธเธณเธเธงเธ  {today_trades} เน€เธ—เธตเนเธขเธง",
+            f"  เธเธฅเธฅเธฑเธเธเน  <code>{today_pnl:+,.2f}</code> {quote_asset}",
         ]
         if recent:
             lines.append("")
-            lines.append("<b>10 รายการล่าสุด</b>")
-            lines.append("─" * 20)
+            lines.append("<b>10 เธฃเธฒเธขเธเธฒเธฃเธฅเนเธฒเธชเธธเธ”</b>")
+            lines.append("โ”€" * 20)
             for sym, side, pnl, pnl_pct, trigger, _closed_at in recent:
                 coin = _extract_base_asset(sym, quote_asset) if sym else sym
-                pnl_e = "🟢" if (pnl or 0) >= 0 else "🔴"
+                pnl_e = "๐ข" if (pnl or 0) >= 0 else "๐”ด"
                 trigger_str = f" [{trigger}]" if trigger else ""
                 pct = float(pnl_pct or 0.0)
                 lines.append(f"{pnl_e} {coin}  <code>{pnl:+,.2f}</code> {quote_asset}  ({pct:+.1f}%){trigger_str}")
 
-        lines.extend(["", "─" * 20])
-        lines.append(f"🕐 {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        lines.extend(["", "โ”€" * 20])
+        lines.append(f"๐• {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
         self._send("\n".join(lines))
 
-    # ── Kill execution ────────────────────────────────────────────────────────
+    # โ”€โ”€ Kill execution โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def _execute_kill(self, msg: Dict[str, Any]):
         """Execute the full emergency kill sequence."""
@@ -638,7 +625,7 @@ class TelegramBotHandler:
             api.reset_circuit()
             logger.info("Emergency kill: circuit breaker reset to CLOSED")
 
-            # 1. Cancel ALL open orders — prefer single global fetch so symbols outside self.pairs are included
+            # 1. Cancel ALL open orders โ€” prefer single global fetch so symbols outside self.pairs are included
             for order in _emergency_kill_collect_open_orders(api, pairs_to_check):
                 oid, pair, side = _extract_cancel_fields(order if isinstance(order, dict) else {})
                 if not oid or not pair:
@@ -663,7 +650,7 @@ class TelegramBotHandler:
                 logger.error("Error clearing tracked orders: %s", e)
 
             # 2. Sell ALL holdings
-            # Fetch balances ONCE before the loop — avoids N×API calls (one per pair)
+            # Fetch balances ONCE before the loop โ€” avoids Nร—API calls (one per pair)
             try:
                 balances = api.get_balance()
             except Exception as _bal_err:
@@ -687,18 +674,18 @@ class TelegramBotHandler:
             logger.error("Emergency kill failed: %s", e)
             results["errors"].append(str(e))
 
-        cancelled_txt = "\n".join(f"  ✅ {c}" for c in results["cancelled"]) or "  (ไม่มี)"
-        sold_txt = "\n".join(f"  ✅ {s}" for s in results["sold"]) or "  (ไม่มี)"
-        errors_txt = "\n".join(f"  ❌ {e}" for e in results["errors"]) or "  (ไม่มี)"
+        cancelled_txt = "\n".join(f"  โ… {c}" for c in results["cancelled"]) or "  (เนเธกเนเธกเธต)"
+        sold_txt = "\n".join(f"  โ… {s}" for s in results["sold"]) or "  (เนเธกเนเธกเธต)"
+        errors_txt = "\n".join(f"  โ {e}" for e in results["errors"]) or "  (เนเธกเนเธกเธต)"
 
         summary = (
-            f"🚨 <b>หยุดฉุกเฉินสำเร็จ</b>\n"
-            f"{'─' * 20}\n"
-            f"<b>ยกเลิกคำสั่ง:</b>\n{cancelled_txt}\n\n"
-            f"<b>ขายเหรียญ:</b>\n{sold_txt}\n\n"
-            f"<b>ข้อผิดพลาด:</b>\n{errors_txt}\n\n"
-            f"🔴 <b>การเทรดถูกปิด</b>\n"
-            f"ใช้ /resume เพื่อกลับมาเทรด"
+            f"๐จ <b>เธซเธขเธธเธ”เธเธธเธเน€เธเธดเธเธชเธณเน€เธฃเนเธ</b>\n"
+            f"{'โ”€' * 20}\n"
+            f"<b>เธขเธเน€เธฅเธดเธเธเธณเธชเธฑเนเธ:</b>\n{cancelled_txt}\n\n"
+            f"<b>เธเธฒเธขเน€เธซเธฃเธตเธขเธ:</b>\n{sold_txt}\n\n"
+            f"<b>เธเนเธญเธเธดเธ”เธเธฅเธฒเธ”:</b>\n{errors_txt}\n\n"
+            f"๐”ด <b>เธเธฒเธฃเน€เธ—เธฃเธ”เธ–เธนเธเธเธดเธ”</b>\n"
+            f"เนเธเน /resume เน€เธเธทเนเธญเธเธฅเธฑเธเธกเธฒเน€เธ—เธฃเธ”"
         )
         msg_id = msg.get("message_id")
         if msg_id:
@@ -724,7 +711,7 @@ class TelegramBotHandler:
         self.trading_disabled.clear()
         logger.info("Trading resumed via Telegram /resume command")
         msg_id = msg.get("message_id")
-        summary = "✅ <b>กลับมาเทรด</b>\n\nBot กลับมาทำงานปกติแล้ว"
+        summary = "โ… <b>เธเธฅเธฑเธเธกเธฒเน€เธ—เธฃเธ”</b>\n\nBot เธเธฅเธฑเธเธกเธฒเธ—เธณเธเธฒเธเธเธเธ•เธดเนเธฅเนเธง"
         if msg_id:
             try:
                 self.telegram.edit_message(msg_id, summary, reply_markup=no_keyboard())
@@ -733,7 +720,7 @@ class TelegramBotHandler:
         else:
             self._send(summary)
 
-    # ── Low-level send ─────────────────────────────────────────────────────────
+    # โ”€โ”€ Low-level send โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def _send(self, text: str, *format_args: Any, reply_markup: Optional[Dict] = None):
         """Send an HTML message to the configured chat ID."""

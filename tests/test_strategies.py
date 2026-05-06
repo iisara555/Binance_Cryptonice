@@ -908,24 +908,24 @@ class TestSignalGenerator:
 # ============================================================================
 
 
-class TestBitkubWebSocket:
+class TestBinanceWebSocket:
     """Tests for WebSocket client."""
 
     def test_price_tick_creation(self):
         """Test PriceTick dataclass creation."""
-        from bitkub_websocket import PriceTick
+        from binance_websocket import PriceTick
 
         tick = PriceTick(
-            symbol="BTC_THB", last=100000, bid=99900, ask=100100, percent_change_24h=2.5, timestamp=1234567890.0
+            symbol="BTCUSDT", last=100000, bid=99900, ask=100100, percent_change_24h=2.5, timestamp=1234567890.0
         )
 
-        assert tick.symbol == "BTC_THB"
+        assert tick.symbol == "BTCUSDT"
         assert tick.last == 100000
         assert tick.bid < tick.ask  # Bid should be less than ask
 
     def test_connection_state_enum(self):
         """Test ConnectionState enum values."""
-        from bitkub_websocket import ConnectionState
+        from binance_websocket import ConnectionState
 
         assert ConnectionState.DISCONNECTED.value == "disconnected"
         assert ConnectionState.CONNECTING.value == "connecting"
@@ -935,35 +935,35 @@ class TestBitkubWebSocket:
 
     def test_price_cache_operations(self):
         """Test global price cache operations."""
-        import bitkub_websocket
-        from bitkub_websocket import PriceTick, _price_cache, get_latest_ticker
+        import binance_websocket
+        from binance_websocket import PriceTick, _price_cache, get_latest_ticker
 
         # Clear cache first
-        bitkub_websocket._price_cache.clear()
+        binance_websocket._price_cache.clear()
 
         # Add a tick
         tick = PriceTick(
-            symbol="BTC_THB", last=100000, bid=99900, ask=100100, percent_change_24h=2.5, timestamp=1234567890.0
+            symbol="BTCUSDT", last=100000, bid=99900, ask=100100, percent_change_24h=2.5, timestamp=1234567890.0
         )
 
-        bitkub_websocket._price_cache["BTC_THB"] = tick
+        binance_websocket._price_cache["BTCUSDT"] = tick
 
         # Retrieve
-        retrieved = get_latest_ticker("BTC_THB")
+        retrieved = get_latest_ticker("BTCUSDT")
 
         assert retrieved is not None
         assert retrieved.last == 100000
 
         # Case insensitive
-        retrieved_lower = get_latest_ticker("btc_thb")
+        retrieved_lower = get_latest_ticker("btcusdt")
         assert retrieved_lower is not None
 
         # Non-existent
-        assert get_latest_ticker("ETH_THB") is None
+        assert get_latest_ticker("ETHUSDT") is None
 
     def test_get_websocket_stats_no_connection(self):
         """Test stats when no connection exists."""
-        from bitkub_websocket import get_websocket_stats
+        from binance_websocket import get_websocket_stats
 
         stats = get_websocket_stats()
 

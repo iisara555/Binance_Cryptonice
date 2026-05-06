@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import atexit
 import logging
-import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
@@ -56,6 +57,8 @@ class PositionMonitorHelper:
         self.websocket_available = bool(websocket_available)
         self.price_tick_available = bool(price_tick_available)
         self.latest_ticker_getter = latest_ticker_getter if callable(latest_ticker_getter) else None
+        self._exit_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="SLTP-Exit")
+        atexit.register(self._exit_pool.shutdown, wait=False)
 
     def on_ws_tick(self, tick: Any) -> None:
         logger.debug(
@@ -156,22 +159,19 @@ class PositionMonitorHelper:
 
             total_entry_cost = pos.get("total_entry_cost", entry_price * amount)
             try:
-                threading.Thread(
-                    target=self.bot._ws_sltp_exit_wrapper,
-                    args=(
-                        position_id,
-                        pos_symbol,
-                        side,
-                        amount,
-                        current_price,
-                        triggered,
-                        entry_price,
-                        total_entry_cost,
-                    ),
-                    daemon=True,
-                ).start()
+                self._exit_pool.submit(
+                    self.bot._ws_sltp_exit_wrapper,
+                    position_id,
+                    pos_symbol,
+                    side,
+                    amount,
+                    current_price,
+                    triggered,
+                    entry_price,
+                    total_entry_cost,
+                )
             except Exception as exc:
-                logger.error(f"Failed to fire SL/TP exit thread: {exc}", exc_info=True)
+                logger.error(f"Failed to submit SL/TP exit to pool: {exc}", exc_info=True)
                 with self.bot._ws_sltp_inflight_lock:
                     self.bot._ws_sltp_inflight.discard(position_id)
 

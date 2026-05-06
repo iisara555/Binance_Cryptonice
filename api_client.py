@@ -1845,9 +1845,5 @@ def check_ip_change_on_startup() -> Optional[str]:
     return current_ip
 
 
-# Legacy compatibility aliases while active tests/modules finish the Binance TH
-# migration. New code should import the Binance* names above.
-BitkubClient = BinanceThClient
-BitkubAPIError = BinanceAPIError
+# FatalAuthException kept as exchange-agnostic alias for BinanceAuthException.
 FatalAuthException = BinanceAuthException
-BITKUB = BINANCE

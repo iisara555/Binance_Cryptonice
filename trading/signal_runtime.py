@@ -104,7 +104,7 @@ class ExecutionPlanDeps:
     database: Any
     held_coins_only: bool
     api_client: Any
-    min_trade_value_thb: float
+    min_trade_value_usdt: float
     get_latest_atr: Callable[[str], Optional[float]]
     risk_manager: Any
     loop_count: int
@@ -203,8 +203,8 @@ class SignalRuntimeHelper:
             except Exception as exc:
                 logger.error(f"Failed to log signal to database: {exc}")
 
-        # FIX: Fetch portfolio once outside signal loop to reduce API calls
-        portfolio_for_signals = deps.get_portfolio_state()
+
+
 
         for signal in signals:
             if not isinstance(signal, AggregatedSignal):
@@ -555,11 +555,11 @@ class SignalRuntimeHelper:
                 balances = deps.api_client.get_balances()
                 base_data = balances.get(base_asset.upper()) or balances.get(base_asset.lower()) or {}
                 available_base = float(base_data.get("available", 0))
-                base_value_thb = available_base * signal.avg_price
-                if base_value_thb < deps.min_trade_value_thb:
+                base_value_usdt = available_base * signal.avg_price
+                if base_value_usdt < deps.min_trade_value_usdt:
                     logger.debug(
-                        f"[Strategy Bypass] {base_asset.upper()} value {base_value_thb:.2f} THB "
-                        f"< MIN {deps.min_trade_value_thb:.2f} THB"
+                        f"[Strategy Bypass] {base_asset.upper()} value {base_value_usdt:.2f} USDT "
+                        f"< MIN {deps.min_trade_value_usdt:.2f} USDT"
                     )
                     return None
             except Exception as exc:

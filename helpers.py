@@ -18,7 +18,6 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 THAILAND_TIMEZONE = timezone(timedelta(hours=7), name="ICT")
-BITKUB_TIMEZONE = THAILAND_TIMEZONE  # Backward-compatible alias.
 
 
 def now_exchange_time() -> datetime:
@@ -61,20 +60,6 @@ def format_exchange_time(value: Any, fmt: str = "%H:%M:%S") -> str:
     return dt.strftime(fmt)
 
 
-def now_bitkub() -> datetime:
-    """Compatibility alias for older callers; prefer ``now_exchange_time``."""
-    return now_exchange_time()
-
-
-def parse_as_bitkub_time(value: Any) -> Optional[datetime]:
-    """Compatibility alias for older callers; prefer ``parse_as_exchange_time``."""
-    return parse_as_exchange_time(value)
-
-
-def format_bitkub_time(value: Any, fmt: str = "%H:%M:%S") -> str:
-    """Compatibility alias for older callers; prefer ``format_exchange_time``."""
-    return format_exchange_time(value, fmt=fmt)
-
 
 # ── Price Fetching ──────────────────────────────────────────────────────────────
 
@@ -112,23 +97,13 @@ def get_current_price(
             ticker_getter = getattr(ws_client, "get_latest_ticker", None)
             tick = ticker_getter(symbol) if callable(ticker_getter) else None
             if tick is None:
-                # Backward-compatible module lookup for older WS clients.
-                # Prefer the Binance.th websocket adapter; if it's unavailable
-                # OR doesn't have the symbol cached, fall back to the legacy
-                # Bitkub adapter so existing callers and tests keep working.
+                # Module-level lookup — use Binance native WS adapter.
                 try:
                     from binance_websocket import get_latest_ticker as _bn_get  # type: ignore
 
                     tick = _bn_get(symbol)
                 except Exception:
                     tick = None
-                if tick is None:
-                    try:
-                        from bitkub_websocket import get_latest_ticker as _bk_get  # type: ignore
-
-                        tick = _bk_get(symbol)
-                    except Exception:
-                        tick = None
             if tick and getattr(tick, "last", 0) > 0:
                 tick_age = _time.time() - getattr(tick, "timestamp", 0.0)
                 if tick_age <= _WS_TICK_MAX_AGE_SECONDS:
@@ -199,10 +174,6 @@ def _extract_balance(
         return default
     return default
 
-
-def get_thb_balance(api_client: Any, default: float = 0.0) -> float:
-    """Get THB balance — compatibility convenience alias."""
-    return get_balance(api_client, "THB", default)
 
 
 def get_quote_balance(api_client: Any, quote_asset: str = "USDT", default: float = 0.0) -> float:
