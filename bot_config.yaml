@@ -107,7 +107,7 @@ mode_indicator_profiles:
   scalping:
     # AUDIT FIX: dropped legacy "scalping" strategy — its always-on signaling was
     # the single biggest loss source. Keeping the rebuilt SimpleScalpPlus + Sniper.
-    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus", "simple_scalp", "machete_v8b"]
     primary_timeframe: "15m"
     confirm_timeframe: "15m"
     min_confidence: 0.40                  # AUDIT FIX: was 0.30 — require stronger conviction
@@ -345,6 +345,37 @@ strategies:
     informative_timeframe: "15m"
     # SL/TP จริงคำนวณจาก atr_multiplier (1.2) × ATR และ risk_reward (1.8) ด้านบน
     # ไม่มี fixed-pct SL สำหรับ strategy นี้
+  simple_scalp:
+    enabled: true
+    timeframe: "5m"
+    confirm_timeframe: "15m"
+    ema_period: 21
+    stoch_rsi_period: 14
+    stoch_rsi_smooth: 3
+    adx_period: 14
+    adx_threshold: 20
+    stoch_oversold: 30
+    stoch_overbought: 70
+    stop_loss_pct: 4.0
+    take_profit_pct: 1.0
+    risk_per_trade_pct: 2.0
+  machete_v8b:
+    enabled: true
+    timeframe: "15m"
+    informative_timeframe: "1h"
+    stoploss: -0.10
+    signals:
+      quickie: true
+      scalp: true
+      adx_smas: true
+      awesome_macd: true
+      gettin_moist: true
+      hlhb: true
+    minimal_roi:
+      "0":   0.279
+      "92":  0.109
+      "245": 0.059
+      "561": 0.0
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:

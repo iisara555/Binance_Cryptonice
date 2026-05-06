@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh -o ConnectTimeout=15 root@188.166.253.203 \"tmux capture-pane -p -t crypto -S -500 2>/dev/null | tail -200\")",
+      "Bash(ssh -o ConnectTimeout=15 root@188.166.253.203 \"grep 'risk_config\\\\|Invalid API-key\\\\|2015' /root/Crypto_Sniper/logs/error.log | head -20\")",
+      "Bash(ssh -o ConnectTimeout=15 root@188.166.253.203 \"grep '404\\\\|HTTP 404\\\\|Not Found' /root/Crypto_Sniper/logs/error.log | tail -20\")",
+      "Bash(ssh -o *)",
+      "Bash(ssh root@188.166.253.203 \"cd /root/Crypto_Sniper && tmux new-session -d -s crypto 'while true; do python3 main.py; echo \\\\\"[restart] $\\(date\\) exit \\\\$?\\\\\"; sleep 5; done' && echo 'Started tmux session crypto'\")",
+      "Bash(ssh root@188.166.253.203 \"sleep 5 && ps aux | grep python | grep main | grep -v grep\")",
+      "Bash(ssh root@188.166.253.203 \"ls /root/Crypto_Sniper/.env 2>/dev/null && echo 'found' || echo 'not found'; ls /root/.env 2>/dev/null && echo 'root found' || true\")",
+      "Bash(ssh root@188.166.253.203 'grep -a '\\\\''2026-05-01T08:19:[4-9]\\\\|2026-05-01T08:19:5'\\\\'' /root/Crypto_Sniper/logs/debug.log | python3 -c \" *)",
+      "Bash(ssh root@188.166.253.203 \"grep -n 'CorrelationGate\\\\|logger\\\\.' /root/Crypto_Sniper/trading/execution_runtime.py | grep -A1 'CorrelationGate'\")",
+      "Bash(grep -rn \"TODO\\\\|FIXME\\\\|XXX\\\\|HACK\" /c/Users/USER/Desktop/\"Binance Cryptonice\" --include=\"*.py\" -not -path \"*/.venv/*\" -not -path \"*/__pycache__/*\")",
+      "Bash(ssh root@188.166.253.203 \"kill -SIGTERM \\\\$\\(ps aux | grep 'python3 main.py' | grep -v grep | awk '{print \\\\$1}'\\) 2>/dev/null && echo 'restarting'\")",
+      "Bash(ssh root@188.166.253.203 \"kill -SIGTERM \\\\$\\(ps aux | grep 'python3 main' | grep -v grep | awk 'NR==1{print \\\\$1}'\\) && echo ok\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(powershell -Command \"Select-String -Path state_management.py -Pattern '^\\\\s*def get_state' | head -5\")",
+      "Bash(powershell -Command \"Select-String -Path trading\\\\signal_runtime.py -Pattern 'signal_type.*=' | head -20\")",
+      "Bash(powershell -Command \"Select-String -Path '**/signal_runtime.py' -Pattern 'pop.*last_state_gate_logged' | head -5\")",
+      "Bash(powershell -Command \"Select-String -Path 'trading/bot_runtime/*' -Pattern 'except\\\\s*:' | head -10\")",
+      "Bash(git fetch *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('trading/bot_runtime/pre_trade_gate_runtime.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(ssh root@188.166.253.203 \"cd /root/Crypto_Sniper && git pull origin main 2>&1\")",
+      "Bash(ssh root@188.166.253.203 \"sudo systemctl restart crypto-bot && sleep 3 && sudo systemctl status crypto-bot --no-pager | head -20\")",
+      "Bash(ssh root@188.166.253.203 \"tmux capture-pane -t crypto -p -S -100 2>/dev/null | tail -50\")",
+      "Read(//c/c/Users/USER/Desktop/Binance Cryptonice/**)",
+      "Bash(ssh root@188.166.253.203 'cd /root/Crypto_Sniper && python3 -c \" *)",
+      "Bash(ssh root@188.166.253.203 'cd /root/Crypto_Sniper && python3 -c \"import sqlite3; conn=sqlite3.connect\\(\\\\\"trading_bot.db\\\\\"\\); conn.row_factory=sqlite3.Row; cur=conn.cursor\\(\\); cur.execute\\(\\\\\"SELECT order_id,symbol,side,amount,entry_price,stop_loss,take_profit,strategy_source,bootstrap_source FROM positions WHERE closed=0 OR closed IS NULL ORDER BY timestamp DESC LIMIT 10\\\\\"\\); [print\\(dict\\(r\\)\\) for r in cur.fetchall\\(\\)]; conn.close\\(\\)\"')"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\USER\\Desktop\\Binance Cryptonice"
+    ]
+  }
+}

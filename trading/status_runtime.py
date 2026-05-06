@@ -256,7 +256,7 @@ class StatusRuntimeHelper:
                 blocking_timeframes: List[str] = []
                 for timeframe in timeframes:
                     cursor.execute(
-                        "SELECT COUNT(*), MAX(timestamp) FROM prices WHERE pair = ? AND COALESCE(timeframe, '1h') = ?",
+                        "SELECT COUNT(*), MAX(timestamp) FROM prices WHERE pair = ? AND timeframe = ?",
                         (pair, timeframe),
                     )
                     count, latest = cursor.fetchone()
@@ -498,12 +498,17 @@ class StatusRuntimeHelper:
                 }
             )
 
+        t_mtf0 = time.perf_counter()
         mtf_override = self._instance_override("_get_dashboard_multi_timeframe_status")
         if mtf_override is not None:
             mtf_status = mtf_override(allow_refresh=not lightweight) or {}
         else:
             mtf_status = self.get_dashboard_multi_timeframe_status(allow_refresh=not lightweight)
+        mtf_ms = (time.perf_counter() - t_mtf0) * 1000.0
+
+        t_filter0 = time.perf_counter()
         tradable_pairs = self.bot._filter_pairs_by_candle_readiness(list(trading_pairs), allow_refresh=not lightweight)
+        filter_ms = (time.perf_counter() - t_filter0) * 1000.0
 
         executor = getattr(self.bot, "executor", None)
         open_positions = 0
@@ -533,11 +538,13 @@ class StatusRuntimeHelper:
                 if str(a or "").upper() != quote_asset and self._coerce_float((p or {}).get("total"), 0.0) > 0
             )
             logger.warning(
-                "[STATUS PERF] lightweight=%s total_ms=%.1f portfolio_ms=%.1f post_portfolio_ms=%.1f "
-                "ws_state=%s non_quote_balance_rows=%d",
+                "[STATUS PERF] lightweight=%s total_ms=%.1f portfolio_ms=%.1f mtf_ms=%.1f "
+                "filter_ms=%.1f post_portfolio_ms=%.1f ws_state=%s non_quote_balance_rows=%d",
                 lightweight,
                 status_total_ms,
                 portfolio_ms,
+                mtf_ms,
+                filter_ms,
                 max(0.0, status_total_ms - portfolio_ms),
                 ws_state,
                 non_quote_balance_rows,

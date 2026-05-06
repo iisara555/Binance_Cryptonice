@@ -342,7 +342,7 @@ class PortfolioRuntimeHelper:
                     SELECT timestamp, open, high, low, close, volume
                     FROM prices
                     WHERE pair = ?
-                      AND COALESCE(timeframe, '1h') = ?
+                      AND timeframe = ?
                     ORDER BY timestamp DESC
                     LIMIT 250
                 """,

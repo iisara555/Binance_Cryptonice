@@ -419,7 +419,9 @@ def get_cli_snapshot(app, bot_name: Optional[str] = None) -> Dict[str, Any]:
     bot_status = {}
     if app.bot and hasattr(app.bot, "get_status"):
         try:
-            bot_status = app.bot.get_status(lightweight=bool(getattr(app, "_live_dashboard_active", False)))
+            # Always lightweight: CLI reads from cached bot state; heavy refreshes
+            # belong to the trading loop, not the 2s display loop.
+            bot_status = app.bot.get_status(lightweight=True)
         except TypeError:
             bot_status = app.bot.get_status()
     _warn_snapshot_step("bot_status", step_started)
