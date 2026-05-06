@@ -113,9 +113,9 @@ class BinanceWebSocket:
     INITIAL_RECONNECT_DELAY = 1.0
     MAX_RECONNECT_DELAY = 60.0
     BACKOFF_MULTIPLIER = 2.0
-    # FIX: 30s interval — Binance.th docs recommend client-driven PINGs every ~3 min;
-    #      20s was too aggressive and paired badly with the text-payload bug below.
-    HEARTBEAT_INTERVAL = 30.0
+    # FIX: 60s interval — websocket-client requires ping_interval > ping_timeout.
+    #      30s was equal to PING_TIMEOUT causing a constant validation error.
+    HEARTBEAT_INTERVAL = 60.0
     # FIX: 30s timeout — VPS ↔ Thailand round-trip can spike under load; 10s caused
     #      false-positive timeouts that silently reconnect-looped the bot.
     PING_TIMEOUT = 30.0
