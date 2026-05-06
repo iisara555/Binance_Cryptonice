@@ -1,4 +1,4 @@
-﻿"""CryptoBot V1 โ€” compact, scannable log formatter.
+"""CryptoBot V1 โ€” compact, scannable log formatter.
 
 Format:  HH:MM:SS โ” LEVEL โ” TAG  โ” EMOJI  message
 
