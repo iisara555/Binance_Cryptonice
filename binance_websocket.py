@@ -132,7 +132,7 @@ class BinanceWebSocket:
         self._state = ConnectionState.DISCONNECTED
         self._state_lock = threading.RLock()
         # R4 FIX: _stop_event is the single source of truth for shutdown signaling.
-        # _running is a derived convenience property; never check _running directly.
+        # _running is a derived convenience property backed by _stop_event.
         self._stop_event = threading.Event()  # set() = request stop
         self._thread: Optional[threading.Thread] = None
         self.ws: Optional[Any] = None
@@ -163,6 +163,11 @@ class BinanceWebSocket:
     def _stream_url(self) -> str:
         streams = [f"{symbol.lower()}@ticker" for symbol in self.symbols]
         return f"{self.endpoint}?streams={'/'.join(streams)}"
+
+    @property
+    def _running(self) -> bool:
+        """Backward-compatible flag derived from _stop_event."""
+        return not self._stop_event.is_set() and self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
         if not websocket:
