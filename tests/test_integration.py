@@ -2,7 +2,7 @@
 Integration Tests
 =================
 Full end-to-end integration tests for the trading system.
-Tests signal โ’ risk โ’ execution flow with mocked API responses.
+Tests signal → risk → execution flow with mocked API responses.
 """
 
 import asyncio
@@ -1098,7 +1098,7 @@ class TestFullIntegrationFlow:
         app_ref.api_client.get_balances.assert_not_called()
         sent_text = handler._send.call_args.args[0]
         assert "DEGRADED" in sent_text
-        assert "เธเธฒเธฃเน€เธ—เธฃเธ”เธ–เธนเธเธเธดเธ”เนเธเนเธเธฒเธ" in sent_text
+        assert "การเทรดถูกปิดใช้งาน" in sent_text
         assert "Exchange private API unavailable" in sent_text
 
     def test_telegram_status_escapes_degraded_reason_once(self, tmp_path):
@@ -2090,26 +2090,26 @@ class TestFullIntegrationFlow:
         assert test_config["trading_pair"] == "BTCUSDT"
         assert test_config["interval_seconds"] == 1
         assert "trend_following" in test_config["strategies"]["enabled"]
-        logger.info("โ… Configuration loading test passed")
+        logger.info("✅ Configuration loading test passed")
 
     def test_signal_generator_initialization(self, mock_signal_generator):
         """Test signal generator can be initialized with mocks"""
         assert mock_signal_generator is not None
         assert hasattr(mock_signal_generator, "generate_signals")
-        logger.info("โ… Signal generator initialization test passed")
+        logger.info("✅ Signal generator initialization test passed")
 
     def test_risk_manager_initialization(self, mock_risk_manager):
         """Test risk manager can be initialized with mocks"""
         assert mock_risk_manager is not None
         assert hasattr(mock_risk_manager, "calc_sl_tp_from_atr")
-        logger.info("โ… Risk manager initialization test passed")
+        logger.info("✅ Risk manager initialization test passed")
 
     def test_trade_executor_initialization(self, mock_trade_executor):
         """Test trade executor can be initialized with mocks"""
         assert mock_trade_executor is not None
         assert hasattr(mock_trade_executor, "execute_entry")
         assert hasattr(mock_trade_executor, "execute_exit")
-        logger.info("โ… Trade executor initialization test passed")
+        logger.info("✅ Trade executor initialization test passed")
 
 
 class TestSignalFlow:
@@ -2122,7 +2122,7 @@ class TestSignalFlow:
             data=None, symbol="THB_BTC", use_strategies=["trend_following"]
         )
         assert signals == []
-        logger.info("โ… Empty signal generation test passed")
+        logger.info("✅ Empty signal generation test passed")
 
     def test_signal_with_mock_data(self, mock_signal_generator):
         """Test signal generation with mocked data"""
@@ -2148,7 +2148,7 @@ class TestSignalFlow:
         )
 
         assert isinstance(signals, list)
-        logger.info("โ… Signal generation with mock data test passed")
+        logger.info("✅ Signal generation with mock data test passed")
 
 
 class TestRiskManagement:
@@ -2186,14 +2186,14 @@ class TestRiskManagement:
         assert sl < entry_price
         assert tp > entry_price
         assert tp > sl
-        logger.info(f"โ… ATR calculation: Entry={entry_price}, SL={sl}, TP={tp}")
+        logger.info(f"✅ ATR calculation: Entry={entry_price}, SL={sl}, TP={tp}")
 
     def test_risk_checks(self, mock_risk_manager):
         """Test that risk checks can be called"""
         daily_check = mock_risk_manager.check_daily_loss_limit()
 
         assert daily_check is True
-        logger.info("โ… Risk checks test passed")
+        logger.info("✅ Risk checks test passed")
 
 
 class TestExecutionFlow:
@@ -2205,21 +2205,21 @@ class TestExecutionFlow:
 
         assert result.success is True
         assert result.filled_price == 1500000.0
-        logger.info("โ… Entry execution mock test passed")
+        logger.info("✅ Entry execution mock test passed")
 
     def test_exit_execution_mock(self, mock_trade_executor):
         """Test exit execution with mock"""
         result = mock_trade_executor.execute_exit(Mock())
 
         assert result.success is True
-        logger.info("โ… Exit execution mock test passed")
+        logger.info("✅ Exit execution mock test passed")
 
     def test_open_orders_retrieval(self, mock_trade_executor):
         """Test open orders retrieval"""
         orders = mock_trade_executor.get_open_orders()
 
         assert isinstance(orders, list)
-        logger.info("โ… Open orders retrieval test passed")
+        logger.info("✅ Open orders retrieval test passed")
 
 
 class TestBotMode:
@@ -2230,12 +2230,12 @@ class TestBotMode:
         assert BotMode.FULL_AUTO.value == "full_auto"
         assert BotMode.SEMI_AUTO.value == "semi_auto"
         assert BotMode.DRY_RUN.value == "dry_run"
-        logger.info("โ… BotMode enum test passed")
+        logger.info("✅ BotMode enum test passed")
 
     def test_signal_source_enum(self):
         """Test SignalSource enum values"""
         assert SignalSource.STRATEGY.value == "strategy"
-        logger.info("โ… SignalSource enum test passed")
+        logger.info("✅ SignalSource enum test passed")
 
     def test_cli_mode_shows_live_for_full_auto_without_safety_flags(self):
         app = TradingBotApp.__new__(TradingBotApp)

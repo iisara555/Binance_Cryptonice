@@ -1,6 +1,6 @@
-"""CryptoBot V1 โ€” compact, scannable log formatter.
+"""CryptoBot V1 — compact, scannable log formatter.
 
-Format:  HH:MM:SS โ” LEVEL โ” TAG  โ” EMOJI  message
+Format:  HH:MM:SS │ LEVEL │ TAG  │ EMOJI  message
 
 NOTE: not placed under logging/ to avoid shadowing the stdlib logging package.
 """
@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-# โ”€โ”€ Tag map: module leaf name โ' 4-char tag โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Tag map: module leaf name ->' 4-char tag ────────────────────────────────────
 TAG_MAP: Dict[str, str] = {
     "pre_trade_gate_runtime": "GATE",
     "risk_management":        "RISK",
@@ -35,7 +35,7 @@ TAG_MAP: Dict[str, str] = {
     "signal_pipeline":        "PIPE",
 }
 
-# โ”€โ”€ Level badges โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Level badges ──────────────────────────────────────────────────────────────
 LEVEL_BADGE: Dict[str, str] = {
     "DEBUG":    "DBG ",
     "INFO":     "INFO",
@@ -44,7 +44,7 @@ LEVEL_BADGE: Dict[str, str] = {
     "CRITICAL": "CRIT",
 }
 
-# โ”€โ”€ ANSI colors for non-Rich console output โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── ANSI colors for non-Rich console output ───────────────────────────────────
 _ANSI_RESET  = "\033[0m"
 _ANSI_DIM    = "\033[2m"
 _ANSI_BOLD   = "\033[1m"
@@ -62,7 +62,7 @@ _LEVEL_ANSI: Dict[str, str] = {
     "CRIT": f"{_ANSI_BOLD}{_ANSI_RED}",
 }
 
-# โ”€โ”€ Verbose prefix patterns to strip โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Verbose prefix patterns to strip ─────────────────────────────────────────
 _VERBOSE_PREFIX_RE = re.compile(
     r"^\s*\["
     r"(?:PreTradeGate|SIGNAL_FLOW|Trade Decision|Trade Triggered"
@@ -71,12 +71,12 @@ _VERBOSE_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# โ”€โ”€ Symbol normaliser โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Symbol normaliser ─────────────────────────────────────────────────────────
 _STRIP_SUFFIXES = ("USDT", "BUSD", "BTC", "ETH", "BNB", "BNB")
 
 
 def shorten_symbol(pair: str) -> str:
-    """BTCUSDT โ' BTC, DOGEUSDT โ' DOGE."""
+    """BTCUSDT ->' BTC, DOGEUSDT ->' DOGE."""
     up = pair.upper().strip("'\"[] \t")
     for sfx in _STRIP_SUFFIXES:
         if up.endswith(sfx) and len(up) > len(sfx):
@@ -89,13 +89,13 @@ def _extract_symbol(text: str) -> Optional[str]:
     return shorten_symbol(m.group(1)) if m else None
 
 
-# โ”€โ”€ Emoji picker โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Emoji picker ──────────────────────────────────────────────────────────────
 
 def pick_emoji(tag: str, msg_lower: str) -> str:  # noqa: C901
     """Return the best-fit emoji for this tag+message combination."""
     tag = tag.strip()
 
-    # Trade lifecycle โ€” check first (highest priority)
+    # Trade lifecycle — check first (highest priority)
     if "trade opened" in msg_lower or (
         ("opened" in msg_lower or "order filled" in msg_lower or "order placed" in msg_lower)
         and "buy" in msg_lower
@@ -205,7 +205,7 @@ def pick_emoji(tag: str, msg_lower: str) -> str:  # noqa: C901
     return ""
 
 
-# โ”€โ”€ Strategy badge helper โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Strategy badge helper ─────────────────────────────────────────────────────
 
 def _strategy_badge(text: str) -> str:
     lo = text.lower()
@@ -218,7 +218,7 @@ def _strategy_badge(text: str) -> str:
     return ""
 
 
-# โ”€โ”€ Per-component message shortener โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Per-component message shortener ──────────────────────────────────────────
 
 def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
     """Reformat a verbose log message to a compact, scannable string."""
@@ -232,7 +232,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
     lo = msg.lower()
     tag_bare = tag.strip()
 
-    # โ”€โ”€ DATA โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── DATA ─────────────────────────────────────────────────────────────
     if tag_bare == "DATA":
         # stored N new candle(s)
         m = re.match(
@@ -262,7 +262,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             tf = tf_m.group(1) if tf_m else ""
             return f"{sym}  {tf}  backfill {m.group(1)} bars"
 
-    # โ”€โ”€ SIG โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── SIG ──────────────────────────────────────────────────────────────
     elif tag_bare == "SIG":
         sym = _extract_symbol(msg) or ""
         badge = _strategy_badge(msg)
@@ -303,7 +303,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
         if sym and sig_type:
             return f"{sym}  {badge} {sig_type}{conf}{rr}"
 
-    # โ”€โ”€ GATE โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── GATE ─────────────────────────────────────────────────────────────
     elif tag_bare == "GATE":
         sym = _extract_symbol(msg) or ""
 
@@ -313,7 +313,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             reason = ""
             for pat in (
                 r"failed[_\s]*checks?\s*[=:]\s*(.{0,40})",
-                r"BLOCKED\s*[โ€”โ€“-]\s*failed:\s*(.{0,40})",
+                r"BLOCKED\s*[—–-]\s*failed:\s*(.{0,40})",
                 r"failed:\s*(.{0,40})",
             ):
                 r_m = re.search(pat, msg, re.I)
@@ -338,7 +338,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             status = "ready" if allowed else "blocked"
             return f"{mark} {sym}  {side}  {amt} USDT  {status}"
 
-    # โ”€โ”€ RISK โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── RISK ─────────────────────────────────────────────────────────────
     elif tag_bare == "RISK":
         # Position size line
         pv_m  = re.search(r"portfolio\s*[=:]\s*([\d.]+)", lo)
@@ -373,7 +373,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             wait = f"  next trade in {min_m.group(1)}min" if min_m else ""
             return f"(zz) cooldown{wait}"
 
-    # โ”€โ”€ EXEC โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── EXEC ─────────────────────────────────────────────────────────────
     elif tag_bare == "EXEC":
         sym = _extract_symbol(msg) or ""
 
@@ -415,7 +415,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             side = "BUY" if "buy" in lo else "SELL"
             return f">> {sym}  {side} filled{qty}"
 
-    # โ”€โ”€ FLOW โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── FLOW ─────────────────────────────────────────────────────────────
     elif tag_bare == "FLOW":
         sym = _extract_symbol(msg) or ""
 
@@ -464,7 +464,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             badge   = _strategy_badge(msg)
             return f">> OPENED  {sym}  {side}{amt}{price}  {badge}".strip()
 
-    # โ”€โ”€ BOOT โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── BOOT ─────────────────────────────────────────────────────────────
     elif tag_bare == "BOOT":
         # Bootstrap positions from wallet
         if re.search(r"bootstrap|wallet.*holding|holding.*add", lo):
@@ -490,7 +490,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             n   = f"  {n_m.group(1)} assets found" if n_m else ""
             return f"(?) scanning wallet{n}"
 
-    # โ”€โ”€ OMS โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── OMS ──────────────────────────────────────────────────────────────
     elif tag_bare == "OMS":
         sym = _extract_symbol(msg) or ""
 
@@ -522,7 +522,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
                 code = ""
             return f"(!) {sym}{attempts}{code}"
 
-    # โ”€โ”€ API โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── API ──────────────────────────────────────────────────────────────
     elif tag_bare == "API":
         if re.search(r"exchangeinfo|bulk cache|filters loaded|filter cache", lo):
             cnt_m = re.search(r"(\d+)\s+symbols?", lo)
@@ -542,18 +542,18 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
         if "websocket" in lo and "disconnect" in lo:
             return "(-) websocket disconnected  reconnecting"
 
-    # โ”€โ”€ STM โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── STM ──────────────────────────────────────────────────────────────
     elif tag_bare == "STM":
         sym = _extract_symbol(msg) or ""
 
-        # State transition โ€” handle both โ' and -> and 'to'
+        # State transition — handle both ->' and -> and 'to'
         trans_m = re.search(r"(\w+)\s*(?:->|=>)\s*(\w+)", msg)
         if not trans_m:
             trans_m = re.search(r"transition\s+(\w+)\s+to\s+(\w+)", msg, re.I)
         if trans_m:
             return f"(~) {sym}  {trans_m.group(1).upper()} -> {trans_m.group(2).upper()}"
 
-    # โ”€โ”€ Fallback โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── Fallback ─────────────────────────────────────────────────────────
     return msg
 
 
@@ -597,7 +597,7 @@ def format_log_row(record: logging.LogRecord) -> Dict[str, str]:
     }
 
 
-# โ”€โ”€ Console formatter โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+# ── Console formatter ─────────────────────────────────────────────────────────
 
 class CryptoBotFormatter(logging.Formatter):
     """Compact formatter: HH:MM:SS | LEVEL | TAG  | EMOJI  message"""

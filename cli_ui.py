@@ -132,12 +132,12 @@ class CLICommandCenter:
             return
 
     def _terminal_compact_mode(self) -> bool:
-        """True when terminal is narrow/short โ€” stacked mobile-friendly layout."""
+        """True when terminal is narrow/short — stacked mobile-friendly layout."""
         term_width, term_height = self._layout_term_dimensions(self.console)
         return term_width < 140 or term_height < 30
 
     def _terminal_tablet_mode(self) -> bool:
-        """True for tablet range (100โ€“139 wide, โฅ30 tall) โ€” 2-column layout with wide logs."""
+        """True for tablet range (100–139 wide, ≥30 tall) — 2-column layout with wide logs."""
         term_width, term_height = self._layout_term_dimensions(self.console)
         return 100 <= term_width < 140 and term_height >= 30
 
@@ -336,9 +336,9 @@ class CLICommandCenter:
                 Layout(self._build_footer(snapshot), size=footer_size, name="footer"),
             )
         if tablet_mode:
-            # Tablet: 2-column โ€” left: positions+sigflow, right: logs (full height = wider)
+            # Tablet: 2-column — left: positions+sigflow, right: logs (full height = wider)
             n_pos_tablet = len(list(snapshot.get("positions") or []))
-            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) โ€” min 10, max 15
+            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
             pos_size_tablet = max(10, min(15, n_pos_tablet + 8))
             layout["body"].split_row(
                 Layout(name="left", ratio=3),
@@ -352,7 +352,7 @@ class CLICommandCenter:
                 Layout(self._build_log_stream_panel(snapshot, n_buffer=10), name="logs"),
             )
         elif compact_mode:
-            # Mobile: stacked single-column โ€” dynamic heights, logs fill remaining space
+            # Mobile: stacked single-column — dynamic heights, logs fill remaining space
             n_pos = len(list(snapshot.get("positions") or []))
             n_breakdown = len(list((snapshot.get("system") or {}).get("balance_breakdown") or []))
             n_sig_pairs = len({
@@ -360,13 +360,13 @@ class CLICommandCenter:
                 for r in list(snapshot.get("signal_alignment") or [])
                 if r.get("symbol")
             })
-            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) โ€” min 10, max 15
+            # summary(1) + pbar(1) + header_row(1) + data_rows + border(2) + padding(3) — min 10, max 15
             pos_size = max(10, min(15, n_pos + 8))
-            # summary(3) + asset rows + border(2) + 1 buffer โ€” min 8
+            # summary(3) + asset rows + border(2) + 1 buffer — min 8
             port_size = max(8, n_breakdown + 6)
-            # summary(1) + header(1) + pairsร—2_strategies + border(2) + 1 buffer โ€” min 8, max 22
+            # summary(1) + header(1) + pairs×2_strategies + border(2) + 1 buffer — min 8, max 22
             sf_size = max(8, min(22, n_sig_pairs * 2 + 5))
-            # logs: fill everything left โ€” estimate inner height so buffer matches visible rows
+            # logs: fill everything left — estimate inner height so buffer matches visible rows
             fixed_rows = 3 + pos_size + port_size + 9 + sf_size + footer_size
             log_inner = max(8, term_height - fixed_rows - 2)
             layout["body"].split_column(
@@ -567,7 +567,7 @@ class CLICommandCenter:
         rt = str(result or "").upper().strip()
         s = str(raw or "").strip()
         if not s:
-            return "ok" if rt == "PASS" else "โ€”"
+            return "ok" if rt == "PASS" else "—"
         low = s.lower()
 
         m = re.search(r"Insufficient data \((\d+)/(\d+) bars\)", s, re.I)
@@ -738,9 +738,9 @@ class CLICommandCenter:
                 Text.assemble(
                     (f"{row.get('timestamp', '-')} ", self._DIM),
                     (f"{level:<4}", self._level_style(level)),
-                    (" โ” ", self._DIM),
+                    (" │ ", self._DIM),
                     (f"{tag}", f"bold {self._CYAN}"),
-                    (" โ” ", self._DIM),
+                    (" │ ", self._DIM),
                     (f"{prefix}{msg}", self._WHITE),
                 )
             )
@@ -767,7 +767,7 @@ class CLICommandCenter:
         # Data freshness for header
         system = snapshot.get("system", {}) or {}
         freshness_state = str(system.get("freshness") or "fresh").lower()
-        freshness_icon = "\u25cf"  # โ—
+        freshness_icon = "\u25cf"  # ●
         if freshness_state == "critical":
             freshness_style = f"bold {self._RED}"
         elif freshness_state == "warning":
@@ -775,7 +775,7 @@ class CLICommandCenter:
         else:
             freshness_style = f"bold {self._GREEN}"
 
-        sep = ("  \u2502  ", self._DIM)  # โ” separator
+        sep = ("  \u2502  ", self._DIM)  # │ separator
         header = Text.assemble(
             ("\u25c8 ", f"bold {self._CYAN}"),
             (snapshot.get("bot_name", self.bot_name), f"bold {self._WHITE}"),
@@ -799,14 +799,14 @@ class CLICommandCenter:
         return self._panel(Align.left(header), title="Dashboard", theme="header")
 
     def _build_compact_status_bar(self, snapshot: Dict[str, Any]) -> Panel:
-        """Bloomberg-style one-line status strip: โก Bot โ” ๐ข LIVE โ” 22:49 โ” ๐’ฐ cash โ” ๐“ slots โ” ๐“ pnl%."""
+        """Bloomberg-style one-line status strip: ⚡ Bot │ 🟢 LIVE │ 22:49 │ 💰 cash │ 📊 slots │ 📉 pnl%."""
         system = dict(snapshot.get("system") or {})
         positions = list(snapshot.get("positions") or [])
         open_n = len(positions)
         max_pos = max(1, int(float(self._extract_numeric(system.get("max_open_positions"), 6))))
         mode = str(snapshot.get("mode", "-")).upper()
         mode_style = self._mode_style(mode)
-        mode_icon = "๐ข" if mode == "LIVE" else ("๐ก" if "SIM" in mode else "๐”ด")
+        mode_icon = "🟢" if mode == "LIVE" else ("🟡" if "SIM" in mode else "🔴")
         t = str(snapshot.get("updated_at") or "-")
         # Cash: extract numerics from balance strings
         avail_raw = str(system.get("available_balance") or "").strip()
@@ -821,21 +821,21 @@ class CLICommandCenter:
         # Daily PnL% indicator
         dloss_pct_s = str(system.get("daily_loss_pct") or "-")
         dloss_val, _ = self._extract_fraction(system.get("daily_loss"))
-        pnl_icon = "๐“" if dloss_val > 0 else "๐“"
+        pnl_icon = "📉" if dloss_val > 0 else "📈"
         pnl_style = f"bold {self._RED}" if dloss_val > 0 else f"bold {self._GREEN}"
         line = Text.assemble(
-            ("โก ", f"bold {self._CYAN}"),
+            ("⚡ ", f"bold {self._CYAN}"),
             (str(snapshot.get("bot_name", self.bot_name) or "Bot"), f"bold {self._WHITE}"),
-            (" โ” ", self._DIM),
+            (" │ ", self._DIM),
             (f"{mode_icon} ", ""),
             (mode, mode_style),
-            (" โ” ", self._DIM),
+            (" │ ", self._DIM),
             (t, self._DIM),
-            (" โ” ๐’ฐ ", self._DIM),
+            (" │ 💰 ", self._DIM),
             (cash_part, f"bold {self._EMBER}"),
-            (" โ” ๐“ ", self._DIM),
+            (" │ 📊 ", self._DIM),
             (f"{open_n}/{max_pos}", f"bold {self._CYAN}"),
-            (" โ” ", self._DIM),
+            (" │ ", self._DIM),
             (f"{pnl_icon} ", ""),
             (dloss_pct_s, pnl_style),
         )
@@ -851,7 +851,7 @@ class CLICommandCenter:
         return (a or b or "-").replace(" ", "")
 
     def _build_mobile_position_book(self, snapshot: Dict[str, Any]) -> Panel:
-        """Bloomberg position book: emoji + symbol + side + entryโ’curr + pnl + sl + tp + strat badge."""
+        """Bloomberg position book: emoji + symbol + side + entry→curr + pnl + sl + tp + strat badge."""
         system = dict(snapshot.get("system") or {})
         all_pos = list(snapshot.get("positions") or [])
         positions: List[Dict[str, Any]] = all_pos[:5]
@@ -877,9 +877,9 @@ class CLICommandCenter:
         summary = Text.assemble(
             ("Portfolio: ", self._DIM),
             (f"{pv:.2f} {quote_asset}", f"bold {self._WHITE}"),
-            (" โ” Today: ", self._DIM),
+            (" │ Today: ", self._DIM),
             (today_part_str, today_style),
-            (" โ” W/L: ", self._DIM),
+            (" │ W/L: ", self._DIM),
             (f"{win_n}/{lose_n}", f"bold {self._CYAN}"),
         )
 
@@ -964,7 +964,7 @@ class CLICommandCenter:
         return self._panel(Group(*blocks2), title="\u25c6 Position Book", theme=theme)
 
     def _build_mobile_risk_rails_line(self, snapshot: Dict[str, Any]) -> Panel:
-        """Single-line risk strip: Risk % โ” โ“ Ready/โณ Cooling โ” Active โ” Expose โ” Loss."""
+        """Single-line risk strip: Risk % │ ✓ Ready/⏳ Cooling │ Active │ Expose │ Loss."""
         system = dict(snapshot.get("system") or {})
         positions = list(snapshot.get("positions") or [])
         open_positions = len(positions)
@@ -1044,8 +1044,8 @@ class CLICommandCenter:
         pos_by_sym: Dict[str, Dict[str, Any]] = {str(p.get("symbol", "")).upper(): p for p in positions}
 
         strategy_defs = [
-            ("machete_v8b_lite", "ใ€”Mใ€•", f"bold {self._CYAN}"),
-            ("simple_scalp_plus", "ใ€”Sใ€•", f"bold {self._EMBER}"),
+            ("machete_v8b_lite", "〔M〕", f"bold {self._CYAN}"),
+            ("simple_scalp_plus", "〔S〕", f"bold {self._EMBER}"),
         ]
 
         # Collect pairs: use signal_alignment order then flow_snapshot
@@ -1078,7 +1078,7 @@ class CLICommandCenter:
         table.add_column("Reason", no_wrap=False, min_width=20, ratio=1, overflow="ellipsis")
 
         if not pairs_ordered and not flow_snapshot:
-            table.add_row("-", "โ€”", "โ€”", "โ€”", "โ€”", "โ€”", "no SigFlow data")
+            table.add_row("-", "—", "—", "—", "—", "—", "no SigFlow data")
         else:
             for pair in pairs_ordered:
                 flow = flow_snapshot.get(pair, {})
@@ -1106,9 +1106,9 @@ class CLICommandCenter:
                     if not isinstance(step_data, dict):
                         table.add_row(
                             pair_cell, strat_text,
-                            Text("โ€”", style=self._DIM),
-                            Text("โ€”", style=self._DIM),
-                            Text("โ€”", style=self._DIM),
+                            Text("—", style=self._DIM),
+                            Text("—", style=self._DIM),
+                            Text("—", style=self._DIM),
                             state_text,
                             Text("warmup", style=self._DIM),
                         )
@@ -1124,13 +1124,13 @@ class CLICommandCenter:
                         sig_text = Text("BUY", style=f"bold {self._GREEN}")
                     elif sig_type == "SELL":
                         sig_text = Text("SELL", style=f"bold {self._RED}")
-                    elif sig_type not in {"โ€”", "-", ""}:
+                    elif sig_type not in {"—", "-", ""}:
                         sig_text = Text(sig_type, style=self._WHITE)
                     else:
-                        sig_text = Text("โ€”", style=self._DIM)
+                        sig_text = Text("—", style=self._DIM)
 
-                    conf_text = Text(conf_s, style=self._conf_style(conf_s) if conf_s != "โ€”" else self._DIM)
-                    rr_text = Text(rr_s, style=self._rr_style(rr_s) if rr_s not in {"โ€”", "N/A"} else self._DIM)
+                    conf_text = Text(conf_s, style=self._conf_style(conf_s) if conf_s != "—" else self._DIM)
+                    rr_text = Text(rr_s, style=self._rr_style(rr_s) if rr_s not in {"—", "N/A"} else self._DIM)
                     reason_text = self._sigflow_reason_text(reason_raw, result_raw)
 
                     # Update stats
@@ -1381,25 +1381,25 @@ class CLICommandCenter:
         lines: List[Text] = []
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._BLUE}"),
+                ("▸ ", f"bold {self._BLUE}"),
                 (str(pair_count), f"bold {self._WHITE}"),
                 (" pairs", self._DIM),
-                ("  โ”  ", self._DIM),
+                ("  │  ", self._DIM),
                 (self._truncate_inline(snapshot.get("strategies") or "idle", 20).upper(), f"bold {self._WHITE}"),
-                ("  โ”  ", self._DIM),
+                ("  │  ", self._DIM),
                 (str(snapshot.get("updated_at") or "-"), self._DIM),
             )
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._BLUE}"),
-                ("โ–ฒ ", f"bold {self._GREEN}"),
+                ("▸ ", f"bold {self._BLUE}"),
+                ("▲ ", f"bold {self._GREEN}"),
                 (f"{buy_signals} buy", f"bold {self._GREEN}"),
                 ("  ", ""),
-                ("โ–ผ ", f"bold {self._RED}"),
+                ("▼ ", f"bold {self._RED}"),
                 (f"{sell_signals} sell", f"bold {self._RED}"),
                 ("  ", ""),
-                ("โ— ", f"bold {self._EMBER}"),
+                ("● ", f"bold {self._EMBER}"),
                 (f"{wait_signals} wait", f"bold {self._EMBER}"),
             )
         )
@@ -1416,7 +1416,7 @@ class CLICommandCenter:
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._BLUE}"),
+                ("▸ ", f"bold {self._BLUE}"),
                 ("Cash  ", self._DIM),
                 self._meter_text(
                     available_balance, total_balance, width=16, filled_style=f"bold {self._EMBER}", suffix="quote"
@@ -1433,7 +1433,7 @@ class CLICommandCenter:
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._BLUE}"),
+                ("▸ ", f"bold {self._BLUE}"),
                 ("Slots ", self._DIM),
                 self._meter_text(
                     float(open_positions), max_positions, width=16, filled_style=f"bold {self._WHITE}", decimals=0
@@ -1442,7 +1442,7 @@ class CLICommandCenter:
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._BLUE}"),
+                ("▸ ", f"bold {self._BLUE}"),
                 ("Trade ", self._DIM),
                 self._meter_text(
                     trade_count, max_daily_trades, width=16, filled_style=f"bold {self._GREEN}", decimals=0
@@ -1460,7 +1460,7 @@ class CLICommandCenter:
                 )
             )
 
-        return self._panel(Group(*lines), title="โ— Trading Matrix", theme="overview")
+        return self._panel(Group(*lines), title="◈ Trading Matrix", theme="overview")
 
     def _build_system_status_table(self, snapshot: Dict[str, Any]) -> Panel:
         system = snapshot.get("system", {})
@@ -1470,22 +1470,22 @@ class CLICommandCenter:
 
         left_lines = [
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("Market    ", self._DIM),
                 (str(system.get("last_market_update", "-")), self._WHITE),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("Fresh     ", self._DIM),
                 self._freshness_text(system.get("freshness"), system.get("market_age_seconds")),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("Latency   ", self._DIM),
                 self._api_latency_text(system.get("api_latency")),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("WebSocket ", self._DIM),
                 self._service_health_text(system.get("websocket_health")),
                 (
@@ -1494,12 +1494,12 @@ class CLICommandCenter:
                 ),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("Balance   ", self._DIM),
                 self._service_health_text(system.get("balance_health")),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("Candle    ", self._DIM),
                 (str(system.get("candle_readiness", "-")), self._WHITE),
             ),
@@ -1508,17 +1508,17 @@ class CLICommandCenter:
 
         right_lines = [
             Text.assemble(
-                ("โ–ธ ", f"bold {self._EMBER}"),
+                ("▸ ", f"bold {self._EMBER}"),
                 ("Available ", self._DIM),
                 (str(system.get("available_balance", "-")), f"bold {self._EMBER}"),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._GREEN}"),
+                ("▸ ", f"bold {self._GREEN}"),
                 ("Total     ", self._DIM),
                 (str(system.get("total_balance", "-")), f"bold {self._GREEN}"),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._CYAN}"),
+                ("▸ ", f"bold {self._CYAN}"),
                 ("Floor     ", self._DIM),
                 (
                     str(system.get("risk_floor_display") or "-"),
@@ -1534,22 +1534,22 @@ class CLICommandCenter:
                 ),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._WHITE}"),
+                ("▸ ", f"bold {self._WHITE}"),
                 ("Trades    ", self._DIM),
                 (f"{system.get('trade_count', '-')}/{system.get('max_daily_trades', '-')}", self._WHITE),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._RED}"),
+                ("▸ ", f"bold {self._RED}"),
                 ("Risk/Trd  ", self._DIM),
                 (str(system.get("risk_per_trade", "-")), f"bold {self._RED}"),
             ),
             Text.assemble(
-                ("โ–ธ ", f"bold {self._WHITE}"),
+                ("▸ ", f"bold {self._WHITE}"),
                 ("DailyLoss ", self._DIM),
                 (f"{system.get('daily_loss', '-')} ({system.get('daily_loss_pct', '-')})", self._WHITE),
             ),
             Text.assemble(
-                ("โ–ธ ", self._DIM),
+                ("▸ ", self._DIM),
                 ("Cooldown  ", self._DIM),
                 (
                     str(system.get("cooling_down", "-")),
@@ -1563,9 +1563,9 @@ class CLICommandCenter:
         # Show degraded mode reason if present
         degraded_reason = snapshot.get("auth_degraded_reason", "")
         if degraded_reason:
-            grid.add_row(Text("โ  Degraded", style=f"bold {self._RED}"), Text(str(degraded_reason), style=self._RED))
+            grid.add_row(Text("⚠ Degraded", style=f"bold {self._RED}"), Text(str(degraded_reason), style=self._RED))
 
-        return self._panel(grid, title="โ System Bus", theme="system")
+        return self._panel(grid, title="⚙ System Bus", theme="system")
 
     def _build_signal_alignment_panel(self, snapshot: Dict[str, Any]) -> Panel:
         term_w, term_h = self._layout_term_dimensions(self.console)
@@ -1605,13 +1605,13 @@ class CLICommandCenter:
             for row in rows[:max_pair_rows]:
                 action = str(row.get("action") or "HOLD").upper()
                 if action == "BUY":
-                    action_text = Text("โ–ฒ BUY", style=f"bold {self._GREEN}")
+                    action_text = Text("▲ BUY", style=f"bold {self._GREEN}")
                 elif action == "SELL":
-                    action_text = Text("โ–ผ SELL", style=f"bold {self._RED}")
+                    action_text = Text("▼ SELL", style=f"bold {self._RED}")
                 elif action == "WAIT":
-                    action_text = Text("โ–  WAIT", style=f"bold {self._EMBER}")
+                    action_text = Text("■ WAIT", style=f"bold {self._EMBER}")
                 else:
-                    action_text = Text("โ€ข HOLD", style=f"bold {self._WHITE}")
+                    action_text = Text("• HOLD", style=f"bold {self._WHITE}")
                 macro_value = str(row.get("macro") or "N/A")
                 micro_value = str(row.get("micro") or "N/A")
                 trigger_value = str(row.get("trigger") or "N/A")
@@ -1632,16 +1632,16 @@ class CLICommandCenter:
 
         summary_lines = [
             Text.assemble(
-                ("โ–ธ ", f"bold {self._PURPLE}"),
+                ("▸ ", f"bold {self._PURPLE}"),
                 ("Quality ", self._DIM),
                 (self._signal_quality_label(signal_score), self._signal_quality_style(signal_score)),
                 (f" ({signal_score:+.1f})", self._DIM),
-                ("  โ”  ", self._DIM),
-                ("โ–ฒ ", f"bold {self._GREEN}"),
+                ("  │  ", self._DIM),
+                ("▲ ", f"bold {self._GREEN}"),
                 (f"{buy_signals}", f"bold {self._GREEN}"),
-                ("  โ–ผ ", f"bold {self._RED}"),
+                ("  ▼ ", f"bold {self._RED}"),
                 (f"{sell_signals}", f"bold {self._RED}"),
-                ("  โ— ", f"bold {self._EMBER}"),
+                ("  ● ", f"bold {self._EMBER}"),
                 (f"{wait_signals}", f"bold {self._EMBER}"),
             ),
             Text.assemble(
@@ -1653,7 +1653,7 @@ class CLICommandCenter:
             ),
         ]
 
-        return self._panel(Group(*summary_lines, table), title="โ— Signal Radar", theme=self._resolve_signal_theme(rows))
+        return self._panel(Group(*summary_lines, table), title="◎ Signal Radar", theme=self._resolve_signal_theme(rows))
 
     def _build_signal_flow_panel(self, snapshot: Dict[str, Any]) -> Panel:
         """Render Signal Flow. Compact mode: unified per-pair+strategy table. Wide: per-strategy tables."""
@@ -1687,7 +1687,7 @@ class CLICommandCenter:
                 empty.add_column("Step", style=self._DIM, no_wrap=True, max_width=7)
                 empty.add_column("\u2713", justify="center", no_wrap=True, width=2)
                 empty.add_column("Why", style=self._DIM, ratio=2, overflow="ellipsis", min_width=40, max_width=68)
-            empty.add_row("-", "โ€”", "ยท", "no data")
+            empty.add_row("-", "—", "·", "no data")
             title_empty = "\u25ec SigFlow"
             if narrow and ui_cfg.get("sigflow_full"):
                 title_empty += " [s: summary]"
@@ -1835,7 +1835,7 @@ class CLICommandCenter:
     def _build_recent_events_panel(self, snapshot: Dict[str, Any]) -> Panel:
         rows = list(snapshot.get("recent_events") or [])
         if not rows:
-            return self._panel(Text("No recent events", style=self._DIM), title="โ—– Event Tape", theme="events")
+            return self._panel(Text("No recent events", style=self._DIM), title="◖ Event Tape", theme="events")
 
         lines: List[Text] = []
         for row in rows[:3]:
@@ -1852,7 +1852,7 @@ class CLICommandCenter:
                 Text.assemble((f"{timestamp} ", self._DIM), (f"[{event_type}] ", style), (message, self._WHITE))
             )
 
-        return self._panel(Group(*lines), title="โ—– Event Tape", theme="events")
+        return self._panel(Group(*lines), title="◖ Event Tape", theme="events")
 
     def _build_balance_breakdown_panel(self, snapshot: Dict[str, Any]) -> Panel:
         system = snapshot.get("system", {})
@@ -1873,7 +1873,7 @@ class CLICommandCenter:
                     break
             summary_lines.append(
                 Text.assemble(
-                    ("โ–ธ ", f"bold {self._EMBER}"),
+                    ("▸ ", f"bold {self._EMBER}"),
                     ("Mix    ", self._DIM),
                     self._sparkline_text(
                         [self._extract_allocation_pct(item) for item in breakdown_lines[:8]],
@@ -1891,13 +1891,13 @@ class CLICommandCenter:
             )
             summary_lines.append(
                 Text.assemble(
-                    ("โ–ธ ", f"bold {self._EMBER}"),
+                    ("▸ ", f"bold {self._EMBER}"),
                     ("Conc   ", self._DIM),
                     (
                         f"{top_allocation_pct:.1f}%",
                         f"bold {self._RED}" if top_allocation_pct >= 70.0 else f"bold {self._WHITE}",
                     ),
-                    ("  โ”  ", self._DIM),
+                    ("  │  ", self._DIM),
                     ("Cash ", self._DIM),
                     (f"{cash_allocation_pct:.1f}%", f"bold {self._EMBER}"),
                 )
@@ -1922,8 +1922,8 @@ class CLICommandCenter:
             ),
         )
         if summary_lines:
-            return self._panel(Group(*summary_lines, table), title="โ–ฃ Portfolio", theme=portfolio_theme)
-        return self._panel(table, title="โ–ฃ Portfolio", theme=portfolio_theme)
+            return self._panel(Group(*summary_lines, table), title="▣ Portfolio", theme=portfolio_theme)
+        return self._panel(table, title="▣ Portfolio", theme=portfolio_theme)
 
     def _build_risk_rails_panel(self, snapshot: Dict[str, Any]) -> Panel:
         system = snapshot.get("system", {}) or {}
@@ -1938,20 +1938,20 @@ class CLICommandCenter:
         lines: List[Text] = []
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._EMBER}"),
+                ("▸ ", f"bold {self._EMBER}"),
                 ("Fresh   ", self._DIM),
                 self._freshness_text(system.get("freshness"), system.get("market_age_seconds")),
-                ("  โ”  ", self._DIM),
+                ("  │  ", self._DIM),
                 ("API ", self._DIM),
                 (str(system.get("api_latency") or "-"), self._WHITE),
             )
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._EMBER}"),
+                ("▸ ", f"bold {self._EMBER}"),
                 ("Risk    ", self._DIM),
                 (str(system.get("risk_per_trade") or "-"), f"bold {self._RED}"),
-                ("  โ”  ", self._DIM),
+                ("  │  ", self._DIM),
                 ("Cool ", self._DIM),
                 (
                     str(system.get("cooling_down") or "No"),
@@ -1965,7 +1965,7 @@ class CLICommandCenter:
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._EMBER}"),
+                ("▸ ", f"bold {self._EMBER}"),
                 ("Loss    ", self._DIM),
                 self._meter_text(
                     daily_loss_value, daily_loss_cap, width=16, filled_style=f"bold {self._RED}", suffix="quote"
@@ -1974,7 +1974,7 @@ class CLICommandCenter:
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._EMBER}"),
+                ("▸ ", f"bold {self._EMBER}"),
                 ("Active  ", self._DIM),
                 self._meter_text(
                     trade_count, max_daily_trades, width=16, filled_style=f"bold {self._GREEN}", decimals=0
@@ -1983,7 +1983,7 @@ class CLICommandCenter:
         )
         lines.append(
             Text.assemble(
-                ("โ–ธ ", f"bold {self._EMBER}"),
+                ("▸ ", f"bold {self._EMBER}"),
                 ("Expose  ", self._DIM),
                 self._meter_text(
                     float(open_positions), max_positions, width=16, filled_style=f"bold {self._WHITE}", decimals=0
@@ -2007,7 +2007,7 @@ class CLICommandCenter:
             )
         )
 
-        return self._panel(Group(*lines), title="โ  Risk Rails", theme="risk")
+        return self._panel(Group(*lines), title="⚠ Risk Rails", theme="risk")
 
     def _build_footer(self, snapshot: Dict[str, Any]) -> Panel:
         """Compact status strip: wide pair list + meta; optional pending (no in-panel chat/input)."""
@@ -2088,7 +2088,7 @@ class CLICommandCenter:
         if normalized == "short":
             return Text("SHORT", style=f"bold {CLICommandCenter._RED}")
         if normalized == "sell":
-            # Spot exchange โ€” "sell" is an exit order, not a short position
+            # Spot exchange — "sell" is an exit order, not a short position
             return Text("SELL", style=f"bold {CLICommandCenter._EMBER}")
         return Text(normalized.upper() or "-", style=CLICommandCenter._WHITE)
 
@@ -2268,7 +2268,7 @@ class CLICommandCenter:
 
     @staticmethod
     def _sparkline_text(values: List[float], filled_style: str = "bold white") -> Text:
-        glyphs = "โ–โ–โ–โ–โ–…โ–โ–โ–"
+        glyphs = "▁▂▃▄▅▆▇█"
         cleaned: List[float] = []
         for item in values:
             try:
@@ -2313,9 +2313,9 @@ class CLICommandCenter:
         text = Text()
         text.append("[", style=cls._DIM)
         if filled_units:
-            text.append("โ”" * filled_units, style=filled_style)
+            text.append("━" * filled_units, style=filled_style)
         if empty_units:
-            text.append("โ”€" * empty_units, style=cls._DIM)
+            text.append("─" * empty_units, style=cls._DIM)
         text.append("] ", style=cls._DIM)
         text.append(cls._format_meter_value(safe_value, decimals=decimals), style=cls._WHITE)
         text.append("/", style=cls._DIM)
@@ -2346,9 +2346,9 @@ class CLICommandCenter:
         text = Text()
         text.append("[", style=CLICommandCenter._DIM)
         if filled_units:
-            text.append("โ”" * filled_units, style=filled_style)
+            text.append("━" * filled_units, style=filled_style)
         if empty_units:
-            text.append("โ”€" * empty_units, style=CLICommandCenter._DIM)
+            text.append("─" * empty_units, style=CLICommandCenter._DIM)
         text.append("]", style=CLICommandCenter._DIM)
         text.append(f" {normalized_pct:5.1f}%", style=CLICommandCenter._DIM)
         return text
@@ -2365,38 +2365,38 @@ class CLICommandCenter:
 
     @classmethod
     def _strategy_label_text(cls, name: str) -> "Text":
-        """Colored strategy badge: ใ€”Mใ€•cyan, ใ€”Sใ€•amber, ใ€”Bใ€•dim, ใ€”~ใ€•magenta, ใ€”?ใ€•dim-red."""
+        """Colored strategy badge: 〔M〕cyan, 〔S〕amber, 〔B〕dim, 〔~〕magenta, 〔?〕dim-red."""
         key = str(name or "").lower().replace(" ", "").replace("_", "")
         if "machetev8b" in key or key == "machetev8blite":
-            return Text("ใ€”Mใ€•", style=f"bold {cls._CYAN}")
+            return Text("〔M〕", style=f"bold {cls._CYAN}")
         if "simplescalp" in key or key == "simplescalpplus":
-            return Text("ใ€”Sใ€•", style=f"bold {cls._EMBER}")
+            return Text("〔S〕", style=f"bold {cls._EMBER}")
         if key == "sniper" or key.startswith("sniper"):
-            return Text("ใ€”Nใ€•", style=f"bold {cls._GREEN}")
+            return Text("〔N〕", style=f"bold {cls._GREEN}")
         if key == "bootstrap":
-            return Text("ใ€”Bใ€•", style=cls._DIM)
+            return Text("〔B〕", style=cls._DIM)
         if key == "manual":
-            return Text("ใ€”~ใ€•", style=f"bold {cls._PURPLE}")
-        return Text("ใ€”?ใ€•", style=f"dim {cls._RED}")
+            return Text("〔~〕", style=f"bold {cls._PURPLE}")
+        return Text("〔?〕", style=f"dim {cls._RED}")
 
     @staticmethod
     def _position_emoji(pnl_pct: Any, sl_dist_pct: Any) -> str:
-        """Row emoji: โก SL danger, ๐ข profit, ๐”ด big loss, ๐ก small/no loss."""
+        """Row emoji: ⚡ SL danger, 🟢 profit, 🔴 big loss, 🟡 small/no loss."""
         try:
             sl = abs(float(sl_dist_pct or 999))
         except (TypeError, ValueError):
             sl = 999.0
         if sl < 0.3:
-            return "โก"
+            return "⚡"
         try:
             pnl = float(pnl_pct or 0)
         except (TypeError, ValueError):
             pnl = 0.0
         if pnl > 0:
-            return "๐ข"
+            return "🟢"
         if pnl < -0.5:
-            return "๐”ด"
-        return "๐ก"
+            return "🔴"
+        return "🟡"
 
     @staticmethod
     def _pnl_style_rich(pnl_pct: Any) -> str:
@@ -2413,7 +2413,7 @@ class CLICommandCenter:
 
     @staticmethod
     def _sl_dist_style(sl_dist_pct: Any) -> str:
-        """SL distance style: bold-red < 1%, amber 1โ€“2%, dim > 2%."""
+        """SL distance style: bold-red < 1%, amber 1–2%, dim > 2%."""
         try:
             v = abs(float(sl_dist_pct or 999))
         except (TypeError, ValueError):
@@ -2426,7 +2426,7 @@ class CLICommandCenter:
 
     @staticmethod
     def _tp_dist_style(tp_dist_pct: Any) -> str:
-        """TP distance style: bold-green < 1%, amber 1โ€“3%, dim > 3%."""
+        """TP distance style: bold-green < 1%, amber 1–3%, dim > 3%."""
         try:
             v = abs(float(tp_dist_pct or 999))
         except (TypeError, ValueError):
@@ -2439,7 +2439,7 @@ class CLICommandCenter:
 
     @staticmethod
     def _conf_style(conf: Any) -> str:
-        """Confidence style: bold-green โฅ0.90, amber 0.70โ€“0.89, dim < 0.70."""
+        """Confidence style: bold-green ≥0.90, amber 0.70–0.89, dim < 0.70."""
         try:
             v = float(conf or 0)
         except (TypeError, ValueError):
@@ -2452,9 +2452,9 @@ class CLICommandCenter:
 
     @staticmethod
     def _rr_style(rr: Any) -> str:
-        """Risk/reward style: bold-green โฅ2.0, amber 1.5โ€“1.9, red < 1.5."""
+        """Risk/reward style: bold-green ≥2.0, amber 1.5–1.9, red < 1.5."""
         s = str(rr or "").upper()
-        if s in {"โ€”", "-", "N/A", ""}:
+        if s in {"—", "-", "N/A", ""}:
             return CLICommandCenter._DIM
         try:
             v = float(s)
@@ -2472,13 +2472,13 @@ class CLICommandCenter:
         reason_s = str(reason or "")
         result_u = str(result or "").upper()
         if result_u != "PASS":
-            return "โ€”", "โ€”", "โ€”"
+            return "—", "—", "—"
         type_m = re.search(r"type=([A-Z]+)", reason_s, re.I)
         conf_m = re.search(r"\bconf=([0-9.]+)", reason_s, re.I)
         rr_m = re.search(r"\bRR=([0-9.]+|N/A)\b", reason_s, re.I)
-        signal_type = type_m.group(1).upper() if type_m else "โ€”"
-        conf = conf_m.group(1) if conf_m else "โ€”"
-        rr = rr_m.group(1) if rr_m else "โ€”"
+        signal_type = type_m.group(1).upper() if type_m else "—"
+        conf = conf_m.group(1) if conf_m else "—"
+        rr = rr_m.group(1) if rr_m else "—"
         return signal_type, conf, rr
 
     @classmethod
@@ -2487,9 +2487,9 @@ class CLICommandCenter:
         s = str(reason or "").strip()
         result_u = str(result or "").upper()
         if not s:
-            return Text("โ€”", style=cls._DIM)
+            return Text("—", style=cls._DIM)
         low = s.lower()
-        # ALL_CAPS_UNDERSCORES reason codes โ’ dim red
+        # ALL_CAPS_UNDERSCORES reason codes → dim red
         if re.match(r"^[A-Z][A-Z0-9_]{2,}$", s) and "_" in s:
             return Text(s[:24], style=f"dim {cls._RED}")
         # NO_SETUP
@@ -2505,7 +2505,7 @@ class CLICommandCenter:
         # Warmup
         if "warmup" in low or "first signal cycle" in low or s.lower() == "no diagnostics":
             return Text("warmup", style=cls._DIM)
-        # Passing signal โ’ cyan summary
+        # Passing signal → cyan summary
         if result_u == "PASS":
             conf_m = re.search(r"\bconf=([0-9.]+)", s, re.I)
             if conf_m:
@@ -2572,7 +2572,7 @@ class CLICommandCenter:
 
     @classmethod
     def _log_row_text_compact(cls, row: "Dict[str, str]") -> "Text":
-        """Compact log line: TS โ” TAG โ” EMOJI msg, color-coded by level/content."""
+        """Compact log line: TS │ TAG │ EMOJI msg, color-coded by level/content."""
         level   = str(row.get("level") or "INFO").upper()
         msg     = str(row.get("message") or "-")
         ts      = str(row.get("timestamp") or "-")
@@ -2581,17 +2581,17 @@ class CLICommandCenter:
         msg_low = msg.lower()
 
         # Determine style
-        if level in {"ERROR", "CRITICAL"} or any(w in msg_low for w in ("paused", "blocked", "failed", "โ—")):
+        if level in {"ERROR", "CRITICAL"} or any(w in msg_low for w in ("paused", "blocked", "failed", "❗")):
             style = f"bold {cls._RED}"
-        elif level == "WARNING" or "โ " in emoji:
+        elif level == "WARNING" or "⚠" in emoji:
             style = f"bold {cls._EMBER}"
-        elif any(e in emoji for e in ("โ…", "๐’ฐ", "๐ฏ", "๐“ฉ")):
+        elif any(e in emoji for e in ("✅", "💰", "🎯", "📩")):
             style = f"bold {cls._GREEN}"
-        elif any(e in emoji for e in ("๐‘", "๐จ", "โ”", "๐”ด", "โ")):
+        elif any(e in emoji for e in ("🛑", "🚨", "⛔", "🔴", "❌")):
             style = f"bold {cls._RED}"
-        elif any(e in emoji for e in ("๐“", "๐”", "๐“ก", "๐")):
+        elif any(e in emoji for e in ("📊", "🔄", "📡", "🌐")):
             style = cls._CYAN
-        elif "up to date" in msg_low or "๐”" in emoji:
+        elif "up to date" in msg_low or "🔁" in emoji:
             style = cls._DIM
         else:
             style = cls._WHITE
@@ -2602,7 +2602,7 @@ class CLICommandCenter:
         return Text.assemble(
             (f"{ts} ", cls._DIM),
             (f"{tag}", f"bold {cls._CYAN}"),
-            (" โ” ", cls._DIM),
+            (" │ ", cls._DIM),
             (f"{prefix}{msg}", style),
         )
 

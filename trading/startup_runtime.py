@@ -272,7 +272,7 @@ class StartupRuntimeHelper:
 
         if backfilled:
             logger.info(
-                "๐ก๏ธ  [Portfolio Guard] Backfilled held-coin history from live state: %s",
+                "🛡️  [Portfolio Guard] Backfilled held-coin history from live state: %s",
                 backfilled,
             )
 
@@ -402,7 +402,7 @@ class StartupRuntimeHelper:
 
         if registered:
             logger.info(
-                "๐“ฆ [Bootstrap Positions] Registered %d held coin(s) as open positions:\n  %s",
+                "📦 [Bootstrap Positions] Registered %d held coin(s) as open positions:\n  %s",
                 len(registered),
                 "\n  ".join(registered),
             )
@@ -508,9 +508,9 @@ class StartupRuntimeHelper:
         return reconcile_open_orders_with_exchange(self.bot, source=source)
 
     def reconcile_on_startup(self) -> None:
-        logger.info("โ•”โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•—")
-        logger.info("โ•‘  ๐” RECONCILIATION: Querying exchange for true state โ•‘")
-        logger.info("โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•")
+        logger.info("╔══════════════════════════════════════════════════════╗")
+        logger.info("║  🔍 RECONCILIATION: Querying exchange for true state ║")
+        logger.info("╚══════════════════════════════════════════════════════╝")
 
         reconciled_count = 0
         ghost_orders = []
@@ -563,7 +563,7 @@ class StartupRuntimeHelper:
                 if existing:
                     with self.bot.executor._orders_lock:
                         self.bot.executor._open_orders[oid]["remaining_amount"] = remaining
-                    logger.debug("[Reconcile] Order %s synced (local โ” remote)", oid)
+                    logger.debug("[Reconcile] Order %s synced (local ↔ remote)", oid)
                 else:
                     ghost_orders.append(
                         {
@@ -587,7 +587,7 @@ class StartupRuntimeHelper:
                 if local_sym in ("BTCUSDT", "THB_BTC", "BTC_THB") and side_str == "sell" and amount > 1.0:
                     skipped_ghost_counts[(local_sym, side_str)] += 1
                     logger.warning(
-                        "[Reconcile] Skipping ghost order %s โ€” amount=%.8f looks wrong for %s sell order (expected BTC < 1.0)",
+                        "[Reconcile] Skipping ghost order %s — amount=%.8f looks wrong for %s sell order (expected BTC < 1.0)",
                         ghost.get("order_id"),
                         amount,
                         local_sym,
@@ -606,7 +606,7 @@ class StartupRuntimeHelper:
                     if has_matching_position:
                         skipped_ghost_counts[(local_sym, side_str)] += 1
                         logger.info(
-                            "[Reconcile] Ghost SELL %s for %s โ€” skipping ghost import to preserve entry price (matched existing filled BUY position)",
+                            "[Reconcile] Ghost SELL %s for %s — skipping ghost import to preserve entry price (matched existing filled BUY position)",
                             ghost.get("order_id"),
                             local_sym,
                         )
@@ -614,7 +614,7 @@ class StartupRuntimeHelper:
 
                 oid = ghost["order_id"]
                 logger.warning(
-                    f"๐‘ป [Ghost Order] {oid} found on exchange but NOT in local DB! "
+                    f"👻 [Ghost Order] {oid} found on exchange but NOT in local DB! "
                     f"Adding to tracking: {ghost['side'].value.upper()} {ghost['symbol']} "
                     f"{ghost['amount']:.8f} @ {ghost['entry_price']:,.2f}"
                 )
@@ -671,7 +671,7 @@ class StartupRuntimeHelper:
 
             if vanished_ids:
                 logger.info(
-                    "[Reconcile] %d local order(s) not on exchange โ€” checking if they were filled while bot was down",
+                    "[Reconcile] %d local order(s) not on exchange — checking if they were filled while bot was down",
                     len(vanished_ids),
                 )
 
@@ -696,7 +696,7 @@ class StartupRuntimeHelper:
                         status_str = self.bot._history_status_value(matched)
                         if self.bot._history_status_is_filled(matched):
                             logger.info(
-                                "โ… [Reconcile] Order %s was FILLED while bot was down. Status: %s",
+                                "✅ [Reconcile] Order %s was FILLED while bot was down. Status: %s",
                                 missing_oid,
                                 status_str,
                             )
@@ -758,7 +758,7 @@ class StartupRuntimeHelper:
                                     )
                         elif self.bot._history_status_is_cancelled(matched):
                             logger.info(
-                                "๐—‘๏ธ [Reconcile] Order %s was CANCELLED on exchange. Removing from local tracking",
+                                "🗑️ [Reconcile] Order %s was CANCELLED on exchange. Removing from local tracking",
                                 missing_oid,
                             )
                             with self.bot.executor._orders_lock:
@@ -771,7 +771,7 @@ class StartupRuntimeHelper:
                                 )
                         else:
                             logger.warning(
-                                "[Reconcile] Order %s has unusual status '%s' โ€” keeping in local tracking for now",
+                                "[Reconcile] Order %s has unusual status '%s' — keeping in local tracking for now",
                                 missing_oid,
                                 status_str,
                             )
@@ -795,13 +795,13 @@ class StartupRuntimeHelper:
 
             final_count = len(self.bot.executor._open_orders)
             logger.info(
-                "โ•”โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•—\n"
-                "โ•‘  โ… RECONCILIATION COMPLETE                        โ•‘\n"
-                f"โ•‘     Ghost orders added:  {reconciled_count}\n"
-                f"โ•‘     Orders removed:      {len(vanished_ids) if vanished_ids else 0}\n"
-                f"โ•‘     Active positions:    {final_count}\n"
-                "โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•โ•"
+                "╔══════════════════════════════════════════════════════╗\n"
+                "║  ✅ RECONCILIATION COMPLETE                        ║\n"
+                f"║     Ghost orders added:  {reconciled_count}\n"
+                f"║     Orders removed:      {len(vanished_ids) if vanished_ids else 0}\n"
+                f"║     Active positions:    {final_count}\n"
+                "╚══════════════════════════════════════════════════════╝"
             )
         except Exception as exc:
             logger.error("[Reconcile] Reconciliation failed: %s", exc, exc_info=True)
-            logger.warning("[Reconcile] Proceeding with local state only โ€” may have stale data!")
+            logger.warning("[Reconcile] Proceeding with local state only — may have stale data!")

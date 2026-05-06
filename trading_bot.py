@@ -85,7 +85,7 @@ from trading.bot_runtime.run_iteration_runtime import run_trading_iteration
 from trading.bot_runtime.websocket_runtime import ensure_websocket_started, start_or_refresh_websocket
 from trading.coercion import coerce_trade_float
 
-# Type-checking imports (Pylance static analysis โ€” not executed at runtime)
+# Type-checking imports (Pylance static analysis — not executed at runtime)
 if TYPE_CHECKING:
     from monitoring import MonitoringService as _MonitoringServiceType
 
@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
 # Back-compat for tests/tools that imported the private symbol from this module.
 _coerce_trade_float = coerce_trade_float
 
-# WebSocket real-time price support โ€” Binance native backend only
+# WebSocket real-time price support — Binance native backend only
 _WEBSOCKET_BACKEND = "none"
 _WEBSOCKET_CLIENT_INSTALLED = False
 try:
@@ -122,7 +122,7 @@ except ImportError:
     stop_websocket = None
     PriceTick = None
     get_latest_ticker = None
-    logger.warning("No websocket backend available โ€” falling back to REST polling")
+    logger.warning("No websocket backend available — falling back to REST polling")
 
 
 class TradingBotOrchestrator:
@@ -291,7 +291,7 @@ class TradingBotOrchestrator:
             missing_htf = [tf for tf in htf_list if tf not in self.mtf_timeframes]
             if missing_htf:
                 logger.warning(
-                    "โ ๏ธ [MTF Config] higher_timeframes %s are NOT in collected timeframes %s โ€” "
+                    "⚠️ [MTF Config] higher_timeframes %s are NOT in collected timeframes %s — "
                     "these will never have data. Add them to 'timeframes' or remove from 'higher_timeframes'.",
                     missing_htf,
                     self.mtf_timeframes,
@@ -592,7 +592,7 @@ class TradingBotOrchestrator:
     def _get_risk_portfolio_value(portfolio_state: Optional[Dict[str, Any]]) -> float:
         return PortfolioRuntimeHelper.get_risk_portfolio_value(portfolio_state)
 
-    def _get_position_bootstrap_helper(self):  # lazily constructs โ€” keeps import graph light
+    def _get_position_bootstrap_helper(self):  # lazily constructs — keeps import graph light
         helper = getattr(self, "_position_bootstrap_helper", None)
         if helper is None:
             from trading.position_bootstrap import PositionBootstrapHelper
@@ -750,13 +750,13 @@ class TradingBotOrchestrator:
         else:
             self._last_candle_retention_cleanup_at = time.time()
 
-        # โ”€โ”€ HOTFIX FATAL-01: Ghost Orders Reconciliation โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+        # ── HOTFIX FATAL-01: Ghost Orders Reconciliation ───────────────────
         # Before starting the main loop, forcefully query the exchange API for
         # real open orders and balances. Use the authoritative remote data to
         # overwrite local SQLite state, preventing ghost orders after crash.
         if self._auth_degraded:
             logger.warning(
-                "[Startup] Auth degraded mode active โ€” skipping private exchange startup sync: %s",
+                "[Startup] Auth degraded mode active — skipping private exchange startup sync: %s",
                 self._auth_degraded_reason or "private API unavailable",
             )
         else:
@@ -772,7 +772,7 @@ class TradingBotOrchestrator:
         if self._state_machine_enabled:
             self._state_manager.sync_in_position_states(self.executor.get_open_orders())
 
-        # โ”€โ”€ H3/H4: Unblock OMS monitor after reconciliation is fully done โ”€โ”€
+        # ── H3/H4: Unblock OMS monitor after reconciliation is fully done ──
         # This MUST come after both _reconcile_on_startup() and
         # sync_open_orders_from_db() so the OMS always starts from a
         # Exchange-authoritative, DB-consistent state.
@@ -842,8 +842,8 @@ class TradingBotOrchestrator:
     def _main_loop(self):
         """Main trading loop (interval_seconds between cycles).
 
-        Each cycle: `_run_iteration` (global gates โ’ SL/TP / lifecycle โ’ per symbol
-        `SignalRuntimeHelper.process_pair_iteration`) โ’ sleep. OHLCV for strategies is
+        Each cycle: `_run_iteration` (global gates → SL/TP / lifecycle → per symbol
+        `SignalRuntimeHelper.process_pair_iteration`) → sleep. OHLCV for strategies is
         read mainly from SQLite (`PortfolioRuntimeHelper.get_market_data_for_symbol`),
         filled by background `BinanceThCollector` from `main.TradingBotApp`.
         Successful plans run through `ExecutionRuntimeHelper.process_full_auto` (or semi/dry).
@@ -1064,7 +1064,7 @@ class TradingBotOrchestrator:
         return check_pre_trade_gate(self, decision, portfolio)
 
     def _run_iteration(self):
-        """One iteration: auth/circuit/clock/pause/kill-switch โ’ position checks โ’ each ready pair.
+        """One iteration: auth/circuit/clock/pause/kill-switch → position checks → each ready pair.
 
         Per pair: `SignalRuntimeHelper.process_pair_iteration` (see `trading/signal_runtime.py`).
         """
@@ -1113,7 +1113,7 @@ class TradingBotOrchestrator:
     def _create_execution_plan_for_symbol(self, signal: AggregatedSignal, symbol: str) -> Optional[ExecutionPlan]:
         return SignalRuntimeHelper.create_execution_plan_for_symbol(self._build_execution_plan_deps(), signal, symbol)
 
-    # โ”€โ”€ WebSocket Real-time Price Handler โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
+    # ── WebSocket Real-time Price Handler ───────────────────────────────────
 
     def _on_ws_tick(self, tick: _PriceTickType):
         self._get_position_monitor_helper().on_ws_tick(tick)
@@ -1362,7 +1362,7 @@ class TradingBotOrchestrator:
         )
         coin = extract_base_asset(symbol)
         msg = (
-            f"Trailing SL  {coin}  {old_sl:,.0f} โ’ {new_sl:,.0f}  "
+            f"Trailing SL  {coin}  {old_sl:,.0f} → {new_sl:,.0f}  "
             f"profit +{profit_pct:.2f}%  price {current_price:,.0f}"
         )
         self._send_alert(msg, to_telegram=False)
