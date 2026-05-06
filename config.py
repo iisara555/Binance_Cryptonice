@@ -72,7 +72,7 @@ class BinanceConfig(BaseSettings):
 class TradingConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore", populate_by_name=True)
 
-    min_order_amount: float = Field(default=100.0, validation_alias="MIN_ORDER_AMOUNT", gt=0)
+    min_order_amount: float = Field(default=10.0, validation_alias="MIN_ORDER_AMOUNT", gt=0)  # Aligned with bot_config.yaml trading.min_order_amount
     default_order_type: str = Field(default="limit", validation_alias="DEFAULT_ORDER_TYPE")
     live_trading: bool = Field(default=False, validation_alias="LIVE_TRADING")
 

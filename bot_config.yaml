@@ -18,12 +18,13 @@
 # - monitoring reconciliation: exchange-agnostic (via api_client).
 # - rebalance: exchange-agnostic; use USDT in targets if your book is USDT-quoted.
 
-# API Keys (optional fallbacks; exchange secrets live in .env)
+# API Keys — PLACEHOLDER block only. Real secrets must be set in .env (never commit .env).
+# The values here are ignored by the Binance runtime; only .env / os.environ is read by config.py.
 api_keys:
-  binance_api_key: "YOUR_BINANCE_API_KEY"
-  binance_secret_key: "YOUR_BINANCE_SECRET_KEY"
-  bitkub_api_key: "YOUR_BITKUB_API_KEY"
-  bitkub_secret_key: "YOUR_BITKUB_SECRET_KEY"
+  binance_api_key: "SET_IN_DOT_ENV_NOT_HERE"
+  binance_secret_key: "SET_IN_DOT_ENV_NOT_HERE"
+  bitkub_api_key: "LEGACY_UNUSED"
+  bitkub_secret_key: "LEGACY_UNUSED"
   telegram_bot_token: ""
   telegram_chat_id: ""
 
@@ -356,14 +357,15 @@ strategies:
     adx_threshold: 20
     stoch_oversold: 30
     stoch_overbought: 70
-    stop_loss_pct: 4.0
-    take_profit_pct: 1.0
+    stop_loss_pct: 1.0               # FIXED: was 4.0 — SL/TP were inverted (R:R was 0.25, structurally losing)
+    take_profit_pct: 2.0             # FIXED: was 1.0 — now R:R=2.0, aligned with scalping mode
     risk_per_trade_pct: 2.0
   machete_v8b:
     enabled: true
     timeframe: "15m"
     informative_timeframe: "1h"
-    stoploss: -0.10
+    stoploss: -0.10                  # Strategy-level hard SL (-10%). Wide by design — machete_v8b is a swing/multi-hour
+                                     # strategy; runtime scalping SL (1%) applies to the position level separately.
     signals:
       quickie: true
       scalp: true
