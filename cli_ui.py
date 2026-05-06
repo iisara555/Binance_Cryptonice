@@ -275,7 +275,7 @@ class CLICommandCenter:
                         "timestamp": ts,
                         "level": "WARNING",
                         "tag": "UI  ",
-                        "emoji": "โ ๏ธ",
+                        "emoji": "(!)",
                         "message": f"Dropped {dropped_count} log record(s) due to dashboard lock contention",
                     }
                 )

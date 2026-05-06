@@ -333,7 +333,10 @@ class AlertSystem:
         parse_mode: str = "HTML",
     ) -> bool:
         with self._lock:
-            logger.info("[%s] %s", level.upper(), message)
+            # Strip non-BMP characters (emoji) from the log line so VPS terminals
+            # that lack full Unicode support don't crash or show garbled output.
+            _log_msg = "".join(c if ord(c) <= 0xFFFF else "?" for c in message)[:300]
+            logger.info("[%s] %s", level.upper(), _log_msg)
 
             if level not in self.TELEGRAM_LEVELS:
                 return True

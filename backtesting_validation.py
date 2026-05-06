@@ -337,7 +337,7 @@ class BacktestingValidator:
         if report.recommendations:
             logger.info("\nRECOMMENDATIONS:")
             for rec in report.recommendations:
-                logger.info(f"💡 {rec}")
+                logger.info(f"(!) {rec}")
 
         logger.info("=" * 60)
 

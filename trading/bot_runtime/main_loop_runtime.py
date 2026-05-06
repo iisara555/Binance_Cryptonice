@@ -32,7 +32,7 @@ def run_trading_main_loop(bot: Any) -> None:
             bot._run_iteration()
 
         except BinanceAuthException as exc:
-            logger.critical("🚨 GRACEFUL SHUTDOWN: %s", exc.message)
+            logger.critical("[!!] GRACEFUL SHUTDOWN: %s", exc.message)
             alert_system = getattr(bot, "alert_system", None)
             if alert_system is not None:
                 try:

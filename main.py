@@ -17,6 +17,16 @@ import shlex
 import sys
 import threading
 import time
+
+# Force UTF-8 I/O on VPS terminals that default to ASCII/Latin-1.
+# Must run before any logging or print calls.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+del _stream
 from datetime import datetime, timedelta, timezone
 from os import PathLike
 from pathlib import Path
@@ -1725,7 +1735,7 @@ class TradingBotApp:
             _dynamic = _compute_dyn_risk(self._app_startup_nav, _dyn_input)
             _apply_dyn_risk(self.config, _dynamic)
             logger.info(
-                "📐 DynamicConfig nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
+                "[DC] DynamicConfig nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
                 self._app_startup_nav,
                 _dynamic["max_position_per_trade_pct"],
                 _dynamic["max_open_positions"],

@@ -1127,7 +1127,7 @@ class BinanceThClient:
 
                 current_ip = get_public_ip() or "unknown"
                 logger.critical(
-                    "🚨 FATAL: Binance auth error %s on %s after %d consecutive failures. "
+                    "[FATAL] Binance auth error %s on %s after %d consecutive failures. "
                     "Current IP: %s | Message: %s | Raw: %s",
                     e.code,
                     path,
@@ -1139,7 +1139,7 @@ class BinanceThClient:
                 self._cb.record_failure(f"FATAL Auth Error {e.code} on {path}")
                 raise BinanceAuthException(
                     e.code,
-                    f"🚨 FATAL: Binance.th auth error {e.code} ({e.message}) after "
+                    f"[FATAL] Binance.th auth error {e.code} ({e.message}) after "
                     f"{self._consecutive_auth_failures} consecutive failures. "
                     f"Verify API key/secret and permissions, then restart.",
                     raw=e.raw,

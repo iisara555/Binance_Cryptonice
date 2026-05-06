@@ -60,7 +60,7 @@ class ExecutionRuntimeHelper:
 
         if not decision.risk_check.passed:
             reason = getattr(decision.risk_check, "reason", getattr(decision.risk_check, "reasons", "Unknown reasons"))
-            logger.info(f"🛡️ Risk Manager: ปฏิเสธสัญญาณเทรด ({reason})")
+            logger.info(f"[RG]️ Risk Manager: ปฏิเสธสัญญาณเทรด ({reason})")
             if deps.send_alerts:
                 deps.send_alert(deps.format_skip_alert(decision))
             return
@@ -72,7 +72,7 @@ class ExecutionRuntimeHelper:
         logger.info(f"[Trade Decision] {rationale}")
         side_thai = "ซื้อ" if decision.plan.side.value == "buy" else "ขาย"
         logger.info(
-            f"🤖 [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} quote"
+            f"[BOT] [FULL_AUTO] กำลังส่งคำสั่งเทรด | {side_thai} ({decision.plan.side.value.upper()}) @ {decision.plan.entry_price:,.2f} quote"
         )
 
         is_new_entry_buy = decision.plan.side.value == "buy"
@@ -91,7 +91,7 @@ class ExecutionRuntimeHelper:
                 open_count,
             )
             if not gate.allowed:
-                logger.warning("🚫 [RiskGate] Trade blocked for %s: %s", decision.plan.symbol, gate.reason)
+                logger.warning("[X] [RiskGate] Trade blocked for %s: %s", decision.plan.symbol, gate.reason)
                 return
 
             corr_threshold = float(deps.config.get("risk", {}).get("correlation_threshold", 0.75))
@@ -109,7 +109,7 @@ class ExecutionRuntimeHelper:
                     )
                     if not corr_gate.allowed:
                         logger.info(
-                            "🔗 [CorrelationGate] Trade blocked for %s: %s", decision.plan.symbol, corr_gate.reason
+                            "[CorrGate] Trade blocked for %s: %s", decision.plan.symbol, corr_gate.reason
                         )
                         return
 
