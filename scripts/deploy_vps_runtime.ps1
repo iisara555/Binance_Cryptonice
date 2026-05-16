@@ -27,6 +27,15 @@ $runtimeFiles = @(
     'project_paths.py',
     'alerts.py',
     'main.py',
+    # cli/ package (real modules)
+    'cli/__init__.py',
+    'cli/ui.py',
+    'cli/command_dispatch.py',
+    'cli/layout.py',
+    'cli/snapshot_build.py',
+    'cli/snapshot_dto.py',
+    # root shim stubs (backward-compat wrappers)
+    'cli_ui.py',
     'cli_command_dispatch.py',
     'cli_snapshot_build.py',
     'cli_snapshot_dto.py',
@@ -46,7 +55,6 @@ $runtimeFiles = @(
     'signal_generator.py',
     'strategy_base.py',
     'telegram_bot.py',
-    'cli_ui.py',
     'bot_config.yaml',
     'coin_whitelist.json',
     'strategies/__init__.py',
