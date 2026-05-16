@@ -1,0 +1,1 @@
+"""Core — shared domain models, risk math, database, and configuration."""
