@@ -1,0 +1,1 @@
+"""Bot — trading orchestration, execution, and signal generation runtime."""

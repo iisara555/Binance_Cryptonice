@@ -1,0 +1,1 @@
+"""Integrations — exchange API clients, websocket adapters, and alert system."""
