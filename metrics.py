@@ -56,7 +56,7 @@ class PrometheusMetrics:
         metrics.increment_counter("orders_filled_total", labels={"side": "buy"})
 
         # Gauges
-        metrics.set_gauge("portfolio_value_usdt", 100000.0)
+        metrics.set_gauge("portfolio_value_thb", 100000.0)
         metrics.set_gauge("open_positions", 3)
 
         # Histograms
@@ -325,17 +325,17 @@ def create_trading_metrics(metrics: PrometheusMetrics) -> None:
     metrics.set_help("websocket_latency_seconds", "WebSocket message processing latency")
 
     # Balance metrics
-    metrics.set_help("portfolio_value_usdt", "Total portfolio value in USDT")
-    metrics.set_help("available_balance_usdt", "Available USDT balance")
-    metrics.set_help("reserved_balance_usdt", "Reserved balance in orders")
+    metrics.set_help("portfolio_value_thb", "Total portfolio value in THB")
+    metrics.set_help("available_balance_thb", "Available THB balance")
+    metrics.set_help("reserved_balance_thb", "Reserved balance in orders")
 
     # Position metrics
     metrics.set_help("open_positions", "Number of open positions")
-    metrics.set_help("position_value_usdt", "Total value of open positions")
+    metrics.set_help("position_value_thb", "Total value of open positions")
 
     # PnL metrics
-    metrics.set_help("daily_pnl_usdt", "Daily profit/loss in USDT")
-    metrics.set_help("total_pnl_usdt", "Total profit/loss in USDT")
+    metrics.set_help("daily_pnl_thb", "Daily profit/loss in THB")
+    metrics.set_help("total_pnl_thb", "Total profit/loss in THB")
     metrics.set_help("win_rate", "Percentage of winning trades")
 
     # Circuit breaker metrics
@@ -379,11 +379,11 @@ def record_order_filled(symbol: str, side: str, filled_price: float, filled_amou
     m.decrement_gauge("open_positions", 1, labels={"symbol": symbol})
 
 
-def record_trade_pnl(pnl_usdt: float, is_win: bool) -> None:
+def record_trade_pnl(pnl_thb: float, is_win: bool) -> None:
     """Record trade PnL"""
     m = get_metrics()
     m.increment_counter("trades_total", labels={"result": "win" if is_win else "loss"})
-    m.increment_gauge("total_pnl_usdt", pnl_usdt)
+    m.increment_gauge("total_pnl_thb", pnl_thb)
 
 
 def record_api_latency(endpoint: str, latency_seconds: float) -> None:

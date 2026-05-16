@@ -200,7 +200,7 @@ class TelegramSender:
                     exc,
                 )
                 if attempt < max_retries - 1:
-                    time.sleep(min(2**attempt, 30))
+                    time.sleep(2**attempt)
 
         assert last_error is not None
         raise last_error
@@ -333,10 +333,7 @@ class AlertSystem:
         parse_mode: str = "HTML",
     ) -> bool:
         with self._lock:
-            # Strip non-BMP characters (emoji) from the log line so VPS terminals
-            # that lack full Unicode support don't crash or show garbled output.
-            _log_msg = "".join(c if ord(c) <= 0xFFFF else "?" for c in message)[:300]
-            logger.info("[%s] %s", level.upper(), _log_msg)
+            logger.info("[%s] %s", level.upper(), message)
 
             if level not in self.TELEGRAM_LEVELS:
                 return True
@@ -402,7 +399,7 @@ def _safe_text(value: Any) -> str:
     return escape_html(value)
 
 
-def format_fatal_auth_alert(details: str, *, title: str = "FATAL: API Auth Error") -> str:
+def format_fatal_auth_alert(details: str, *, title: str = "FATAL: Bitkub Auth Error") -> str:
     return format_error_alert(title=title, details=details, status="SHUTDOWN")
 
 
@@ -416,12 +413,12 @@ def format_trade_alert(
     pnl_pct: Optional[float] = None,
     status: str = "filled",
     extra: Optional[str] = None,
-    quote_asset: str = "USDT",
+    quote_asset: str = "THB",
 ) -> str:
     """Format a trade alert message.
-
+    
     Args:
-        quote_asset: Quote currency (default "USDT" for Binance TH).
+        quote_asset: Quote currency (default "THB" for Binance TH, can be "USDT" for other exchanges)
     """
     pair = _safe_text(symbol)
     coin = _safe_text(str(symbol or "").replace("THB_", "").replace("USDT_", ""))
@@ -477,12 +474,12 @@ def format_status_alert(
     pnl_pct: float,
     uptime: Optional[str] = None,
     pairs_status: Optional[List[str]] = None,
-    quote_asset: str = "USDT",
+    quote_asset: str = "THB",
 ) -> str:
     """Format a status alert message.
-
+    
     Args:
-        quote_asset: Quote currency (default "USDT" for Binance TH).
+        quote_asset: Quote currency (default "THB" for Binance TH, can be "USDT" for other exchanges)
     """
     uptime_val = _safe_text(uptime) if uptime else "-"
     pnl_emoji = "✅" if pnl_amt >= 0 else "🔻"

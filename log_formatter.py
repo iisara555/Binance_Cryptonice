@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-# ── Tag map: module leaf name ->' 4-char tag ────────────────────────────────────
+# ── Tag map: module leaf name → 4-char tag ────────────────────────────────────
 TAG_MAP: Dict[str, str] = {
     "pre_trade_gate_runtime": "GATE",
     "risk_management":        "RISK",
@@ -72,11 +72,11 @@ _VERBOSE_PREFIX_RE = re.compile(
 )
 
 # ── Symbol normaliser ─────────────────────────────────────────────────────────
-_STRIP_SUFFIXES = ("USDT", "BUSD", "BTC", "ETH", "BNB", "BNB")
+_STRIP_SUFFIXES = ("USDT", "BUSD", "BTC", "ETH", "BNB", "THB")
 
 
 def shorten_symbol(pair: str) -> str:
-    """BTCUSDT ->' BTC, DOGEUSDT ->' DOGE."""
+    """BTCUSDT → BTC, DOGEUSDT → DOGE."""
     up = pair.upper().strip("'\"[] \t")
     for sfx in _STRIP_SUFFIXES:
         if up.endswith(sfx) and len(up) > len(sfx):
@@ -85,7 +85,7 @@ def shorten_symbol(pair: str) -> str:
 
 
 def _extract_symbol(text: str) -> Optional[str]:
-    m = re.search(r"\b([A-Z]{2,8}(?:USDT|BUSD|BTC|ETH|BNB))\b", text.upper())
+    m = re.search(r"\b([A-Z]{2,8}(?:USDT|BUSD|BTC|ETH|BNB|THB))\b", text.upper())
     return shorten_symbol(m.group(1)) if m else None
 
 
@@ -100,60 +100,60 @@ def pick_emoji(tag: str, msg_lower: str) -> str:  # noqa: C901
         ("opened" in msg_lower or "order filled" in msg_lower or "order placed" in msg_lower)
         and "buy" in msg_lower
     ):
-        return ">>"
+        return "✅"
     if "closed" in msg_lower or "close" in msg_lower:
         if any(w in msg_lower for w in ("sl", "stop loss", "stop_loss")):
-            return "(SL)"
+            return "🛑"
         if any(w in msg_lower for w in ("tp", "take profit", "take_profit")) or "+" in msg_lower:
-            return "($)"
+            return "💰"
         if any(w in msg_lower for w in ("time", "held", "timeout")):
-            return "(T)"
+            return "⏰"
         if any(w in msg_lower for w in ("loss", "-")):
-            return "(v)"
-        return "($)"  # default closed = profit assumed
+            return "📉"
+        return "💰"  # default closed = profit assumed
 
     # Risk / system alerts
     if "daily limit" in msg_lower and "hit" in msg_lower:
-        return "(!!!)"
+        return "🚨"
     if "paused" in msg_lower or "mismatch" in msg_lower:
-        return "(||)"
+        return "⛔"
     if "daily loss" in msg_lower or ("warn" in msg_lower and tag == "RISK"):
-        return "(!)"
+        return "⚠️"
     if "daily reset" in msg_lower or "reset" in msg_lower and tag == "RISK":
-        return "(RST)"
+        return "💹"
     if "cooldown" in msg_lower or "cooling" in msg_lower:
-        return "(zz)"
+        return "💤"
 
     # Connectivity
     if ("websocket" in msg_lower or "ws" in msg_lower) and "connect" in msg_lower:
         if "disconnect" in msg_lower or "reconnect" in msg_lower or "closed" in msg_lower:
-            return "(-)"
-        return "(+)"
+            return "🔴"
+        return "🔌"
 
     # Boot / startup
     if tag == "BOOT":
         if "started" in msg_lower or "bot start" in msg_lower:
-            return "(GO)"
+            return "🚀"
         if "bootstrap" in msg_lower or "wallet" in msg_lower:
-            return "(PKG)"
+            return "📦"
         if "stale" in msg_lower:
-            return "(DEL)"
+            return "🗑️"
         if "scanning" in msg_lower:
-            return "(?)"
+            return "🔍"
 
     # Data
     if "up to date" in msg_lower or "uptodate" in msg_lower:
-        return "(UP)"
+        return "🔁"
     if ("candle" in msg_lower and "stored" in msg_lower) or ("new candle" in msg_lower):
-        return "(+C)"
+        return "📡"
     if "backfill" in msg_lower or "historical" in msg_lower:
-        return "(DL)"
+        return "📥"
     if any(w in msg_lower for w in ("exchangeinfo", "bulk cache", "filters loaded", "filter cache")):
-        return "(F)"
+        return "🌐"
     if "reconcil" in msg_lower:
-        return "(RC)"
+        return "🔃"
     if "retry" in msg_lower or "retrying" in msg_lower:
-        return "(~)"
+        return "🔄"
 
     # Signal
     if tag == "SIG " or "signal" in msg_lower:
@@ -161,46 +161,46 @@ def pick_emoji(tag: str, msg_lower: str) -> str:  # noqa: C901
         if conf_m:
             try:
                 if float(conf_m.group(1)) >= 0.90:
-                    return "(!!)"
+                    return "🎯"
             except ValueError:
                 pass
         if "block" in msg_lower or "reject" in msg_lower or "fail" in msg_lower:
-            return "(X)"
-        return "(SIG)"
+            return "❌"
+        return "📊"
 
     # State transitions
-    if "->" in msg_lower or ("transition" in msg_lower and tag == "STM "):
-        return "(~)"
+    if "→" in msg_lower or ("transition" in msg_lower and tag == "STM "):
+        return "🔄"
 
     # Orders
     if "order" in msg_lower:
         if "sent" in msg_lower or "placed" in msg_lower or "submit" in msg_lower:
-            return "(TX)"
+            return "📤"
         if "filled" in msg_lower:
-            return "(RX)"
+            return "📩"
         if "error" in msg_lower or "failed" in msg_lower:
-            return "(!)"
+            return "❗"
 
     # Errors
     if any(w in msg_lower for w in ("error", "failed", "exception", "traceback")):
-        return "(!)"
+        return "❗"
     if "warning" in msg_lower:
-        return "(!)"
+        return "⚠️"
 
     # DB
     if any(w in msg_lower for w in ("database", "db write", "saved to db")):
-        return "(DB)"
+        return "💾"
 
     # Size / risk calc
     if tag == "RISK" and any(w in msg_lower for w in ("size", "portfolio", "nav", "risk_pct")):
-        return "(R)"
+        return "🛡️"
 
     # Flow / trade decision
     if tag == "FLOW":
         if "triggered" in msg_lower:
-            return ">>"
+            return "✅"
         if "gated" in msg_lower:
-            return "(..)"
+            return "⏳"
 
     return ""
 
@@ -210,11 +210,11 @@ def pick_emoji(tag: str, msg_lower: str) -> str:  # noqa: C901
 def _strategy_badge(text: str) -> str:
     lo = text.lower()
     if re.search(r"machete|mach|m8b|m8", lo):
-        return "[M]"
+        return "〔M〕"
     if re.search(r"scalp|simple_scalp|scalp_plus", lo):
-        return "[S]"
+        return "〔S〕"
     if re.search(r"breakout|bk", lo):
-        return "[B]"
+        return "〔B〕"
     return ""
 
 
@@ -298,7 +298,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
                 # INSUFF (3/5) style
                 cnt_m = re.search(r"\((\d+/\d+)\)", msg)
                 reason = f"  INSUFF ({cnt_m.group(1)})" if cnt_m else ""
-            return f"(X) {sym}  {badge} BLOCK{reason}"
+            return f"❌ {sym}  {badge} BLOCK{reason}"
 
         if sym and sig_type:
             return f"{sym}  {badge} {sig_type}{conf}{rr}"
@@ -326,7 +326,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             if pct_m:
                 reason = pct_m.group(1)
 
-            return f"(X) {sym}  BLOCK  {reason}".rstrip()
+            return f"❌ {sym}  BLOCK  {reason}".rstrip()
 
         # sizing preview / ready
         if re.search(r"sizing_preview|sizing_allowed|size.*preview", lo):
@@ -334,7 +334,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             amt_m = re.search(r"quote_est\s*[=:]\s*([\d.]+)", lo)
             amt = amt_m.group(1) if amt_m else ""
             allowed = re.search(r"sizing_allowed\s*=\s*true", lo)
-            mark = ">>" if allowed else "(X)"
+            mark = "✅" if allowed else "❌"
             status = "ready" if allowed else "blocked"
             return f"{mark} {sym}  {side}  {amt} USDT  {status}"
 
@@ -346,11 +346,11 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
         sz_m  = re.search(r"suggested\s*[=:]\s*([\d.]+)", lo)
         if pv_m and rp_m and sz_m:
             rp = rp_m.group(1).rstrip("%")
-            return f"(R) size={sz_m.group(1)}  risk={rp}%  nav={pv_m.group(1)}  >>"
+            return f"🛡️ size={sz_m.group(1)}  risk={rp}%  nav={pv_m.group(1)}  ✓"
 
         # Daily limit hit
         if "daily limit" in lo:
-            return "(!!!) daily limit hit  trading stopped"
+            return "🚨 daily limit hit  trading stopped"
 
         # Daily loss warning
         if "daily loss" in lo or "daily_loss" in lo:
@@ -359,19 +359,19 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             if loss_m and max_m:
                 try:
                     pct = float(loss_m.group(1)) / float(max_m.group(1)) * 100
-                    return f"(!) daily loss={loss_m.group(1)}/{max_m.group(1)}  {pct:.0f}% used"
+                    return f"⚠️ daily loss={loss_m.group(1)}/{max_m.group(1)}  {pct:.0f}% used"
                 except (ValueError, ZeroDivisionError):
                     pass
 
         # Daily reset
         if "daily reset" in lo or "loss reset" in lo:
-            return "(RST) daily reset  loss cleared"
+            return "💹 daily reset  loss cleared"
 
         # Cooldown
         if "cooldown" in lo or "cooling" in lo:
             min_m = re.search(r"(\d+)\s*min", lo)
             wait = f"  next trade in {min_m.group(1)}min" if min_m else ""
-            return f"(zz) cooldown{wait}"
+            return f"💤 cooldown{wait}"
 
     # ── EXEC ─────────────────────────────────────────────────────────────
     elif tag_bare == "EXEC":
@@ -386,7 +386,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             amt   = amt_m.group(1)   if amt_m   else ""
             price = price_m.group(1) if price_m else ""
             otype = type_m.group(1).upper() if type_m else ""
-            return f"(TX) {sym}  {side}  {amt} USDT @ {price}  {otype}".strip()
+            return f"📤 {sym}  {side}  {amt} USDT @ {price}  {otype}".strip()
 
         # Error / failure
         err_m = re.search(r"\[(-\d+)\]\s*(.{0,60})", msg)
@@ -397,23 +397,23 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
                 lambda m2: shorten_symbol(m2.group(1)),
                 err_m.group(2).strip(),
             )[:45]
-            return f"(!) {sym}  {err_m.group(1)} {err_text}"
+            return f"❗ {sym}  {err_m.group(1)} {err_text}"
 
         if re.search(r"placement error|order error|failed", lo):
-            return f"(!) {sym}  " + msg[:50]
+            return f"❗ {sym}  " + msg[:50]
 
         # Retry
         if re.search(r"\bretry\b|\bretrying\b", lo):
             cnt_m = re.search(r"(\d+)[/\\](\d+)", lo)
             cnt   = f"  {cnt_m.group(1)}/{cnt_m.group(2)}" if cnt_m else ""
-            return f"(~) {sym}  retry{cnt}"
+            return f"🔄 {sym}  retry{cnt}"
 
         # Filled / placed / opened
         if re.search(r"order filled|order placed|order sent|buy order|sell order", lo):
             qty_m = re.search(r"qty\s*[=:]?\s*([\d.]+)", lo)
             qty = f"  qty={qty_m.group(1)}" if qty_m else ""
             side = "BUY" if "buy" in lo else "SELL"
-            return f">> {sym}  {side} filled{qty}"
+            return f"✅ {sym}  {side} filled{qty}"
 
     # ── FLOW ─────────────────────────────────────────────────────────────
     elif tag_bare == "FLOW":
@@ -445,14 +445,14 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             pct_m = re.search(r"([+-][\d.]+)%", msg)
             pct   = f"  {pct_m.group(1)}%" if pct_m else ""
             if re.search(r"\bsl\b|stop.?loss", lo):
-                return f"(SL) CLOSED  {sym}  SL{price}{pct}"
+                return f"🛑 CLOSED  {sym}  SL{price}{pct}"
             if re.search(r"\btp\b|take.?profit", lo):
-                return f"($) CLOSED  {sym}  SELL{price}{pct}  TP"
+                return f"💰 CLOSED  {sym}  SELL{price}{pct}  TP"
             if "time" in lo or "held" in lo:
                 held_m = re.search(r"held[=:\s]*([\d]+\s*min)", lo)
                 held = f"  held={held_m.group(1)}" if held_m else ""
-                return f"(T) CLOSED  {sym}  TIME{held}{pct}"
-            return f"(v) CLOSED  {sym}  SELL{price}{pct}"
+                return f"⏰ CLOSED  {sym}  TIME{held}{pct}"
+            return f"📉 CLOSED  {sym}  SELL{price}{pct}"
 
         # Opened (from trade decision logs)
         if "opened" in lo:
@@ -462,7 +462,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             price_m = re.search(r"@\s*([\d.]+)", msg)
             price   = f" @ {price_m.group(1)}" if price_m else ""
             badge   = _strategy_badge(msg)
-            return f">> OPENED  {sym}  {side}{amt}{price}  {badge}".strip()
+            return f"✅ OPENED  {sym}  {side}{amt}{price}  {badge}".strip()
 
     # ── BOOT ─────────────────────────────────────────────────────────────
     elif tag_bare == "BOOT":
@@ -473,22 +473,22 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             if list_m:
                 raw_syms = [s.strip().strip("'\"") for s in list_m.group(1).split(",")]
                 short_syms = " ".join(shorten_symbol(s) for s in raw_syms[:5])
-                return f"(PKG) {short_syms}  added from wallet"
-            return "(PKG) bootstrapped from wallet"
+                return f"📦 {short_syms}  added from wallet"
+            return "📦 bootstrapped from wallet"
 
         if re.search(r"bot.?started|starting", lo):
             pairs_m = re.search(r"(\d+)\s+pair", lo)
             pairs   = f"  {pairs_m.group(1)} pairs" if pairs_m else ""
-            return f"(GO) bot started{pairs}"
+            return f"🚀 bot started{pairs}"
 
         if "stale" in lo:
             sym = _extract_symbol(msg) or ""
-            return f"(DEL) {sym}  stale position removed"
+            return f"🗑️ {sym}  stale position removed"
 
         if "scanning" in lo and "wallet" in lo:
             n_m = re.search(r"(\d+)\s+asset", lo)
             n   = f"  {n_m.group(1)} assets found" if n_m else ""
-            return f"(?) scanning wallet{n}"
+            return f"🔍 scanning wallet{n}"
 
     # ── OMS ──────────────────────────────────────────────────────────────
     elif tag_bare == "OMS":
@@ -498,13 +498,13 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             bot_m = re.search(r"bot[=:](\d+)", lo)
             ex_m  = re.search(r"exchange[=:](\d+)", lo)
             if bot_m and ex_m:
-                return f"(||) PAUSED  mismatch bot={bot_m.group(1)} exchange={ex_m.group(1)}"
-            return f"(||) PAUSED  {msg[:50]}"
+                return f"⛔ PAUSED  mismatch bot={bot_m.group(1)} exchange={ex_m.group(1)}"
+            return f"⛔ PAUSED  {msg[:50]}"
 
         if "reconcil" in lo:
             cnt_m = re.search(r"(\d+)\s+ghost", lo)
             cnt   = f"  {cnt_m.group(1)} ghost orders cleared" if cnt_m else ""
-            return f"(RC) reconciled{cnt}"
+            return f"🔃 reconciled{cnt}"
 
         if re.search(r"failed|error", lo):
             att_m = re.search(r"(\d+)\s+attempt", lo)
@@ -520,7 +520,7 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
                 code = f"  {err_code} {err_text}"
             else:
                 code = ""
-            return f"(!) {sym}{attempts}{code}"
+            return f"❗ {sym}{attempts}{code}"
 
     # ── API ──────────────────────────────────────────────────────────────
     elif tag_bare == "API":
@@ -532,26 +532,26 @@ def shorten_message(tag: str, msg: str) -> str:  # noqa: C901
             if ttl_m:
                 hours = int(float(ttl_m.group(1))) // 3600
                 ttl   = f"  ttl={hours}h" if hours else f"  ttl={ttl_m.group(1)}s"
-            return f"(F) filters loaded{cnt}{ttl}"
+            return f"🌐 filters loaded{cnt}{ttl}"
 
         if "websocket" in lo and "connect" in lo and "disconnect" not in lo:
             pairs = re.findall(r"[A-Z]{2,8}USDT", msg.upper())
             pairs_str = " ".join(pairs[:4]) if pairs else ""
-            return f"(+) websocket connected  {pairs_str}".strip()
+            return f"🔌 websocket connected  {pairs_str}".strip()
 
         if "websocket" in lo and "disconnect" in lo:
-            return "(-) websocket disconnected  reconnecting"
+            return "🔴 websocket disconnected  reconnecting"
 
     # ── STM ──────────────────────────────────────────────────────────────
     elif tag_bare == "STM":
         sym = _extract_symbol(msg) or ""
 
-        # State transition — handle both ->' and -> and 'to'
-        trans_m = re.search(r"(\w+)\s*(?:->|=>)\s*(\w+)", msg)
+        # State transition — handle both → and -> and 'to'
+        trans_m = re.search(r"(\w+)\s*(?:→|->|–>)\s*(\w+)", msg)
         if not trans_m:
             trans_m = re.search(r"transition\s+(\w+)\s+to\s+(\w+)", msg, re.I)
         if trans_m:
-            return f"(~) {sym}  {trans_m.group(1).upper()} -> {trans_m.group(2).upper()}"
+            return f"🔄 {sym}  {trans_m.group(1).upper()} → {trans_m.group(2).upper()}"
 
     # ── Fallback ─────────────────────────────────────────────────────────
     return msg
@@ -600,7 +600,7 @@ def format_log_row(record: logging.LogRecord) -> Dict[str, str]:
 # ── Console formatter ─────────────────────────────────────────────────────────
 
 class CryptoBotFormatter(logging.Formatter):
-    """Compact formatter: HH:MM:SS | LEVEL | TAG  | EMOJI  message"""
+    """Compact formatter: HH:MM:SS │ LEVEL │ TAG  │ EMOJI  message"""
 
     def __init__(self, use_color: bool = True) -> None:
         super().__init__()
@@ -620,7 +620,7 @@ class CryptoBotFormatter(logging.Formatter):
 
         if self.use_color:
             color = _LEVEL_ANSI.get(badge, _ANSI_WHITE)
-            sep   = f"{_ANSI_DIM} | {_ANSI_RESET}"
+            sep   = f"{_ANSI_DIM} │ {_ANSI_RESET}"
             line  = (
                 f"{_ANSI_DIM}{ts}{_ANSI_RESET}{sep}"
                 f"{color}{badge}{_ANSI_RESET}{sep}"
@@ -628,7 +628,7 @@ class CryptoBotFormatter(logging.Formatter):
                 f"{short}"
             )
         else:
-            line = f"{ts} | {badge} | {tag_p} | {short}"
+            line = f"{ts} │ {badge} │ {tag_p} │ {short}"
 
         if record.exc_info:
             line += "\n" + self.formatException(record.exc_info)

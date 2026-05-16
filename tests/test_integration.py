@@ -1,4 +1,4 @@
-﻿"""
+"""
 Integration Tests
 =================
 Full end-to-end integration tests for the trading system.
@@ -24,7 +24,7 @@ from alerts import AlertLevel, AlertSystem, TelegramSender
 from api_client import BinanceAPIError, BinanceThClient
 from cli_ui import CLICommandCenter
 from dynamic_coin_config import JsonCoinWhitelistRepository
-from helpers import calc_net_pnl, format_exchange_time
+from helpers import calc_net_pnl, format_bitkub_time
 from main import TradingBotApp
 from trading.bootstrap_config import _apply_strategy_mode_profile, resolve_runtime_trading_pairs
 from trading.runtime_process import (
@@ -2673,7 +2673,7 @@ class TestCliSnapshot:
         assert snapshot["positions"][0]["bootstrap_source"] == "estimated_from_ticker"
         assert snapshot["positions"][0]["pnl_pct"] is None
 
-    def test_format_cli_timestamp_converts_runtime_utc_to_exchange_time(self):
+    def test_format_cli_timestamp_converts_runtime_utc_to_bitkub_time(self):
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00") == "22:35:00"
         assert TradingBotApp._format_cli_timestamp("2026-04-11T15:35:00Z") == "22:35:00"
 
@@ -2926,7 +2926,7 @@ class TestCliUi:
         assert "Suggestions:" not in rendered
         assert "Input>" not in rendered
 
-    def test_log_buffer_uses_exchange_time(self):
+    def test_log_buffer_uses_bitkub_time(self):
         app = Mock()
         command_center = CLICommandCenter(app)
         record = logging.LogRecord(
@@ -2949,7 +2949,7 @@ class TestCliUi:
         command_center = CLICommandCenter(app)
 
         noisy_info = logging.LogRecord(
-            name="binance_websocket",
+            name="bitkub_websocket",
             level=logging.INFO,
             pathname=__file__,
             lineno=1,
@@ -2958,7 +2958,7 @@ class TestCliUi:
             exc_info=None,
         )
         important_warning = logging.LogRecord(
-            name="binance_websocket",
+            name="bitkub_websocket",
             level=logging.WARNING,
             pathname=__file__,
             lineno=1,
@@ -3072,8 +3072,8 @@ class TestCliUi:
         assert "4/6" in rendered
 
 
-def test_format_exchange_time_normalizes_to_thailand_timezone():
-    assert format_exchange_time(datetime(2026, 4, 11, 15, 35, 0, tzinfo=timezone.utc)) == "22:35:00"
+def test_format_bitkub_time_normalizes_to_thailand_timezone():
+    assert format_bitkub_time(datetime(2026, 4, 11, 15, 35, 0, tzinfo=timezone.utc)) == "22:35:00"
 
 
 if __name__ == "__main__":

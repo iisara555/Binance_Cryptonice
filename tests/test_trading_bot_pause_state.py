@@ -1,4 +1,4 @@
-﻿import os
+import os
 import threading
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
@@ -198,7 +198,7 @@ def test_handle_balance_event_crypto_deposit_bootstraps_active_runtime_pair_into
 def test_bootstrap_held_positions_assigns_sl_tp_to_synthetic_positions():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0, "use_dynamic_sl_tp": False}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.001, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 1_500_000.0}
@@ -221,7 +221,7 @@ def test_bootstrap_held_positions_assigns_sl_tp_to_synthetic_positions():
 def test_bootstrap_held_positions_prefers_persisted_position_entry_price_over_current_price():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.001, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 1_500_000.0}
@@ -260,7 +260,7 @@ def test_bootstrap_held_positions_prefers_persisted_position_entry_price_over_cu
 def test_bootstrap_held_positions_prefers_trade_state_entry_price_over_current_price():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.001, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 1_500_000.0}
@@ -293,7 +293,7 @@ def test_bootstrap_held_positions_prefers_trade_state_entry_price_over_current_p
 def test_bootstrap_held_positions_ignores_newer_bootstrap_row_when_real_position_exists():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.0000605, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 2_390_512.0}
@@ -346,7 +346,7 @@ def test_bootstrap_held_positions_ignores_newer_bootstrap_row_when_real_position
 def test_bootstrap_held_positions_uses_trade_history_when_only_bootstrap_context_exists():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.0000605, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 2_390_512.0}
@@ -396,7 +396,7 @@ def test_bootstrap_held_positions_uses_trade_history_when_only_bootstrap_context
 def test_bootstrap_held_positions_uses_exchange_order_history_when_local_state_is_bootstrap_only():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_balances.return_value = {"BTC": {"available": 0.0000605, "reserved": 0.0}}
     bot.api_client.get_ticker.return_value = {"last": 2_390_515.0}
@@ -687,7 +687,7 @@ def test_reconcile_tracked_positions_keeps_position_when_coin_balance_remains():
 def test_reconcile_tracked_positions_bootstraps_missing_held_coin_from_balance_state():
     bot = TradingBotOrchestrator.__new__(TradingBotOrchestrator)
     bot.config = {"risk": {"stop_loss_pct": 4.5, "take_profit_pct": 10.0, "use_dynamic_sl_tp": False}}
-    bot.min_trade_value_usdt = 15.0
+    bot.min_trade_value_thb = 15.0
     bot.api_client = Mock()
     bot.api_client.get_ticker.return_value = {"last": 42.7}
     bot.api_client.get_order_history.return_value = []

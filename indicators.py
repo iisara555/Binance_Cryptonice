@@ -10,7 +10,13 @@ from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
+try:
+    import pandas_ta as _ta
+except ImportError:
+    import ta as _ta
+    from ta.trend import adx as _adx, cci as _cci
+    from ta.momentum import stoch as _stoch
+    from ta.volatility import average_true_range as _atr, bollinger_hband, bollinger_lband
 
 
 class TechnicalIndicators:
@@ -60,38 +66,60 @@ class TechnicalIndicators:
         prices: pd.Series, period: int = 20, std_dev: float = 2.0
     ) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """Bollinger Bands - returns (upper, middle, lower)"""
-        bb = ta.bbands(prices, length=period, std=std_dev)
-        upper = bb.filter(like="BBU").iloc[:, 0]
-        middle = bb.filter(like="BBM").iloc[:, 0]
-        lower = bb.filter(like="BBL").iloc[:, 0]
+        try:
+            bb = _ta.bbands(prices, length=period, std=std_dev)
+            upper = bb.filter(like="BBU").iloc[:, 0]
+            middle = bb.filter(like="BBM").iloc[:, 0]
+            lower = bb.filter(like="BBL").iloc[:, 0]
+        except AttributeError:
+            # ta library: use BollingerBands class
+            from ta.volatility import BollingerBands
+            bb = BollingerBands(prices, window=period, window_dev=std_dev)
+            upper = bb.bollinger_hband()
+            middle = bb.bollinger_mavg()
+            lower = bb.bollinger_lband()
         return upper, middle, lower
 
     @staticmethod
     def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
         """Average True Range (ATR)"""
-        return ta.atr(high, low, close, length=period)
+        try:
+            return _ta.atr(high, low, close, length=period)
+        except AttributeError:
+            return _atr(high, low, close, window=period)
 
     @staticmethod
     def calculate_stochastic(
         high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
     ) -> Tuple[pd.Series, pd.Series]:
         """Stochastic Oscillator - returns (%K, %D)"""
-        stoch = ta.stoch(high, low, close, k=period, d=3, smooth_k=1)
-        k = stoch.filter(like="STOCHk").iloc[:, 0]
-        d = stoch.filter(like="STOCHd").iloc[:, 0]
+        try:
+            stoch = _ta.stoch(high, low, close, k=period, d=3, smooth_k=1)
+            k = stoch.filter(like="STOCHk").iloc[:, 0]
+            d = stoch.filter(like="STOCHd").iloc[:, 0]
+        except AttributeError:
+            k = _stoch(high, low, close, window=period, smooth_window=1)
+            d = k.rolling(window=3).mean()
         return k, d
 
     @staticmethod
     def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
         """Average Directional Index (ADX) - Trend strength"""
-        adx_df = ta.adx(high, low, close, length=period)
-        adx = adx_df.filter(like="ADX_").iloc[:, 0]
+        try:
+            adx_df = _ta.adx(high, low, close, length=period)
+            adx = adx_df.filter(like="ADX_").iloc[:, 0]
+        except AttributeError:
+            adx_df = _adx(high, low, close, window=period)
+            adx = adx_df  # ta.trend.adx returns ADX directly as Series
         return adx.fillna(0.0).clip(0.0, 100.0)
 
     @staticmethod
     def calculate_cci(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 20) -> pd.Series:
         """Commodity Channel Index (CCI)"""
-        return ta.cci(high, low, close, length=period)
+        try:
+            return _ta.cci(high, low, close, length=period)
+        except AttributeError:
+            return _cci(high, low, close, window=period)
 
 
 # Convenience functions for direct import

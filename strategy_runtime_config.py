@@ -30,10 +30,9 @@ class StrategyRuntimeConfig:
         mtf = dict(cfg.get("multi_timeframe", {}) or {})
 
         return cls(
-            # Read from strategies sub-dict (where these keys live in the YAML)
-            min_confidence=float(strategies_top.get("min_confidence", 0.40)),
+            min_confidence=float(cfg.get("min_confidence", 0.5)),
             max_risk_score=float(cfg.get("max_risk_score", 70)),
-            min_strategies_agree=int(strategies_top.get("min_strategies_agree", 1)),
+            min_strategies_agree=int(cfg.get("min_strategies_agree", 2)),
             max_positions=int(cfg.get("max_open_positions", 3)),
             max_daily_trades=int(cfg.get("max_daily_trades", 10)),
             independent_strategy_execution=bool(strategies_top.get("independent_strategy_execution", False)),

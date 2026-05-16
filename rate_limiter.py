@@ -151,17 +151,17 @@ class TokenBucketRateLimiter:
             logger.info(f"RateLimiter [{self.name}] reset")
 
 
-class BinanceRateLimiter:
+class BitkubRateLimiter:
     """
-    Binance Thailand rate limiter with separate limits for different endpoint types.
+    Bitkub-specific rate limiter with separate limits for different endpoint types.
 
-    Approximate rate limits:
+    Bitkub rate limits:
     - Public endpoints: 60 requests/minute
     - Authenticated endpoints: 30 requests/minute
     - Trading endpoints: 15 requests/minute
     """
 
-    # Rate limits (requests per second)
+    # Bitkub rate limits (requests per second)
     PUBLIC_RATE = 1.0  # 60/min = 1/sec
     AUTH_RATE = 0.5  # 30/min = 0.5/sec
     TRADING_RATE = 0.25  # 15/min = 0.25/sec
@@ -172,11 +172,10 @@ class BinanceRateLimiter:
         self.trading = TokenBucketRateLimiter(rate=self.TRADING_RATE, capacity=15, name="trading")
 
         logger.info(
-            "BinanceRateLimiter initialized: "
-            "public=%s/s, auth=%s/s, trading=%s/s",
-            self.PUBLIC_RATE,
-            self.AUTH_RATE,
-            self.TRADING_RATE,
+            f"BitkubRateLimiter initialized: "
+            f"public={self.PUBLIC_RATE}/s, "
+            f"auth={self.AUTH_RATE}/s, "
+            f"trading={self.TRADING_RATE}/s"
         )
 
     def acquire_public(self, blocking: bool = True, timeout: Optional[float] = 10.0) -> bool:
@@ -200,22 +199,18 @@ class BinanceRateLimiter:
         }
 
 
-# Legacy alias — use BinanceRateLimiter in new code.
-BitkubRateLimiter = BinanceRateLimiter
-
-
 # Global rate limiter instance
-_global_rate_limiter: Optional[BinanceRateLimiter] = None
+_global_rate_limiter: Optional[BitkubRateLimiter] = None
 _limiter_lock = threading.Lock()
 
 
-def get_rate_limiter() -> BinanceRateLimiter:
+def get_rate_limiter() -> BitkubRateLimiter:
     """Get or create global rate limiter instance."""
     global _global_rate_limiter
     if _global_rate_limiter is None:
         with _limiter_lock:
             if _global_rate_limiter is None:
-                _global_rate_limiter = BinanceRateLimiter()
+                _global_rate_limiter = BitkubRateLimiter()
     return _global_rate_limiter
 
 

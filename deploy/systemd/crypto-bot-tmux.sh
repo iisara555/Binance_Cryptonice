@@ -45,7 +45,7 @@ is_bot_running() {
 
 build_tmux_runner_command() {
     cat <<EOF
-bash -lc 'export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 PYTHONIOENCODING=utf-8 PYTHONUTF8=1; stty -echo; trap "exit 0" TERM; while true; do "${PYTHON_BIN}" "${BOT_ENTRY}"; exit_code=\$?; if [ "\${exit_code}" -eq 130 ] || [ "\${exit_code}" -eq 143 ]; then printf "\\n[%s] bot stopped with exit code %s; not restarting.\\n" "\$(date -Is)" "\${exit_code}"; exit 0; fi; printf "\\n[%s] bot exited with code %s; restarting in %ss...\\n" "\$(date -Is)" "\${exit_code}" "${RESTART_DELAY}"; sleep "${RESTART_DELAY}"; done'
+bash -lc 'stty -echo; trap "exit 0" TERM; while true; do "${PYTHON_BIN}" "${BOT_ENTRY}"; exit_code=\$?; if [ "\${exit_code}" -eq 130 ] || [ "\${exit_code}" -eq 143 ]; then printf "\\n[%s] bot stopped with exit code %s; not restarting.\\n" "\$(date -Is)" "\${exit_code}"; exit 0; fi; printf "\\n[%s] bot exited with code %s; restarting in %ss...\\n" "\$(date -Is)" "\${exit_code}" "${RESTART_DELAY}"; sleep "${RESTART_DELAY}"; done'
 EOF
 }
 

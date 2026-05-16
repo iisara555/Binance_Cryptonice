@@ -56,7 +56,7 @@ def _recover_bootstrap_strategy(bot: Any, symbol: str, restored_context: Dict[st
     return "bootstrap"
 
 
-_QUOTE_ASSETS_FOR_WALLET_BOOTSTRAP = frozenset({"USDT", "BUSD", "FDUSD", "EUR"})
+_QUOTE_ASSETS_FOR_WALLET_BOOTSTRAP = frozenset({"USDT", "THB", "BUSD", "FDUSD", "EUR"})
 _SYNTHETIC_ORDER_PREFIXES = ("bootstrap_", "manual_")
 
 
@@ -195,6 +195,8 @@ class StartupRuntimeHelper:
             p = str(raw or "").upper()
             if p.endswith("USDT") and "_" not in p:
                 return "USDT"
+            if p.startswith("THB_"):
+                return "THB"
         return "USDT"
 
     def _wallet_extra_bootstrap_pairs(self, balances: Dict[str, Any], base_pairs: List[str]) -> List[str]:
@@ -334,12 +336,12 @@ class StartupRuntimeHelper:
                 continue
 
             position_value = total_qty * entry_price
-            if position_value < self.bot.min_trade_value_usdt:
+            if position_value < self.bot.min_trade_value_thb:
                 logger.debug(
                     "[Bootstrap Positions] Skipping %s: value %.2f quote < min %.2f quote",
                     pair,
                     position_value,
-                    self.bot.min_trade_value_usdt,
+                    self.bot.min_trade_value_thb,
                 )
                 continue
 
@@ -356,12 +358,7 @@ class StartupRuntimeHelper:
 
             bootstrap_source = restored_context.get("source") or "estimated_from_ticker"
             strategy_source = _recover_bootstrap_strategy(self.bot, pair, restored_context)
-            _STRAT_DISPLAY_TO_KEY = {
-                "MacheteV8b": "machete_v8b",
-                "MacheteV8bLite": "machete_v8b_lite",
-                "SimpleScalp": "simple_scalp",
-                "SimpleScalpPlus": "simple_scalp_plus",
-            }
+            _STRAT_DISPLAY_TO_KEY = {"MacheteV8bLite": "machete_v8b_lite", "SimpleScalpPlus": "simple_scalp_plus"}
             entry_strategy_key = _STRAT_DISPLAY_TO_KEY.get(strategy_source, "")
             synthetic_id = f"bootstrap_{pair}_{int(datetime.now().timestamp())}"
             pos_data = {

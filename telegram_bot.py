@@ -119,6 +119,11 @@ def _normalize_ticker_symbol(symbol: str) -> str:
     raw = str(symbol or "").strip().upper()
     if not raw:
         return ""
+    if "_" in raw:
+        base, quote = raw.split("_", 1)
+        if quote == "THB":
+            return f"THB_{base}"
+        return raw
     if raw.endswith("USDT"):
         return raw
     return ""
@@ -129,6 +134,10 @@ def _extract_base_asset(symbol: str, quote_asset: str = "USDT") -> str:
     quote = str(quote_asset or "USDT").strip().upper()
     if not raw:
         return ""
+    if raw.startswith("THB_"):
+        return raw.split("_", 1)[1]
+    if raw.endswith("_THB"):
+        return raw.split("_", 1)[0]
     if quote and raw.endswith(quote):
         return raw[: -len(quote)]
     return raw
@@ -139,6 +148,8 @@ def _build_pair(base_asset: str, quote_asset: str = "USDT") -> str:
     quote = str(quote_asset or "USDT").strip().upper()
     if not base:
         return ""
+    if quote == "THB":
+        return f"THB_{base}"
     return f"{base}{quote}"
 
 
@@ -421,6 +432,8 @@ class TelegramBotHandler:
             text = str(pair or "").upper()
             if text.endswith("USDT"):
                 return "USDT"
+            if text.startswith("THB_") or text.endswith("_THB"):
+                return "THB"
         return "USDT"
 
     def _get_cached_price(self, symbol: str) -> Optional[float]:
@@ -429,7 +442,7 @@ class TelegramBotHandler:
         pair = _build_pair(symbol, quote_asset)
 
         cache = getattr(self.app_ref, "_cli_price_cache", {}) or {}
-        cached = cache.get(pair)
+        cached = cache.get(pair) or cache.get(f"THB_{str(symbol or '').upper()}")
         if isinstance(cached, tuple) and cached:
             try:
                 return float(cached[0]) if cached[0] is not None else None

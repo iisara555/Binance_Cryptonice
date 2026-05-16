@@ -1,4 +1,4 @@
-﻿"""
+"""
 Trading Bot Orchestrator
 ========================
 Main orchestrator that:
@@ -89,7 +89,7 @@ from trading.coercion import coerce_trade_float
 if TYPE_CHECKING:
     from monitoring import MonitoringService as _MonitoringServiceType
 
-    _WebSocketClientType = Any
+    _BitkubWebSocketType = Any
     _PriceTickType = Any
 
 # Runtime monitoring import (graceful fallback if module missing)
@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
 # Back-compat for tests/tools that imported the private symbol from this module.
 _coerce_trade_float = coerce_trade_float
 
-# WebSocket real-time price support — Binance native backend only
+# WebSocket real-time price support
 _WEBSOCKET_BACKEND = "none"
 _WEBSOCKET_CLIENT_INSTALLED = False
 try:
@@ -117,12 +117,20 @@ try:
     _WEBSOCKET_BACKEND = "binance_native"
     _WEBSOCKET_CLIENT_INSTALLED = bool(getattr(_binance_ws_mod, "WEBSOCKET_RUNTIME_OK", False))
 except ImportError:
-    _WEBSOCKET_AVAILABLE = False
-    get_websocket = None
-    stop_websocket = None
-    PriceTick = None
-    get_latest_ticker = None
-    logger.warning("No websocket backend available — falling back to REST polling")
+    try:
+        import bitkub_websocket as _bitkub_ws_mod
+        from bitkub_websocket import PriceTick, get_latest_ticker, get_websocket, stop_websocket
+
+        _WEBSOCKET_AVAILABLE = True
+        _WEBSOCKET_BACKEND = "bitkub_legacy"
+        _WEBSOCKET_CLIENT_INSTALLED = bool(getattr(_bitkub_ws_mod, "WEBSOCKET_RUNTIME_OK", False))
+    except ImportError:
+        _WEBSOCKET_AVAILABLE = False
+        get_websocket = None
+        stop_websocket = None
+        PriceTick = None
+        get_latest_ticker = None
+        logger.warning("No websocket backend available — falling back to REST polling")
 
 
 class TradingBotOrchestrator:
@@ -214,9 +222,9 @@ class TradingBotOrchestrator:
         if raw_min_trade_thb is None:
             raw_min_trade_thb = 15.0
         try:
-            self.min_trade_value_usdt = float(raw_min_trade_thb)
+            self.min_trade_value_thb = float(raw_min_trade_thb)
         except (TypeError, ValueError):
-            self.min_trade_value_usdt = 15.0
+            self.min_trade_value_thb = 15.0
 
         # Strategy config
         self.strategies_config = config.get("strategies", {})
@@ -337,7 +345,7 @@ class TradingBotOrchestrator:
         self._pause_reasons: Dict[str, str] = {}
 
         # === WebSocket Real-time Prices ===
-        self._ws_client: Optional[_WebSocketClientType] = None
+        self._ws_client: Optional[_BitkubWebSocketType] = None
         ws_cfg = config.get("websocket", {}) or {}
         self._ws_import_ok: bool = bool(_WEBSOCKET_AVAILABLE and _WEBSOCKET_CLIENT_INSTALLED)
         self._ws_enabled: bool = bool(ws_cfg.get("enabled", True))

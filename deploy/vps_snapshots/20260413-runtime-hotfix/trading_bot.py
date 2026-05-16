@@ -3246,9 +3246,9 @@ class TradingBotOrchestrator:
         return self._format_alert_block(
             f"📤 <b>Position Closed</b>  {coin}  ({trigger_label})",
             [
-                f"Entry <code>{entry_price:,.0f}</code> -> Exit <code>{exit_price:,.0f}</code>",
-                f"{pnl_emoji} PnL <code>{net_pnl:+,.0f}</code> THB ({net_pnl_pct:+.2f}%)",
-                f"Fees <code>{total_fees:,.0f}</code> THB",
+                f"Entry <code>{entry_price:,.4f}</code> -> Exit <code>{exit_price:,.4f}</code>",
+                f"{pnl_emoji} PnL <code>{net_pnl:+,.2f}</code> USDT ({net_pnl_pct:+.2f}%)",
+                f"Fees <code>{total_fees:.4f}</code> USDT",
             ],
             now=now,
         )

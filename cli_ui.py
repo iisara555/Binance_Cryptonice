@@ -1,4 +1,4 @@
-﻿"""Rich-powered terminal command center for the crypto bot."""
+"""Rich-powered terminal command center for the crypto bot."""
 
 from __future__ import annotations
 
@@ -56,8 +56,8 @@ class _UILogBufferHandler(logging.Handler):
 class CLICommandCenter:
     """Render a live terminal dashboard using Rich."""
 
-    _NOISY_INFO_LOGGERS = {"signal_flow", "binance_websocket", "websocket"}
-    _CASH_ASSETS = {"USDT"}
+    _NOISY_INFO_LOGGERS = {"signal_flow", "legacy_bitkub_websocket", "bitkub_websocket", "websocket"}
+    _CASH_ASSETS = {"USDT", "THB"}
     _GREEN = "#10b981"
     _MINT = _GREEN
     _RED = "#ef4444"
@@ -275,7 +275,7 @@ class CLICommandCenter:
                         "timestamp": ts,
                         "level": "WARNING",
                         "tag": "UI  ",
-                        "emoji": "(!)",
+                        "emoji": "⚠️",
                         "message": f"Dropped {dropped_count} log record(s) due to dashboard lock contention",
                     }
                 )

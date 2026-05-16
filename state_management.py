@@ -13,7 +13,7 @@ logger = logging.getLogger("crypto-bot.state")
 
 
 def normalize_buy_quantity(amount: float, entry_price: float, total_entry_cost: float) -> float:
-    """Normalize BUY-side quantity when quote spend is accidentally stored as base amount."""
+    """Normalize BUY-side quantity when THB spend is accidentally stored as base amount."""
     raw_amount = float(amount or 0.0)
     raw_price = float(entry_price or 0.0)
     raw_cost = float(total_entry_cost or 0.0)
@@ -211,12 +211,7 @@ class TradeStateManager:
     @staticmethod
     def _infer_signal_source_from_pos(pos: Dict[str, Any]) -> str:
         """Return strategy key inferred from pos dict when trade_states has no signal_source."""
-        _DISPLAY_MAP = {
-            "MacheteV8b": "machete_v8b",
-            "MacheteV8bLite": "machete_v8b_lite",
-            "SimpleScalp": "simple_scalp",
-            "SimpleScalpPlus": "simple_scalp_plus",
-        }
+        _DISPLAY_MAP = {"MacheteV8bLite": "machete_v8b_lite", "SimpleScalpPlus": "simple_scalp_plus"}
         key = str(pos.get("entry_strategy_key") or "").strip()
         if key and key not in ("-", "bootstrap", "manual"):
             return key

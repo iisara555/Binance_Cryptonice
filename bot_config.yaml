@@ -18,13 +18,12 @@
 # - monitoring reconciliation: exchange-agnostic (via api_client).
 # - rebalance: exchange-agnostic; use USDT in targets if your book is USDT-quoted.
 
-# API Keys — PLACEHOLDER block only. Real secrets must be set in .env (never commit .env).
-# The values here are ignored by the Binance runtime; only .env / os.environ is read by config.py.
+# API Keys (optional fallbacks; exchange secrets live in .env)
 api_keys:
-  binance_api_key: "SET_IN_DOT_ENV_NOT_HERE"
-  binance_secret_key: "SET_IN_DOT_ENV_NOT_HERE"
-  bitkub_api_key: "LEGACY_UNUSED"
-  bitkub_secret_key: "LEGACY_UNUSED"
+  binance_api_key: "YOUR_BINANCE_API_KEY"
+  binance_secret_key: "YOUR_BINANCE_SECRET_KEY"
+  bitkub_api_key: "YOUR_BITKUB_API_KEY"
+  bitkub_secret_key: "YOUR_BITKUB_SECRET_KEY"
   telegram_bot_token: ""
   telegram_chat_id: ""
 
@@ -81,7 +80,7 @@ strategy_mode:
     min_strategies_agree: 1
     confirmations_required: 1
     confirmation_window_seconds: 90
-    pending_buy_timeout_seconds: 60
+    pending_buy_timeout_seconds: 90
     pending_sell_timeout_seconds: 60
     stop_loss_pct: 1.0              # ← ค่าที่ใช้จริง (scalping mode signal SL)
     take_profit_pct: 3.0             # ← ค่าที่ใช้จริง (scalping mode signal TP)  net R:R≈1.67
@@ -106,9 +105,9 @@ strategy_mode:
 mode_indicator_profiles:
 
   scalping:
-    # Active strategies: machete_v8b (full) + simple_scalp_plus.
-    # machete_v8b_lite and simple_scalp are registered but inactive — opt in via this list if needed.
-    active_strategies: ["machete_v8b", "simple_scalp_plus"]
+    # AUDIT FIX: dropped legacy "scalping" strategy — its always-on signaling was
+    # the single biggest loss source. Keeping the rebuilt SimpleScalpPlus + Sniper.
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "15m"
     min_confidence: 0.40                  # AUDIT FIX: was 0.30 — require stronger conviction
@@ -123,7 +122,8 @@ mode_indicator_profiles:
     min_hold_seconds: 30
 
   trend_only:
-    active_strategies: ["machete_v8b", "simple_scalp_plus"]
+    # AUDIT FIX: dropped legacy trend_following / breakout from default profile.
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
@@ -136,7 +136,8 @@ mode_indicator_profiles:
     min_hold_seconds: 300
 
   standard:
-    active_strategies: ["machete_v8b", "simple_scalp_plus"]
+    # AUDIT FIX: dropped 4 legacy strategies that historically pyramided into trends.
+    active_strategies: ["machete_v8b_lite", "simple_scalp_plus"]
     primary_timeframe: "15m"
     confirm_timeframe: "1h"
     min_confidence: 0.40                  # AUDIT FIX: was 0.35
@@ -254,7 +255,7 @@ risk:
   # max_slippage_pct:
   #   scalping: 0.30
   use_dynamic_sl_tp: true            # When true + sl_tp_percent_source_when_dynamic=volatility → table % for path (3)
-  sl_tp_percent_source_when_dynamic: volatility  # volatility | risk_config (main sets risk_config for scalping/trend_only)
+  sl_tp_percent_source_when_dynamic: risk_config  # was volatility — scalping SL 1% now respected
   atr_multiplier: 2.5                # 2.5x ATR for dynamic SL/TP (path 2 and RiskManager.calc_sl_tp_from_atr fallback)
   atr_period: 14                     # ATR lookback period
   # AUDIT FIX: enable per-pair loss-streak protection so we stop bleeding into the same losing pair.
@@ -273,7 +274,7 @@ pre_trade_gate:
 # here only after a 2-week paper trade window confirms behaviour.
 strategies:
   enabled:
-    - "machete_v8b"
+    - "machete_v8b_lite"
     - "simple_scalp_plus"
   min_confidence: 0.40               # AUDIT FIX: was 0.35 — require stronger conviction
   min_strategies_agree: 1            # Minimum strategies that must agree before a trade is allowed
@@ -294,20 +295,20 @@ strategies:
   machete_v8b_lite:
     enabled: true
     cool_down_minutes: 15          # per-strategy cooldown (trend — longer)
-    adx_threshold: 12.0
+    adx_threshold: 18.0
     atr_multiplier: 1.8
     risk_reward: 2.0
     min_buy_confidence: 0.65
     min_confirmations_buy: 3
     min_confirmations_sell: 2
-    vol_threshold: 0.8
+    vol_threshold: 0.75
     ssl_period: 10
     rmi_period: 14
     rmi_momentum: 5
-    rmi_buy_min: 52.0
+    rmi_buy_min: 50.0
     atr_volatility_cap_pct: 4.0
     sr_lookback: 50
-    sr_proximity_pct: 2.0
+    sr_proximity_pct: 1.0
     primary_timeframe: "15m"
     informative_timeframe: "1h"
     enable_relaxed_confirmation: true
@@ -322,8 +323,8 @@ strategies:
     ema_fast: 9
     ema_slow: 21
     rsi_period: 14
-    rsi_buy_min: 50
-    rsi_buy_max: 70
+    rsi_buy_min: 30
+    rsi_buy_max: 60
     rsi_sell_max: 48
     adx_period: 14
     adx_threshold: 18.0
@@ -334,48 +335,16 @@ strategies:
     stoch_buy_k_min: 20
     stoch_buy_k_max: 80
     stoch_sell_k_max: 80
-    volume_threshold: 1.05
+    volume_threshold: 1.0
     atr_multiplier: 1.2
     risk_reward: 1.8
     min_buy_confidence: 0.70
-    min_confirmations_buy: 5
-    min_confirmations_sell: 4
+    min_confirmations_buy: 4
+    min_confirmations_sell: 3
     primary_timeframe: "5m"
     informative_timeframe: "15m"
     # SL/TP จริงคำนวณจาก atr_multiplier (1.2) × ATR และ risk_reward (1.8) ด้านบน
     # ไม่มี fixed-pct SL สำหรับ strategy นี้
-  simple_scalp:
-    enabled: true
-    timeframe: "5m"
-    confirm_timeframe: "15m"
-    ema_period: 21
-    stoch_rsi_period: 14
-    stoch_rsi_smooth: 3
-    adx_period: 14
-    adx_threshold: 20
-    stoch_oversold: 30
-    stoch_overbought: 70
-    stop_loss_pct: 1.0               # FIXED: was 4.0 — SL/TP were inverted (R:R was 0.25, structurally losing)
-    take_profit_pct: 2.0             # FIXED: was 1.0 — now R:R=2.0, aligned with scalping mode
-    risk_per_trade_pct: 2.0
-  machete_v8b:
-    enabled: true
-    timeframe: "15m"
-    informative_timeframe: "1h"
-    stoploss: -0.10                  # Strategy-level hard SL (-10%). Wide by design — machete_v8b is a swing/multi-hour
-                                     # strategy; runtime scalping SL (1%) applies to the position level separately.
-    signals:
-      quickie: true
-      scalp: true
-      adx_smas: true
-      awesome_macd: true
-      gettin_moist: true
-      hlhb: true
-    minimal_roi:
-      "0":   0.279
-      "92":  0.109
-      "245": 0.059
-      "561": 0.0
 
 # Auto Trader Settings (Full Auto Mode)
 auto_trader:
@@ -389,7 +358,7 @@ auto_trader:
   # Auto stop loss / take profit
   stop_loss:
     mode: "atr"                      # "atr", "fixed_pct", "trailing"
-    atr_multiplier: 1.5              # AUDIT FIX: was 1.0 — 1.0x ATR was getting stopped out by noise
+    atr_multiplier: 2.5              # SYNC: was 1.5 — now matches risk.atr_multiplier
     fixed_pct: 5.0                   # Fixed % for SL (if mode=fixed)
   take_profit:
     mode: "risk_reward"              # "atr", "fixed_pct", "risk_reward"
@@ -475,9 +444,9 @@ data:
   collect_interval_seconds: 60       # Interval for data collector loop
   hybrid_dynamic_coin_config:
     whitelist_json_path: "coin_whitelist.json"  # External whitelist source (JSON); also drives symbol_registry THB_* → *USDT map
-    min_quote_balance_usdt: 10.0     # Minimum USDT balance before opening a new BUY on a new pair
+    min_quote_balance_thb: 100.0     # Legacy key name: min quote (USDT for *USDT pairs) before opening a new BUY
     # Minimum USDT to attach whitelist pairs to runtime (WS, collector, trading_pairs). Can be below min_quote_balance_thb for small accounts.
-    min_quote_balance_for_pairs: 10.0
+    min_quote_balance_for_pairs: 0.0
     require_supported_market: true   # Drop whitelist entries not on Binance.th exchangeInfo
     include_assets_with_balance: true  # Keep whitelisted coins with real holdings even if quote (e.g. USDT) balance is low
     hot_reload_enabled: true         # Watch the JSON whitelist and refresh runtime pairs without restart
@@ -503,7 +472,7 @@ candle_retention:
 # Portfolio
 portfolio:
   initial_balance: 42.0            # Initial balance (for simulation)
-  min_balance_threshold: 40.0       # FLOOR — dynamic sets 80% of current NAV at runtime (DynamicRiskConfig)
+  min_balance_threshold: 35.0       # FLOOR — dynamic sets 80% of current NAV at runtime (DynamicRiskConfig)
   read_only: false                  # Mirror top-level read_only; executor reads top-level + BOT_READ_ONLY env
   persist_path: "portfolio_state.json"  # Persist rebalancer state (cooldown survives restart)
 
@@ -519,7 +488,7 @@ rebalance:
   # Environment overrides supported:
   #   REBALANCE_TARGET_ALLOCATION=USDT:20,BTC:50,DOGE:30
   #   REBALANCE_TARGET_<ASSET>=<percent>
-  #   REBALANCE_CASH_ASSETS=USDT
+  #   REBALANCE_CASH_ASSETS=USDT,THB
   #   REBALANCE_SIDEWAYS_EXPOSURE_FACTOR=0.5
   
   # How often to check for rebalance (every N main loop iterations)
@@ -555,7 +524,6 @@ rebalance:
     USDT: 20.0
     BTC: 35.0
     ETH: 20.0
-    POL: 15.0
     DOGE: 10.0
   
   # Minimum trade value to execute (avoid tiny trades)

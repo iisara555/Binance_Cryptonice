@@ -33,7 +33,7 @@ MIN_CANDLES_FOR_TRADING = 1000
 # Database path (can be overridden via config)
 DEFAULT_DB_PATH = "crypto_bot.db"
 DEFAULT_QUOTE_ASSET = "USDT"
-_CASH_ASSETS = {"USDT"}
+_CASH_ASSETS = {"USDT", "THB"}
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -181,7 +181,7 @@ def get_candle_count(symbol: str, db_path: str = DEFAULT_DB_PATH) -> Tuple[int, 
         raw_symbol = str(symbol or "").upper()
         db_symbols = [raw_symbol] if raw_symbol else []
         if raw_symbol and "_" not in raw_symbol and not raw_symbol.endswith(DEFAULT_QUOTE_ASSET):
-            db_symbols.extend([f"{raw_symbol}{DEFAULT_QUOTE_ASSET}"])
+            db_symbols.extend([f"{raw_symbol}{DEFAULT_QUOTE_ASSET}", f"THB_{raw_symbol}"])
         if not db_symbols:
             return 0, False, "No symbol"
 
@@ -1136,7 +1136,7 @@ class PortfolioRebalancer:
                     if key not in seen or abs(o.quantity) > abs(seen[key].quantity):
                         seen[key] = o
                 orders = list(seen.values())
-                # Execute SELL orders before BUY orders to free up capital
+                # FIX: Execute SELL orders BEFORE BUY orders to free up capital
                 orders.sort(key=lambda x: (0 if x.side == "sell" else 1, -x.priority))
 
         if trigger_override is not None:

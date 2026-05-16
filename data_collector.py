@@ -29,7 +29,6 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 import requests
-from requests.adapters import HTTPAdapter
 
 from database import get_database
 
@@ -269,14 +268,6 @@ class BinanceThCollector:
         except (TypeError, ValueError):
             self._backfill_max_pages = 200
 
-        # Persistent HTTP session with connection pooling — avoids TCP+TLS
-        # handshake per request.  Pool is sized for concurrent multi-pair,
-        # multi-timeframe collection.
-        self._session = requests.Session()
-        _adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8)
-        self._session.mount("https://", _adapter)
-        self._session.mount("http://", _adapter)
-
         logger.info("BinanceThCollector initialized with pairs: %s", self.pairs)
 
     def set_pairs(self, pairs: List[str]) -> None:
@@ -365,7 +356,7 @@ class BinanceThCollector:
         if end_time_ms is not None:
             params["endTime"] = int(end_time_ms)
         try:
-            response = self._session.get(url, params=params, timeout=10)
+            response = requests.get(url, params=params, timeout=10)
             self._check_rate_limit(response)
             response.raise_for_status()
             data = response.json()
@@ -619,7 +610,7 @@ class BinanceThCollector:
         """
         url = f"{self.BASE_URL}/api/v1/ticker/24hr"
         try:
-            response = self._session.get(
+            response = requests.get(
                 url,
                 params={"symbol": str(symbol).upper()},
                 timeout=10,

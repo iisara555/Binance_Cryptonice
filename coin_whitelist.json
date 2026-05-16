@@ -3,7 +3,7 @@
   "quote_asset": "USDT",
   "min_quote_balance_usdt": 10.0,
   "require_supported_market": true,
-  "include_assets_with_balance": false,
+  "include_assets_with_balance": true,
   "assets": [
     {
       "symbol": "BTC",

@@ -1071,7 +1071,7 @@ def check_pair_correlation(
                         f"and open position {held_symbol} (threshold {threshold})"
                     )
                     _diag(candidate_symbol, "RiskMgr:Correlation", "REJECT", reason)
-                    logger.info("[LNK] [Correlation Guard] %s", reason)
+                    logger.info("🔗 [Correlation Guard] %s", reason)
                     return RiskCheckResult(False, reason)
 
             except Exception as exc:

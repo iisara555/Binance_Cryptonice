@@ -17,16 +17,6 @@ import shlex
 import sys
 import threading
 import time
-
-# Force UTF-8 I/O on VPS terminals that default to ASCII/Latin-1.
-# Must run before any logging or print calls.
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-del _stream
 from datetime import datetime, timedelta, timezone
 from os import PathLike
 from pathlib import Path
@@ -71,7 +61,6 @@ from process_guard import acquire_bot_lock, get_lock_status, release_bot_lock
 from risk_management import RiskManager
 from signal_generator import (
     SignalGenerator,
-    build_signal_generator_config,
     ensure_signal_flow_record,
     get_latest_signal_flow_snapshot,
 )
@@ -1199,8 +1188,26 @@ class TradingBotApp:
 
             # Restart signal generator with new strategy config
             if self.signal_generator:
+                strategies_config = self.config.get("strategies", {})
                 self.signal_generator = SignalGenerator(
-                    build_signal_generator_config(self.config)
+                    {
+                        "risk": dict(self.config.get("risk", {}) or {}),
+                        "min_confidence": strategies_config.get("min_confidence", 0.5),
+                        "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
+                        "max_open_positions": self.config.get("risk", {}).get("max_open_positions", 3),
+                        "max_daily_trades": self.config.get("risk", {}).get("max_daily_trades", 10),
+                        "strategies": {
+                            "enabled": list(strategies_config.get("enabled") or []),
+                        },
+                        "mode_indicator_profiles": dict(self.config.get("mode_indicator_profiles", {}) or {}),
+                        "scalping": strategies_config.get("scalping", {}),
+                        "sniper": strategies_config.get("sniper", {}) or strategies_config.get("scalping", {}),
+                        "machete_v8b_lite": strategies_config.get("machete_v8b_lite", {}),
+                        "simple_scalp_plus": strategies_config.get("simple_scalp_plus", {}),
+                        "trend_following": strategies_config.get("trend_following", {}),
+                        "mean_reversion": strategies_config.get("mean_reversion", {}),
+                        "breakout": strategies_config.get("breakout", {}),
+                    }
                 )
                 if self.signal_generator.set_database:
                     from database import get_database
@@ -1735,7 +1742,7 @@ class TradingBotApp:
             _dynamic = _compute_dyn_risk(self._app_startup_nav, _dyn_input)
             _apply_dyn_risk(self.config, _dynamic)
             logger.info(
-                "[DC] DynamicConfig nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
+                "📐 DynamicConfig nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
                 self._app_startup_nav,
                 _dynamic["max_position_per_trade_pct"],
                 _dynamic["max_open_positions"],
@@ -1751,8 +1758,27 @@ class TradingBotApp:
         logger.info("Risk Manager initialized")
 
         # 3. Initialize Signal Generator
+        strategies_config = self.config.get("strategies", {})
+        risk_section = dict(self.config.get("risk", {}) or {})
         self.signal_generator = SignalGenerator(
-            build_signal_generator_config(self.config)
+            {
+                "risk": risk_section,
+                "min_confidence": strategies_config.get("min_confidence", 0.5),
+                "min_strategies_agree": strategies_config.get("min_strategies_agree", 2),
+                "max_open_positions": risk_section.get("max_open_positions", 3),
+                "max_daily_trades": risk_section.get("max_daily_trades", 10),
+                "strategies": {
+                    "enabled": list(strategies_config.get("enabled") or []),
+                },
+                "mode_indicator_profiles": dict(self.config.get("mode_indicator_profiles", {}) or {}),
+                "scalping": strategies_config.get("scalping", {}),
+                "sniper": strategies_config.get("sniper", {}) or strategies_config.get("scalping", {}),
+                "machete_v8b_lite": strategies_config.get("machete_v8b_lite", {}),
+                "simple_scalp_plus": strategies_config.get("simple_scalp_plus", {}),
+                "trend_following": strategies_config.get("trend_following", {}),
+                "mean_reversion": strategies_config.get("mean_reversion", {}),
+                "breakout": strategies_config.get("breakout", {}),
+            }
         )
         logger.info("Signal Generator initialized")
 

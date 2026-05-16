@@ -113,15 +113,7 @@ class BinanceWebSocket:
     INITIAL_RECONNECT_DELAY = 1.0
     MAX_RECONNECT_DELAY = 60.0
     BACKOFF_MULTIPLIER = 2.0
-    # FIX: 60s interval — websocket-client requires ping_interval > ping_timeout.
-    #      30s was equal to PING_TIMEOUT causing a constant validation error.
-    HEARTBEAT_INTERVAL = 60.0
-    # FIX: 30s timeout — VPS ↔ Thailand round-trip can spike under load; 10s caused
-    #      false-positive timeouts that silently reconnect-looped the bot.
-    PING_TIMEOUT = 30.0
-    # Stale-data watchdog: force reconnect if no ticker message arrives within this window.
-    # Catches "zombie connected" state where ping/pong succeeds but data stream has died.
-    STALE_DATA_TIMEOUT = 60.0  # M2 FIX: 60s = 2× heartbeat intervals (was 90s)
+    HEARTBEAT_INTERVAL = 20.0
 
     def __init__(self, symbols: List[str], on_tick: Callable[[PriceTick], None]) -> None:
         self.symbols = [str(s or "").upper() for s in symbols if str(s or "").strip()]
@@ -131,9 +123,7 @@ class BinanceWebSocket:
 
         self._state = ConnectionState.DISCONNECTED
         self._state_lock = threading.RLock()
-        # R4 FIX: _stop_event is the single source of truth for shutdown signaling.
-        # _running is a derived convenience property backed by _stop_event.
-        self._stop_event = threading.Event()  # set() = request stop
+        self._running = False
         self._thread: Optional[threading.Thread] = None
         self.ws: Optional[Any] = None
         self._wakeup_event = threading.Event()
@@ -164,11 +154,6 @@ class BinanceWebSocket:
         streams = [f"{symbol.lower()}@ticker" for symbol in self.symbols]
         return f"{self.endpoint}?streams={'/'.join(streams)}"
 
-    @property
-    def _running(self) -> bool:
-        """Backward-compatible flag derived from _stop_event."""
-        return not self._stop_event.is_set() and self._thread is not None and self._thread.is_alive()
-
     def start(self) -> None:
         if not websocket:
             self._set_state(ConnectionState.FAILED)
@@ -185,7 +170,7 @@ class BinanceWebSocket:
             logger.warning("[BINANCE-WS] No symbols configured")
             return
 
-        self._stop_event.clear()
+        self._running = True
         self._wakeup_event.clear()
         self._set_state(ConnectionState.CONNECTING)
         logger.info("[BINANCE-WS] Stream base %s | symbols=%s", self.endpoint, self.symbols)
@@ -193,9 +178,8 @@ class BinanceWebSocket:
         self._thread.start()
 
     def _run_forever(self) -> None:
-        while not self._stop_event.is_set():
+        while self._running:
             self._set_state(ConnectionState.CONNECTING)
-            self._last_activity_time = time.time()  # reset on each connect attempt
             try:
                 self.ws = websocket.WebSocketApp(  # type: ignore[union-attr]
                     self._stream_url(),
@@ -204,38 +188,21 @@ class BinanceWebSocket:
                     on_error=self._on_error,
                     on_close=self._on_close,
                 )
-                # FIX 1: ping_payload removed — Binance.th servers do not respond to
-                #         text-payload PINGs; the library never received a PONG and
-                #         fired WebSocketTimeoutException after ping_timeout seconds,
-                #         causing a constant reconnect loop.
-                # FIX 2: ping_timeout raised to 30s — VPS ↔ Thailand RTT can spike;
-                #         10s was producing false-positive timeout disconnects.
                 self.ws.run_forever(  # type: ignore[union-attr]
                     ping_interval=self.HEARTBEAT_INTERVAL,
-                    ping_timeout=self.PING_TIMEOUT,
+                    ping_timeout=10.0,
+                    ping_payload="ping",
                 )
             except Exception as exc:
                 self._stats["last_error"] = str(exc)
                 logger.error("[BINANCE-WS] run_forever error: %s", exc)
 
-            if self._stop_event.is_set():
+            if not self._running:
                 break
-
-            # FIX 3: Stale-data watchdog — if the connection dropped because data stopped
-            # (zombie state), back off normally. If we've been receiving data recently,
-            # reconnect immediately (likely a server-side reset, not a bot error).
-            idle_secs = time.time() - float(self._last_activity_time or 0.0)
-            if idle_secs < self.STALE_DATA_TIMEOUT:
-                # Recent data before disconnect → server reset; reconnect fast
-                self._reconnect_delay = self.INITIAL_RECONNECT_DELAY
-                logger.info(
-                    "[BINANCE-WS] Connection reset after %.0fs of activity — reconnecting immediately",
-                    idle_secs,
-                )
             self._set_state(ConnectionState.RECONNECTING)
             delay = min(self._reconnect_delay, self.MAX_RECONNECT_DELAY)
             self._stats["reconnections"] += 1
-            logger.warning("[BINANCE-WS] Reconnecting in %.1fs (idle=%.0fs)", delay, idle_secs)
+            logger.warning("[BINANCE-WS] Reconnecting in %.1fs", delay)
             if self._wakeup_event.wait(delay):
                 break
             self._reconnect_delay = min(self._reconnect_delay * self.BACKOFF_MULTIPLIER, self.MAX_RECONNECT_DELAY)
@@ -247,11 +214,7 @@ class BinanceWebSocket:
         logger.info("[BINANCE-WS] Connected symbols=%s", self.symbols)
 
     def _extract_payload(self, message: str) -> Optional[Dict[str, Any]]:
-        # M1 FIX: guard against non-JSON frames (ping texts, control messages, etc.)
-        try:
-            data = json.loads(message)
-        except (ValueError, TypeError):
-            return None
+        data = json.loads(message)
         if isinstance(data, dict) and isinstance(data.get("data"), dict):
             return data["data"]
         if isinstance(data, dict):
@@ -311,7 +274,7 @@ class BinanceWebSocket:
 
     def _on_close(self, _ws: Any, code: Any, reason: Any) -> None:
         logger.info("[BINANCE-WS] Closed code=%s reason=%s", code, reason)
-        if not self._stop_event.is_set():
+        if self._running:
             self._set_state(ConnectionState.RECONNECTING)
         else:
             self._set_state(ConnectionState.DISCONNECTED)
@@ -341,7 +304,7 @@ class BinanceWebSocket:
         }
 
     def stop(self) -> None:
-        self._stop_event.set()
+        self._running = False
         self._wakeup_event.set()
         try:
             if self.ws:

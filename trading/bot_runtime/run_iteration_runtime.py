@@ -27,7 +27,7 @@ def _try_dynamic_risk_recompute(bot: Any) -> None:
 
         apply_dynamic_risk_to_manager(bot.risk_manager, dynamic)
         logger.info(
-            "[DC] DynamicConfig updated: nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
+            "📐 DynamicConfig updated: nav=%.2f pos=%.0f%% slots=%d floor=%.2f",
             current_nav,
             dynamic["max_position_per_trade_pct"],
             dynamic["max_open_positions"],
@@ -49,7 +49,7 @@ def _resolve_active_pairs_for_iteration(bot: Any, *, allow_refresh: bool) -> lis
             skipped = [p for p in trading_pairs if p not in active_pairs]
             skipped_key = tuple(skipped)
             if skipped_key != bot._last_portfolio_guard_skipped:
-                logger.info("[RG]️  [Portfolio Guard] Skipping never-held pairs: %s", skipped)
+                logger.info("🛡️  [Portfolio Guard] Skipping never-held pairs: %s", skipped)
                 bot._last_portfolio_guard_skipped = skipped_key
         else:
             bot._last_portfolio_guard_skipped = ()

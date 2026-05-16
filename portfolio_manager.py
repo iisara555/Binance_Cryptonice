@@ -37,6 +37,7 @@ def _to_float(value: Decimal) -> float:
 
 # Decimal display precision by asset.
 ASSET_DECIMALS = {
+    "THB": 2,  # Thai Baht: 2 decimal places
     "BTC": 8,  # Bitcoin: 8 decimal places
     "ETH": 8,  # Ethereum: 8 decimal places
     "XRP": 0,  # Ripple: 0 decimal places
