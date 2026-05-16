@@ -70,3 +70,7 @@ bot.pid
 # Secrets (local overrides)
 secrets/
 personal/
+
+# Local datasets / exports (not versioned)
+/backtest_data_15m.csv
+/btc_15m_vibe.csv
