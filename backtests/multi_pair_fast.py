@@ -5,14 +5,14 @@ Last 90 candles (~3 months) per pair, lean grid.
 """
 import ccxt, pandas as pd, numpy as np, time, itertools, warnings, os
 warnings.filterwarnings('ignore')
-os.chdir('/root/Crypto_Sniper')
+os.chdir(_REPO)
 
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ADA/USDT', 'DOGE/USDT']
 TIMEFRAME = '15m'
 CANDLES_LIMIT = 2000  # last 2000 candles ≈ 20 days (enough for 15m)
 CAPITAL = 10000.0
 
-DATA_DIR = '/root/Crypto_Sniper/multi_pair_data'
+DATA_DIR = str(_REPO / 'multi_pair_data')
 os.makedirs(DATA_DIR, exist_ok=True)
 
 exchange = ccxt.binance()

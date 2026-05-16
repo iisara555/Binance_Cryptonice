@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Step 2: Fast backtest with reduced data and lean param sweep."""
 import sys, os, itertools, time
-os.chdir('/root/Crypto_Sniper')
-sys.path.insert(0, '/root/Crypto_Sniper')
+os.chdir(_REPO)
+sys.path.insert(0, str(_REPO))
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ from strategies.machete_v8b_lite import MacheteV8bLite
 from strategies.simple_scalp_plus import SimpleScalpPlus
 
 # ── Load data, use only last N candles ────────────────────────────────────────
-raw = pd.read_csv('/root/Crypto_Sniper/backtest_data_15m.csv', index_col='timestamp', parse_dates=True)
+raw = pd.read_csv(str(_REPO / 'backtest_data_15m.csv'), index_col='timestamp', parse_dates=True)
 # Use last 180 candles (~45 hours of 15m data) to keep backtest fast
 N = min(180, len(raw))
 data = raw.tail(N).copy()

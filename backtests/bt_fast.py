@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fast backtest - fixed Fisher, minimal combos."""
 import sys, os, itertools, time
-os.chdir('/root/Crypto_Sniper')
-sys.path.insert(0, '/root/Crypto_Sniper')
+os.chdir(_REPO)
+sys.path.insert(0, str(_REPO))
 import warnings; warnings.filterwarnings('ignore')
 import numpy as np, pandas as pd
 
-raw = pd.read_csv('/root/Crypto_Sniper/backtest_data_15m.csv', index_col='timestamp', parse_dates=True)
+raw = pd.read_csv(str(_REPO / 'backtest_data_15m.csv'), index_col='timestamp', parse_dates=True)
 N = min(200, len(raw))
 data = raw.tail(N).copy()
 print(f"[DATA] {len(data)} candles: {data.index[0].strftime('%m/%d %H:%M')} → {data.index[-1].strftime('%m/%d %H:%M')}")

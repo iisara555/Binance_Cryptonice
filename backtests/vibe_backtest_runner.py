@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Save BTC/USDT 15m data from vibe-trading MCP to CSV, then run backtest."""
 import sys, os, json, time
-os.chdir('/root/Crypto_Sniper')
-sys.path.insert(0, '/root/Crypto_Sniper')
+os.chdir(_REPO)
+sys.path.insert(0, str(_REPO))
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,7 @@ from strategies.simple_scalp_plus import SimpleScalpPlus
 
 # ── Save fetched data to CSV ──────────────────────────────────────────────────
 # (Data already saved by previous run, just reload)
-CSV_PATH = '/root/Crypto_Sniper/btc_15m_vibe.csv'
+CSV_PATH = str(_REPO / 'btc_15m_vibe.csv')
 
 def save_data(candles):
     """Convert vibe-trading candle list to CSV."""

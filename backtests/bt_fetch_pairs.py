@@ -10,7 +10,7 @@ symbol_map = {
     'ADA/USDT': 'ADA_USDT_15m.csv',
     'DOGE/USDT': 'DOGE_USDT_15m.csv',
 }
-data_dir = '/root/Crypto_Sniper/multi_pair_data'
+data_dir = str(_REPO / 'multi_pair_data')
 os.makedirs(data_dir, exist_ok=True)
 
 since_ts = int(pd.Timestamp('2025-11-01').timestamp() * 1000)

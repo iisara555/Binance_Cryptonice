@@ -5,7 +5,7 @@ Finds the BEST config per pair for both Machete and SimpleScalp+.
 """
 import ccxt, pandas as pd, numpy as np, time, itertools, warnings, os
 warnings.filterwarnings('ignore')
-os.chdir('/root/Crypto_Sniper')
+os.chdir(_REPO)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ADA/USDT', 'DOGE/USDT']
@@ -15,7 +15,7 @@ UNTIL  = '2026-05-13'
 CAPITAL = 10000.0
 
 # ── Fetch all pairs ───────────────────────────────────────────────────────────
-DATA_DIR = '/root/Crypto_Sniper/multi_pair_data'
+DATA_DIR = str(_REPO / 'multi_pair_data')
 os.makedirs(DATA_DIR, exist_ok=True)
 
 exchange = ccxt.binance()

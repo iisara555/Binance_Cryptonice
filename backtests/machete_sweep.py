@@ -6,11 +6,11 @@ Compares Best WR vs Best Score configs.
 import sys, time
 import numpy as np
 import pandas as pd
-sys.path.insert(0, '/root/Crypto_Sniper')
+sys.path.insert(0, str(_REPO))
 
 # Load data
-btc = pd.read_csv('/root/Crypto_Sniper/btc_15m_vibe.csv', parse_dates=['timestamp'])
-eth = pd.read_csv('/root/Crypto_Sniper/multi_pair_data/ETH_USDT_15m.csv', parse_dates=['timestamp'])
+btc = pd.read_csv(str(_REPO / 'btc_15m_vibe.csv'), parse_dates=['timestamp'])
+eth = pd.read_csv(str(_REPO / 'multi_pair_data/ETH_USDT_15m.csv'), parse_dates=['timestamp'])
 for df in [btc, eth]:
     df.sort_values('timestamp', inplace=True)
     df.reset_index(drop=True, inplace=True)

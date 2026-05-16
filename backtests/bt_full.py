@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Backtest SOL/ADA/DOGE — vectorized, same TA as vibe_backtest_runner.py"""
+"""Full backtest SOL/ADA/DOGE — 18,544 candles, param sweep"""
 import pandas as pd
 import numpy as np
 from itertools import product
+import time
 
-# ── TA helpers ──────────────────────────────────────────────────────────────
+# ── TA helpers (same as vibe_backtest_runner.py) ──────────────────────────────
 def ema(s, n):
     return s.ewm(alpha=1/n, adjust=False).mean()
 
@@ -21,7 +22,6 @@ def fisher(h, l, p=10):
 
 def fisher_sig(h, l, p=10):
     f = fisher(h, l, p)
-    median = f.rolling(9).median()
     return f.diff().apply(np.sign)
 
 def tema_sig(c, f=9, s=21):
@@ -39,10 +39,8 @@ def adx_ta(h, l, c, n=14):
     nl = (l.shift() - l).clip(lower=0)
     dmp = pl.where((pl > nh) & (pl > nl), other=0.0)
     dmn = (-pl).where((-pl > nh) & (-pl > nl), other=0.0)
-    adx = (100 - 100 / (1 + dmp.ewm(alpha=1/n, adjust=False).mean()
-                       / (dmn.ewm(alpha=1/n, adjust=False).mean() + 1e-9))
-           ).ewm(alpha=1/n, adjust=False).mean()
-    return adx
+    inner = dmp.ewm(alpha=1/n, adjust=False).mean() / (dmn.ewm(alpha=1/n, adjust=False).mean() + 1e-9)
+    return (100 - 100 / (1 + inner)).ewm(alpha=1/n, adjust=False).mean()
 
 def vol_ma(v, p=20, t=1.1):
     return (v / v.rolling(p).mean() > t).astype(int)
@@ -61,14 +59,12 @@ def rsi_ta(c, p=14):
 
 def macd_ta(c, f=12, s=26, sig=9):
     ml = ema(c, f) - ema(c, s)
-    sig_l = ema(ml, sig)
-    return ml, sig_l, ml - sig_l
+    return ml, ema(ml, sig), ml - ema(ml, sig)
 
 def stoch_ta(h, l, c, p=14):
     lo = l.rolling(p).min(); hi = h.rolling(p).max()
     k = 100 * (c - lo) / (hi - lo + 1e-9)
-    d = k.ewm(alpha=1/3, adjust=False).mean()
-    return k, d
+    return k, k.ewm(alpha=1/3, adjust=False).mean()
 
 def hull_ma(s, p=16):
     h = p // 2; sp = int(np.sqrt(p))
@@ -83,6 +79,33 @@ def hull_ma(s, p=16):
     if len(hull) < sp:
         return pd.Series(0, index=s.index)
     return hull.rolling(sp).apply(wmean, raw=True)
+
+def simulate(buy, sell, px_arr, cap=10000):
+    buy_arr = buy.values if hasattr(buy, 'values') else np.array(buy)
+    sell_arr = sell.values if hasattr(sell, 'values') else np.array(sell)
+    px_arr = px_arr.values if hasattr(px_arr, 'values') else np.array(px_arr)
+    cash, assets = cap, 0.0
+    entry_px = 0.0
+    trades = wins = losses = 0
+    peak = cap; max_dd = 0.0
+    for i in range(1, len(px_arr)):
+        if buy_arr[i] and assets == 0:
+            entry_px = px_arr[i]; assets = cash / entry_px; cash = 0.0; trades += 1
+        elif sell_arr[i] and assets > 0:
+            pnl = (px_arr[i] - entry_px) / entry_px
+            if pnl > 0: wins += 1
+            else: losses += 1
+            cash = assets * px_arr[i]
+            peak = max(peak, cash); max_dd = max(max_dd, (peak - cash) / peak)
+            assets = 0.0
+    final = cash if assets == 0 else assets * px_arr[-1]
+    ret = (final - cap) / cap * 100
+    pf = wins / losses if losses > 0 else (wins + 1)
+    return {
+        'ret': ret, 'win': wins, 'loss': losses, 'trades': trades,
+        'win_rate': wins / trades * 100 if trades > 0 else 0,
+        'max_dd': max_dd * 100, 'pf': pf
+    }
 
 # ── Strategy signal generators ──────────────────────────────────────────────
 def machete_bs(h, l, c, v, params):
@@ -153,38 +176,9 @@ def scalp_bs(h, l, c, v, params):
     sell = cb_sell.sum(axis=1) >= p.get('min_confirmations_sell', 4)
     return buy, sell
 
-def simulate(buy, sell, px, cap=10000):
-    px_arr = px.values if hasattr(px, 'values') else np.array(px)
-    buy_arr = buy.values if hasattr(buy, 'values') else np.array(buy)
-    sell_arr = sell.values if hasattr(sell, 'values') else np.array(sell)
-    cash, assets = cap, 0.0
-    entry_px = 0.0
-    trades = wins = losses = 0
-    peak = cap; max_dd = 0.0
-    for i in range(1, len(px_arr)):
-        if buy_arr[i] and assets == 0:
-            entry_px = px_arr[i]; assets = cash / entry_px; cash = 0.0; trades += 1
-        elif sell_arr[i] and assets > 0:
-            pnl = (px_arr[i] - entry_px) / entry_px
-            if pnl > 0: wins += 1
-            else: losses += 1
-            cash = assets * px_arr[i]
-            peak = max(peak, cash); max_dd = max(max_dd, (peak - cash) / peak)
-            assets = 0.0
-    final = cash if assets == 0 else assets * px_arr[-1]
-    ret = (final - cap) / cap * 100
-    return {
-        'ret': ret, 'win': wins, 'loss': losses, 'trades': trades,
-        'win_rate': wins / trades * 100 if trades > 0 else 0,
-        'max_dd': max_dd * 100
-    }
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-PAIRS = ['SOL_USDT', 'ADA_USDT', 'DOGE_USDT']
-DATA_DIR = '/root/Crypto_Sniper/multi_pair_data'
-
+# ── Param grids ──────────────────────────────────────────────────────────────
 M_GRID = {
-    'adx_threshold': [20.0, 25.0],
+    'adx_threshold': [20.0, 25.0, 30.0],
     'min_confirmations_buy': [2, 3],
     'rmi_buy_min': [48.0, 52.0, 58.0],
     'sr_proximity_pct': [0.5, 1.0, 2.0],
@@ -201,15 +195,23 @@ def grid_combos(grid):
     keys = list(grid.keys()); values = list(grid.values())
     return [dict(zip(keys, combo)) for combo in product(*values)]
 
-print("=== SOL/ADA/DOGE BACKTEST (10-day data) ===\n")
+# ── Main ─────────────────────────────────────────────────────────────────────
+PAIRS = ['SOL_USDT', 'ADA_USDT', 'DOGE_USDT']
+DATA_DIR = str(_REPO / 'multi_pair_data')
+
+print("=== FULL 6-MONTH BACKTEST — SOL/ADA/DOGE ===\n")
+t0 = time.time()
+
 for pair in PAIRS:
     df = pd.read_csv(f'{DATA_DIR}/{pair}_15m.csv')
     df['trade_date'] = pd.to_datetime(df['trade_date'])
     h, l, c, v = df['high'], df['low'], df['close'], df['volume']
+    t1 = time.time()
     print(f"📊 {pair} | {len(df)} candles {df['trade_date'].iloc[0].date()} → {df['trade_date'].iloc[-1].date()}")
 
     m_combos = grid_combos(M_GRID)
     s_combos = grid_combos(S_GRID)
+    print(f"  Machete {len(m_combos)} combos, Scalp+ {len(s_combos)} combos")
 
     best_m = {'ret': -999}
     for params in m_combos:
@@ -225,9 +227,12 @@ for pair in PAIRS:
         if r['ret'] > best_s['ret']:
             best_s = {**r, 'params': params}
 
-    m_win = 'MACHETE' if best_m['ret'] > best_s['ret'] else 'SCALP+'
-    print(f"  MACHETE | Ret={best_m['ret']:.2f}% | Win={best_m['win_rate']:.1f}% | {best_m['trades']}tr")
-    print(f"  SCALP+  | Ret={best_s['ret']:.2f}% | Win={best_s['win_rate']:.1f}% | {best_s['trades']}tr")
-    print(f"  🏅 Winner: {m_win}\n")
+    winner = 'MACHETE' if best_m['ret'] > best_s['ret'] else 'SCALP+'
+    best = best_m if winner == 'MACHETE' else best_s
 
-print("=== DONE ===")
+    print(f"  MACHETE | Ret={best_m['ret']:.2f}% | Win={best_m['win_rate']:.1f}% | PF={best_m['pf']:.2f} | {best_m['trades']}tr | {best_m['params']}")
+    print(f"  SCALP+  | Ret={best_s['ret']:.2f}% | Win={best_s['win_rate']:.1f}% | PF={best_s['pf']:.2f} | {best_s['trades']}tr | {best_s['params']}")
+    print(f"  🏅 Winner: {winner} ({best['ret']:.2f}%)\n")
+    print(f"  ⏱️ {pair} done in {time.time()-t1:.1f}s")
+
+print(f"\n=== ALL DONE in {time.time()-t0:.1f}s ===")

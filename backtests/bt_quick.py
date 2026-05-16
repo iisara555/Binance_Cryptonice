@@ -3,13 +3,13 @@
 import pandas as pd
 import numpy as np
 import sys, os
-sys.path.insert(0, '/root/Crypto_Sniper')
+sys.path.insert(0, str(_REPO))
 
 from strategies.machete_v8b_lite import MacheteV8bLite
 from strategies.simple_scalp_plus import SimpleScalpPlus
 
 PAIRS = ['SOL_USDT', 'ADA_USDT', 'DOGE_USDT']
-DATA_DIR = '/root/Crypto_Sniper/multi_pair_data'
+DATA_DIR = str(_REPO / 'multi_pair_data')
 
 def load_csv(pair):
     df = pd.read_csv(f'{DATA_DIR}/{pair}_15m.csv')

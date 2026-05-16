@@ -6,8 +6,8 @@ Optimized for speed: reduced param grid, smaller data fetch.
 
 import sys, os, itertools, warnings
 warnings.filterwarnings('ignore')
-os.chdir('/root/Crypto_Sniper')
-sys.path.insert(0, '/root/Crypto_Sniper')
+os.chdir(_REPO)
+sys.path.insert(0, str(_REPO))
 
 import numpy as np
 import pandas as pd

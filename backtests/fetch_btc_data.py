@@ -43,7 +43,7 @@ df = pd.DataFrame(all_candles, columns=['timestamp','open','high','low','close',
 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 df = df.set_index('timestamp').sort_index()
 
-csv_path = '/root/Crypto_Sniper/btc_15m_vibe.csv'
+csv_path = str(_REPO / 'btc_15m_vibe.csv')
 df.to_csv(csv_path)
 print(f"Saved to {csv_path}")
 print(f"Range: {df.index[0]} → {df.index[-1]}")

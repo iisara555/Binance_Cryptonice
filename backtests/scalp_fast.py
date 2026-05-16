@@ -191,8 +191,8 @@ def grid_combos(grid):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 DATA = {
-    'BTC': '/root/Crypto_Sniper/btc_15m_vibe.csv',
-    'ETH': '/root/Crypto_Sniper/multi_pair_data/ETH_USDT_15m.csv',
+    'BTC': str(_REPO / 'btc_15m_vibe.csv'),
+    'ETH': str(_REPO / 'multi_pair_data/ETH_USDT_15m.csv'),
 }
 
 print("=== SCALP+ WIN-RATE OPTIMIZE — 15m BTC & ETH ===\n")

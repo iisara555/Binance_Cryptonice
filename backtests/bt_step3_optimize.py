@@ -4,8 +4,8 @@ Step 3: Aggressive parameter optimization for both strategies on 15m data.
 Fixes: primary_timeframe forced to '15m', lowered barriers.
 """
 import sys, os, itertools, time, json
-os.chdir('/root/Crypto_Sniper')
-sys.path.insert(0, '/root/Crypto_Sniper')
+os.chdir(_REPO)
+sys.path.insert(0, str(_REPO))
 
 import numpy as np
 import pandas as pd
@@ -16,7 +16,7 @@ from strategies.machete_v8b_lite import MacheteV8bLite
 from strategies.simple_scalp_plus import SimpleScalpPlus
 
 # ── Load full data ────────────────────────────────────────────────────────────
-raw = pd.read_csv('/root/Crypto_Sniper/backtest_data_15m.csv', index_col='timestamp', parse_dates=True)
+raw = pd.read_csv(str(_REPO / 'backtest_data_15m.csv'), index_col='timestamp', parse_dates=True)
 print(f"[DATA] Total available: {len(raw)} candles ({raw.index[0]} → {raw.index[-1]})")
 
 # Use all data this time — strategies need ~50-80 min bars warmup
