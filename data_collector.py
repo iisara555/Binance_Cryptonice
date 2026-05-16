@@ -1,1 +1,0 @@
-from bot.data_collector import *  # noqa: F401,F403

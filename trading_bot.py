@@ -1,1 +1,0 @@
-from bot.trading_bot import *  # noqa: F401,F403

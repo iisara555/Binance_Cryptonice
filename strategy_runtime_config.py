@@ -1,1 +1,0 @@
-from bot.strategy_runtime_config import *  # noqa: F401,F403

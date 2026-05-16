@@ -1,1 +1,0 @@
-from core.project_paths import *  # noqa: F401,F403

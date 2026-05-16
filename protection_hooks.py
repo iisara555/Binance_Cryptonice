@@ -1,1 +1,0 @@
-from bot.protection_hooks import *  # noqa: F401,F403
